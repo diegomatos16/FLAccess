@@ -1,0 +1,25 @@
+# Build output
+**/bin/
+**/obj/
+release/
+
+# Local research environments and caches
+.python/
+.prism-python-test/
+**/__pycache__/
+*.pyc
+vendor-downloads/
+
+# Local game diagnostics and captures
+*.log
+pes_a11y_speech.txt
+pes_a11y_capture.txt
+capture-*.bin
+capture-*.txt
+
+# Editor and OS files
+.vs/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
