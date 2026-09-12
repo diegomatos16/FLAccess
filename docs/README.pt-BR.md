@@ -1,13 +1,13 @@
-# Scanner de acessibilidade do PES / Football Life
+# FLAccess
 
-Versão: **0.1.4**  
-Data do pacote: **29 de agosto de 2026**
+Versão publicada: **0.1.5**  
+Data: **11 de setembro de 2026**
 
 ## Objetivo
 
-Este projeto pesquisa acessibilidade de menus sem OCR para o SP Football Life 2026, baseado no PES 2021. Ele captura textos e sinais de foco diretamente das estruturas internas do jogo, usando um módulo Lua do Sider, e os envia ao NVDA por meio do Prism. Se nenhum leitor compatível estiver ativo, o Prism tenta usar o Microsoft SAPI.
+Este projeto pesquisa acessibilidade de menus sem OCR para o SP Football Life 2026, baseado no PES 2021. Ele captura textos e sinais de foco diretamente das estruturas internas do jogo, usando um módulo Lua do Sider, e os envia ao leitor de telas pela API C nativa do Prism. Se nenhum leitor compatível estiver ativo, usa o Microsoft SAPI.
 
-A versão 0.1.4 é experimental. Ela torna partes dos menus falantes, incluindo a seleção correta de ligas e clubes, mas ainda não oferece acessibilidade completa às partidas.
+A versão 0.1.5 é experimental. Ela torna partes dos menus falantes, incluindo a seleção correta de ligas e clubes, mas ainda não oferece acessibilidade completa às partidas. O Plano de jogo não é considerado acessível nesta versão e continuará sendo investigado na 0.1.6.
 
 ## Instalação do pacote pronto
 
@@ -15,30 +15,40 @@ Pré-requisitos:
 
 - SP Football Life 2026 com o executável compatível `FL_2026.exe`;
 - Sider funcional;
-- Windows x64 com o runtime do .NET 8;
-- NVDA recomendado, embora o bridge possa selecionar outro backend oferecido pelo Prism.
+- Windows x64;
+- leitor de telas compatível opcional; sem leitor ativo, o mod usa SAPI.
 
 Procedimento:
 
 1. Feche o jogo e o Sider.
 2. Faça backup da pasta `SiderAddons`.
-3. Copie o conteúdo da pasta `SiderAddons` do pacote para a `SiderAddons` da instalação do jogo.
-4. Acrescente ao bloco `[sider]` de `SiderAddons/sider.ini`:
+3. Copie o `sider.dll` do pacote para `SiderAddons`, substituindo o DLL 7.3.3.
+4. Copie a pasta `modules` do pacote para `SiderAddons`, mesclando-a com
+   `SiderAddons/modules`.
+5. Acrescente ao bloco `[sider]` de `SiderAddons/sider.ini`:
 
 ```ini
-lua.module = "pes_a11y_menu_string_probe.lua"
+lua.module = "FLAccess.lua"
 ```
 
-5. Inicie o jogo pelo fluxo normal do Sider e mantenha o NVDA aberto.
+6. Inicie o jogo pelo fluxo normal do Sider. O Prism escolherá automaticamente
+   um leitor compatível ou SAPI.
 
-O bridge é iniciado automaticamente depois que o jogo começa a renderizar. Não é necessário abrir um terminal nem executar `start-pes-a11y.cmd` manualmente. O script permanece apenas como ferramenta de diagnóstico.
+O módulo carrega `prism.dll` diretamente dentro do jogo depois que a renderização
+começa. Não há programa auxiliar, terminal, CMD ou requisito do .NET.
 
 ## O que foi confirmado
 
 - carregamento automático pelo Sider;
-- inicialização e encerramento automáticos do bridge junto com o jogo;
-- fala pelo NVDA usando Prism;
-- fallback SAPI implementado;
+- inicialização automática do Prism junto com o jogo;
+- seleção automática entre os leitores registrados pelo Prism;
+- troca para outro leitor ou SAPI quando o leitor ativo é fechado;
+- detecção de um leitor iniciado enquanto SAPI está ativo;
+- leitura do texto de todos os módulos que produzem um painel textual do Sider;
+- leitura completa na primeira abertura de um painel e, nas mudanças seguintes,
+  anúncio apenas da opção selecionada ou do conteúdo novo;
+- painel do mod em português quando o texto do jogo está em português do Brasil
+  ou de Portugal; inglês nos demais idiomas;
 - captura interna de strings UTF-8, sem OCR;
 - leitura do menu principal e de seus tooltips no fluxo testado;
 - leitura de rótulos, valores e mudanças laterais em sliders de áudio;
@@ -46,11 +56,15 @@ O bridge é iniciado automaticamente depois que o jogo começa a renderizar. Nã
 - leitura parcial de opções e valores nos ajustes do controle e nas configurações gerais;
 - anúncio apenas do novo valor em mudanças laterais reconhecidas;
 - leitura de tooltips após uma pequena pausa em telas compatíveis;
+- opção persistente `Ler tooltips: Sim/Não`; `6` e `7` navegam, `9` e `0`
+  alteram a opção, e `8` restaura o padrão;
+- modo de diagnóstico seguro no mesmo painel. Ele registra apenas mudanças
+  estáveis de foco e de sliders, sem despejo contínuo de memória;
 - leitura de algumas caixas de diálogo `Sim`/`Não`;
 - leitura nativa e sincronizada da liga realmente selecionada;
 - leitura nativa do clube realmente selecionado, incluindo nomes padrão e nomes alternativos/modificados;
 - seleção de ligas e clubes confirmada na Premier League e no Brasileirão;
-- limpeza do arquivo de fala ao iniciar e redução de anúncios repetidos ou pertencentes à tela anterior.
+- redução de anúncios repetidos ou pertencentes à tela anterior.
 
 ## Cobertura experimental e limitações
 
@@ -61,7 +75,15 @@ Os testes mais recentes mostraram que a leitura ainda pode deixar de acompanhar 
 - a seleção horizontal `Em casa`, `Neutro` e `Fora` funcionou no fluxo testado, mas combinações com vários controles ainda precisam de cobertura mais ampla;
 - a leitura nativa de ligas e clubes foi validada no fluxo de amistoso testado; outros modos ainda precisam de testes completos;
 - a seleção do time visitante ainda precisa ser retestada com o novo leitor nativo de clubes;
-- itens da tela pré-partida ainda não têm cobertura estável;
+- a lista de ações da pré-partida agora trata o foco múltiplo observado na
+  primeira entrada, mas ainda precisa de validação em mais modos;
+- o Plano de jogo permanece quebrado e imprevisível: jogadores e formações
+  animados compartilham sinais de foco com o menu, podendo silenciar ou atrasar
+  as opções da tela principal e dos submenus;
+- em `Escalação/Editar posição`, o jogador selecionado, a separação entre
+  titulares e reservas e a leitura de atributos ainda não são confiáveis;
+- a cobertura do Plano de jogo deve ser tratada apenas como pesquisa interna na
+  0.1.5; a investigação estrutural continuará na 0.1.6;
 - alguns menus de configurações leem apenas a tela seguinte ou apenas valores, sem o rótulo;
 - idiomas, câmeras, velocidade da partida e diálogos usam implementações diferentes e têm cobertura parcial;
 - objetos de telas anteriores podem continuar vivos na memória, causando atraso ou anúncio incorreto apesar das proteções existentes;
@@ -74,28 +96,42 @@ Os testes mais recentes mostraram que a leitura ainda pode deixar de acompanhar 
 FL_2026.exe
   -> hooks nativos instalados pelo módulo Lua do Sider
   -> associação entre strings, widgets, valores e foco
-  -> SiderAddons/pes_a11y_speech.txt
-  -> bridge .NET/Prism
+  -> API C nativa de prism.dll
   -> NVDA, outro leitor compatível ou SAPI
 ```
 
-O módulo espera 120 quadros de `display_frame` antes de abrir o bridge. Isso evita o loader lock observado quando um processo externo era iniciado durante `init`. O bridge verifica o arquivo de passagem a cada 5 ms, interrompe a fala anterior durante navegação rápida e termina quando o processo do jogo termina.
+O módulo espera a renderização começar antes de carregar o Prism. A fala é
+entregue diretamente à DLL: navegação rápida interrompe a fala anterior e
+mensagens explicitamente enfileiradas, como o botão posterior a um diálogo,
+usam o modo de fila do próprio Prism.
 
 ## Estrutura do código
 
-- `modules/pes_a11y_menu_string_probe.lua`: módulo principal do Sider;
-- `prism-bridge/Program.cs`: bridge de fala;
-- `prism-bridge/PesA11yPrismBridge.csproj`: projeto .NET 8;
-- `prism-bridge/vendor/`: DLL do Prism e licenças de terceiros;
+- `modules/FLAccess.lua`: módulo principal do Sider;
+- `modules/FLAccess_gameplay.lua`: componente isolado reservado para futuros
+  recursos sonoros durante partidas; permanece inativo na versão 0.1.5;
+- `modules/FLAccess-Prism/`: `prism.dll` e licenças;
+- `sider-core/sider.cpp`: fonte do núcleo Sider 7.3.3 com o evento `overlay_content`;
+- `sider-core/util.asm`: correção oficial de alinhamento da pilha do Sider 7.3.4,
+  aplicada ao núcleo 7.3.3;
 - `tools/`: utilitários de análise estática usados na pesquisa;
 - `docs/`: documentação em português e inglês.
+- `docs/ARCHITECTURE.pt-BR.md`: limites entre leitor de telas, Prism e
+  jogabilidade.
 
 Arquivos criados em execução:
 
-- `SiderAddons/pes_a11y_speech.txt`: última mensagem entregue ao bridge;
 - `SiderAddons/sider.log`: log do Sider e do módulo;
+- `SiderAddons/modules/FLAccess.ini`: preferência persistente de tooltips.
+- `SiderAddons/FLAccess-diagnostic.log`: captura estrutural criada somente
+  quando o modo de diagnóstico é ativado.
 
-O antigo gatilho de captura extensa de widgets foi desativado na versão 0.1.4 para evitar bloqueios da thread de renderização.
+O antigo gatilho de captura extensa de widgets continua desativado para evitar
+bloqueios da thread de renderização. O diagnóstico novo registra ponteiro e
+vtable do widget selecionado, RVA do chamador que definiu o texto, campos de
+foco, rótulo, valor, tipo de controle, relações com widgets conhecidos e um
+inventário limitado dos textos recentes da tela. O arquivo é aberto somente
+quando ocorre um evento estável.
 
 ## Endereços identificados
 
@@ -116,39 +152,56 @@ Os RVAs abaixo pertencem somente ao executável estudado:
 
 O resolvedor retorna o ponteiro da string em `RAX`, o tamanho em `R8` e o ID de localização em `EDI`. Campos de foco genéricos dos widgets são reciclados e não identificam com segurança o item visível. Para ligas e clubes, a versão 0.1.4 intercepta os renderizadores nativos de nove células e anuncia o registro central, de índice `4`, que o próprio jogo trata como selecionado. Os demais controles continuam combinando estabilização, gerações de navegação, textos recentes e sinais específicos.
 
-## Compilação do bridge
-
-No diretório `prism-bridge`:
-
-```powershell
-dotnet publish -c Release -r win-x64 --self-contained false
-```
-
-Teste manual do backend:
-
-```powershell
-pes-a11y-prism-bridge.exe --test
-```
-
 ## Roteiro mínimo de teste
 
-1. Confirme que o menu principal e o tooltip são falados.
+1. Confirme que o menu principal e o tooltip são falados. Abra o painel do mod,
+   desligue `Ler tooltips` e confirme que os tooltips deixam de ser anunciados.
 2. Entre e volte dos submenus de Football Life, Liga Master e Configurações.
 3. Navegue lentamente e depois rapidamente, verificando atraso, silêncio, repetição e item fora de ordem.
 4. Teste os sliders de som e confirme que mudanças laterais anunciam somente o novo valor.
 5. Teste seleção de lado, ligas, clubes, time visitante, pré-partida, idiomas, câmera e velocidade.
-6. Em caso de falha, feche o jogo e preserve `SiderAddons/sider.log` antes de uma nova execução.
+   Na pré-partida, confirme especialmente que navegar não fecha mais o jogo.
+6. No estádio, confirme anúncios no formato `nome, seletor, valor`. Testes no
+   Plano de jogo são apenas exploratórios na 0.1.5: registre separadamente
+   silêncio, itens incorretos e jogadores anunciados fora de contexto para a
+   investigação da 0.1.6. O FLAccess não intercepta `R3`.
+7. Volte da pré-partida e teste `Sim` e `Não` no aviso de perda das configurações.
+8. Em caso de falha, feche o jogo e preserve `SiderAddons/sider.log` antes de uma nova execução.
+
+## Diagnóstico estrutural de uma tela
+
+1. Abra o painel do mod com `Espaço`.
+2. Use `6` ou `7` até ouvir `Modo de diagnóstico`.
+3. Use `9` ou `0` para ativar. O arquivo anterior é substituído nesse momento.
+4. Feche o Sider e reproduza apenas a tela problemática, passando uma vez por
+   cada opção relevante.
+5. Abra o painel novamente, selecione `Modo de diagnóstico` e use `9` ou `0`
+   para desativar.
+6. Envie `SiderAddons/FLAccess-diagnostic.log` junto com uma descrição das teclas
+   usadas e do que deveria ter sido falado.
+
+O modo começa sempre desligado após reiniciar o jogo. `8` restaura seu padrão,
+que é `Não`.
+
+Enquanto o painel do Sider estiver visível, a leitura do jogo e a coleta
+estrutural ficam pausadas para não misturar duas interfaces. Isso é esperado:
+feche o painel com `Espaço` depois de ativar o diagnóstico.
 
 ## Recuperação
 
 Os hooks vivem apenas na memória e desaparecem ao fechar o jogo. Para desativar o mod na próxima execução, comente a linha em `sider.ini`:
 
 ```ini
-; lua.module = "pes_a11y_menu_string_probe.lua"
+; lua.module = "FLAccess.lua"
 ```
 
 O mod não altera `FL_2026.exe`.
 
 ## Distribuição e licenças
 
-O pacote não inclui o jogo, o Sider nem arquivos proprietários do Football Life/PES. O Prism e seus componentes mantêm os avisos e licenças presentes em `prism-bridge/vendor`. O repositório ainda não declara uma licença própria para o código do mod; escolha uma antes de aceitar contribuições ou redistribuições externas.
+O pacote de teste 0.1.5 inclui um `sider.dll` 7.3.3 modificado, compilado a partir
+do código oficial no commit `112627c`. O repositório oficial não apresenta uma
+licença de redistribuição; portanto, esta compilação é apenas para teste local e
+não deve ser publicada sem autorização do mantenedor do Sider. O pacote não
+inclui o jogo nem arquivos proprietários do Football Life/PES. O Prism mantém
+os avisos e licenças presentes em `modules/FLAccess-Prism/licenses`.
