@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.1.6 - 2026-09-28
+
+Experimental release: text catalog and runtime lexicons are included. Game Plan
+navigation has improved but still needs bug fixes and in-game validation.
+
+- Capture long, catalogued presentation dialogs from the localization resolver
+  even when no ordinary UI text widget is assigned. Parameterized dialog and
+  instruction templates now keep their runtime roles. Recognize short
+  imperative catalog titles such as `Escolha sua aparência` automatically.
+- Keep focused rows eligible after title/dialog speech and preserve the full
+  reading hold during navigation. Fresh `0x104` focus after directional input
+  uses a faster path, including return to an earlier item. Shortened the
+  screen-title hold and speech deduplication window.
+- Suppress duplicate modal `OK` focus during the paragraph; announce its
+  queued action once as `Avançar`/`Next`. A title followed by an isolated OK
+  gets a brief grace period for the later dialog text hook. Generic mapped
+  label/value rows can speak their current value on first focus.
+- Prioritized modal dialog paragraphs across all speech routes. Focus captured
+  while a dialog is pending waits; focus changes during reading are coalesced
+  and delivered through Prism's non-interrupting queue afterward. New dialogs
+  displace stale focus commands from the same render slice, and rapid tutorial
+  pages retain their order.
+- Delayed newly focused dialog buttons briefly so the game's text hook can
+  arrive first. The extra `OK` cell in the Champions League group-assignment
+  grid is suppressed as a focus announcement. Added regression tests based on
+  the observed `sider.log` sequence for this screen.
+
+- Added a maintained offline behavior suite and an explicit in-game validation
+  plan. It covers text extraction, runtime roles, speech ordering, reset state,
+  overlay updates, Game Plan navigation, Cup groups, and Prism selection.
+- Fixed noninteractive status text being promoted to a message by the runtime
+  lexicon; stale queued speech surviving `context_reset`; and a forward Lua
+  reference that could stop Game Plan A/B navigation.
+- Synchronized maintained and deployed Lua modules. Both relevant screen
+  transitions now clear Cup group-table state.
+
+- Added compact Portuguese and English runtime text-role lexicons generated from
+  the complete `textAssets` catalog. FLAccess now uses exact game text metadata
+  for dialogs, controls, instructions, status messages, tooltips, menus and labels
+  before falling back to its existing runtime heuristics.
+
+- Announce the `Selecionar time` title used by Cup mode after its competition
+  settings are confirmed, and protect it from immediate interruption by the
+  transient OK control or first league row.
+- Read the Cup group-assignment introduction immediately and enable focused
+  group/team cells in its dense table, whose rows do not use the native league
+  or club carousel renderers.
+- Track the eight four-team group cells through directional navigation. Team
+  focus now announces `Grupo A` through `Grupo H` when movement crosses into a
+  different group, without repeating the group inside the same four-team cell.
+
 ## 0.1.5 - 2026-09-11
 
 Release status: Game Plan remains an unresolved experimental area. Its overview

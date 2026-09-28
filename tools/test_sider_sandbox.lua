@@ -54,6 +54,7 @@ setfenv(chunk, host)
 local module = assert(chunk())
 local event_count = 0
 local callbacks = {}
+local registration_count = 0
 local context = {
     custom_evt_rbx = 1,
     sider_dir = sider_dir,
@@ -62,17 +63,25 @@ local context = {
         return event_count
     end,
     register = function(name, callback)
+        assert(callbacks[name] == nil,
+            "duplicate Sider callback registration: " .. name)
         callbacks[name] = callback
+        registration_count = registration_count + 1
     end,
 }
 module.init(context)
 
 assert(event_count == 12, "unexpected custom event count: " .. event_count)
+assert(registration_count == 18,
+    "unexpected callback count: " .. registration_count)
 assert(callbacks.display_frame, "display_frame callback was not registered")
+assert(callbacks.context_reset and callbacks.overlay_content,
+    "screen reset or overlay callback was not registered")
 for _ = 1, 120 do
     callbacks.display_frame(context)
 end
 local prism_status
+local text_asset_languages = {}
 for _, message in ipairs(logs) do
     if message:find("native-prism-ready", 1, true) then
         prism_status = "ready"
@@ -80,9 +89,20 @@ for _, message in ipairs(logs) do
     elseif message:find("native-prism-no-backend", 1, true) then
         prism_status = "no-backend-in-headless-test"
     end
+    local language, count = message:match(
+        "text%-assets%-loaded language=(%a+) count=(%d+)")
+    if language then
+        text_asset_languages[language] = tonumber(count)
+    end
 end
 assert(prism_status,
     "native Prism boundary did not initialize during runtime test: " ..
     table.concat(logs, " | "))
+assert((text_asset_languages.pt or 0) > 10000,
+    "Portuguese runtime text assets were not loaded")
+assert((text_asset_languages.en or 0) > 10000,
+    "English runtime text assets were not loaded")
 print("SIDER_SANDBOX_RUNTIME_OK events=" .. event_count ..
-    " frames=120 prism=" .. prism_status)
+    " frames=120 prism=" .. prism_status ..
+    " text_pt=" .. text_asset_languages.pt ..
+    " text_en=" .. text_asset_languages.en)

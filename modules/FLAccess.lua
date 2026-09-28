@@ -19,6 +19,10 @@ local a11y = {
     previous_value_key = 0x39, -- 9
     next_value_key = 0x30, -- 0
     read_tooltips = true,
+    use_text_assets = true,
+    text_asset_roles = {pt = {}, en = {}},
+    text_asset_templates = {pt = {}, en = {}},
+    text_asset_counts = {pt = 0, en = 0},
     diagnostic_mode = false,
     selected_option = 1,
     option_count = 2,
@@ -59,12 +63,28 @@ local a11y = {
     sider_dir = nil,
     ui_text_caller_by_widget = {},
     dialog_button_queued_for_message = false,
+    pending_modal_button_text = nil,
+    pending_message_widget_key = nil,
+    modal_message_backlog = {},
+    deferred_modal_announcement = nil,
+    last_modal_message_text = nil,
+    modal_navigation_last_ms = nil,
+    modal_dialog_start_frame = -10000,
+    nvda_stop_requested = false,
+    transition_old_focus_texts = nil,
+    transition_guard_until_ms = 0,
+    skip_hint_last_frame = -10000,
+    side_last_user = nil,
+    title_pending_first_item = nil,
+    title_pending_first_item_until_ms = 0,
+    last_screen_title_frame = -10000,
     ui_language = "en",
     ui_language_locked = false,
     sider_overlay_text_by_module = {},
     pre_match_active = false,
     game_plan_active = false,
     game_plan_main_surface = false,
+    game_plan_entry_requested = false,
     game_plan_context = nil,
     game_plan_announced_context = nil,
     game_plan_last_focus_text = nil,
@@ -104,6 +124,8 @@ local a11y = {
     game_plan_basic_menu_heading_widget = nil,
     game_plan_basic_menu_heading_text = nil,
     game_plan_basic_menu_heading_due_frame = nil,
+    game_plan_menu_probe_due_frame = nil,
+    game_plan_menu_probe_action = nil,
     game_plan_lineup_due_ms = nil,
     game_plan_lineup_input = nil,
     game_plan_lineup_generation_frame = -10000,
@@ -120,6 +142,12 @@ local a11y = {
     stadium_rows = {},
     confirmation_dialog_until_frame = 0,
     pre_match_notice_text = nil,
+    cup_group_table_active = false,
+    cup_group_cell_by_widget = {},
+    cup_group_current_cell = nil,
+    cup_group_last_announced = nil,
+    cup_group_last_navigation_frame = -10000,
+    screen_title_hold_until_ms = 0,
     pre_match_actions = {
         ["Início"] = true,
         ["Plano de jogo"] = true,
@@ -188,6 +216,7 @@ local process_base
 local process_base_u64
 local readable
 local read_u64
+local speak
 local seen = {}
 local unique_count = 0
 local widgets = {}
@@ -358,6 +387,14 @@ a11y.game_plan_roster_contexts = {
 a11y.game_plan_edit_contexts = {
     ["Escalação/Editar posição"] = true,
     ["Team Sheet/Edit Position"] = true,
+}
+a11y.game_plan_cycling_choices = {
+    ["Plano de jogo normal"] = true,
+    ["Escalação/Editar posição"] = true,
+    ["Configurações táticas básicas"] = true,
+    ["Normal Game Plan"] = true,
+    ["Team Sheet/Edit Position"] = true,
+    ["Basic Tactical Settings"] = true,
 }
 a11y.game_plan_menu_items = {
     ["Configurações táticas básicas"] = true,
@@ -571,13 +608,117 @@ function a11y.record_game_plan_input(action, source)
     a11y.diagnostic_last_input_action = action
     a11y.diagnostic_last_input_source = source
     a11y.diagnostic_last_input_frame = frame
-    if action == "up" or action == "down"
-            or action == "left" or action == "right" then
+    if action == "A" and last_selected_ui_entry
+            and (last_selected_ui_entry.text == "Plano de jogo"
+                or last_selected_ui_entry.text == "Game Plan") then
+        a11y.game_plan_entry_requested = true
+    elseif action == "B" or action == "escape" then
+        a11y.game_plan_entry_requested = false
+    end
+    if action == "A" and last_selected_ui_entry then
+        local selected_text = last_selected_ui_entry.text
+        if selected_text == "OK" or selected_text == "Confirmar"
+                or selected_text == "Avançar"
+                or selected_text == "Concordo."
+                or selected_text == "I agree." then
+            local old_texts = {}
+            for _, entry in pairs(ui_focus_widgets) do
+                old_texts[entry.text] = true
+            end
+            a11y.transition_old_focus_texts = old_texts
+            a11y.transition_guard_until_ms =
+                tonumber(ffi.C.GetTickCount64()) + 30000
+            a11y.native_speech_queue = {}
+            a11y.native_speech_first = 1
+            a11y.native_speech_last = 0
+            a11y.deferred_modal_announcement = nil
+        end
+    end
+    local directional = action == "up" or action == "down"
+        or action == "left" or action == "right"
+    if directional and a11y.prism_backend_name == "NVDA" then
+        if pending_message_text == nil
+                and (tonumber(ffi.C.GetTickCount64())
+                    < modal_focus_hold_until_ms
+                    or a11y.title_pending_first_item) then
+            modal_focus_hold_until_ms = 0
+            a11y.screen_title_hold_until_ms = 0
+            a11y.title_pending_first_item = nil
+            a11y.deferred_modal_announcement = nil
+            a11y.last_modal_message_text = nil
+            a11y.nvda_stop_requested = true
+            a11y.native_speech_queue = {}
+            a11y.native_speech_first = 1
+            a11y.native_speech_last = 0
+            a11y.reset_focus_reuse_state()
+            dialog_focus_candidate = nil
+            last_dialog_announcement = nil
+            a11y.game_plan_last_focus_text = nil
+        end
+    elseif directional and pending_message_text == nil
+            and frame > modal_message_spoken_frame
+            and tonumber(ffi.C.GetTickCount64()) < modal_focus_hold_until_ms then
+        local now_ms = tonumber(ffi.C.GetTickCount64())
+        if a11y.modal_navigation_last_ms
+                and now_ms - a11y.modal_navigation_last_ms >= 650 then
+            -- Keep the conservative second-burst fallback for SAPI and other
+            -- backends where the NVDA-specific interruption is unavailable.
+            modal_focus_hold_until_ms = 0
+            a11y.deferred_modal_announcement = nil
+            a11y.last_modal_message_text = nil
+            a11y.reset_focus_reuse_state()
+            dialog_focus_candidate = nil
+            last_dialog_announcement = nil
+            a11y.game_plan_last_focus_text = nil
+        end
+        a11y.modal_navigation_last_ms = now_ms
+    end
+    if action == "A" and pending_message_text == nil
+            and #a11y.modal_message_backlog == 0
+            and a11y.last_modal_message_text
+            and not a11y.is_instruction_message(
+                a11y.last_modal_message_text) then
+        -- An explicit confirmation leaves a finished dialog. Do not let its
+        -- estimated reading time mute the next list or control. Paged
+        -- instructions keep their hold and remain queued in order.
+        modal_focus_hold_until_ms = 0
+        a11y.deferred_modal_announcement = nil
+        a11y.last_modal_message_text = nil
+        a11y.modal_navigation_last_ms = nil
+        a11y.reset_focus_reuse_state()
+        dialog_focus_candidate = nil
+        last_dialog_announcement = nil
+        a11y.game_plan_last_focus_text = nil
+    end
+    if directional then
         a11y.navigation_frame = frame
         a11y.navigation_action = action
+        if a11y.game_plan_active
+                and (a11y.game_plan_context ==
+                        "Menu de configuração básica"
+                    or a11y.game_plan_context ==
+                        "Basic Settings Menu") then
+            a11y.game_plan_menu_probe_due_frame = frame + 3
+            a11y.game_plan_menu_probe_action = action
+        end
+    elseif action == "B" or action == "escape" then
+        -- A fast return must not treat reused destination widgets as read.
+        a11y.reset_focus_reuse_state()
+        a11y.game_plan_last_focus_text = nil
     end
     if not a11y.game_plan_active then return end
-    if action == "A" and a11y.game_plan_last_menu_focus then
+    if action == "A" and a11y.game_plan_basic_prompt_active
+            and last_selected_ui_entry
+            and a11y.game_plan_basic_prompt_items[
+                last_selected_ui_entry.text] then
+        -- The prompt is gone after confirmation. Its old widgets and focus
+        -- bits must not keep winning over the following Game Plan menu.
+        a11y.game_plan_basic_prompt_active = false
+        a11y.game_plan_last_menu_focus = nil
+        a11y.reset_focus_reuse_state()
+    end
+    if action == "A" and a11y.game_plan_last_menu_focus
+            and not a11y.game_plan_basic_prompt_active then
         -- Several Game Plan sub-screens do not reuse the Basic Settings title
         -- widget. The command confirmed by the user is therefore the most
         -- reliable context transition signal.
@@ -586,7 +727,7 @@ function a11y.record_game_plan_input(action, source)
         a11y.game_plan_formation_active = false
         a11y.game_plan_announced_context = nil
         a11y.game_plan_last_focus_text = nil
-        reset_focus_reuse_state()
+        a11y.reset_focus_reuse_state()
     elseif (action == "B" or action == "escape")
             and (a11y.game_plan_context == "Alterar formação"
                 or a11y.game_plan_context == "Change Formation") then
@@ -596,7 +737,7 @@ function a11y.record_game_plan_input(action, source)
         a11y.game_plan_announced_context = nil
         a11y.game_plan_last_focus_text = nil
         a11y.game_plan_last_menu_focus = nil
-        reset_focus_reuse_state()
+        a11y.reset_focus_reuse_state()
     end
     if a11y.game_plan_context == "Configurações táticas básicas"
             or a11y.game_plan_context == "Basic Tactical Settings" then
@@ -618,7 +759,7 @@ function a11y.record_game_plan_input(action, source)
             a11y.game_plan_active_tactical_frame = -10000
             active_control_row = nil
             active_controller_label = nil
-            reset_focus_reuse_state()
+            a11y.reset_focus_reuse_state()
             a11y.game_plan_last_focus_text = nil
             a11y.game_plan_announced_context = nil
         end
@@ -648,6 +789,84 @@ function a11y.record_game_plan_input(action, source)
             a11y.diagnostic_text(player and player.position),
             tonumber(ffi.C.GetTickCount64()) <=
                 a11y.game_plan_attribute_panel_until_ms and "open" or "closed"),
+        "",
+    })
+end
+
+function a11y.record_game_plan_menu_probe()
+    local due = a11y.game_plan_menu_probe_due_frame
+    if not due or frame < due then return end
+    a11y.game_plan_menu_probe_due_frame = nil
+    if not a11y.game_plan_active
+            or (a11y.game_plan_context ~= "Menu de configuração básica"
+                and a11y.game_plan_context ~= "Basic Settings Menu") then
+        return
+    end
+    local recent = {}
+    local parents = {}
+    local selected_text, selected_key, selected_age
+    for key, entry in pairs(ui_focus_widgets) do
+        local age = frame - (entry.last_seen or frame)
+        if age <= 8 and a11y.game_plan_cycling_choices[entry.text]
+                and not a11y.game_plan_title_widgets[key]
+                and a11y.widget_internal_name(entry.address) == "text"
+                and (not selected_age or age < selected_age) then
+            selected_text, selected_key, selected_age = entry.text, key, age
+        end
+        if a11y.diagnostic_mode and age <= 30 then
+            local name = a11y.widget_internal_name(entry.address)
+            if name == "titleHeadlineText"
+                    or name == "titleHeadlineTextB" then
+                if readable(entry.address + 0x38, 8) then
+                    local parent = read_u64(memory.read(
+                        entry.address + 0x38, 8))
+                    if parent and parent >= 0x10000
+                            and readable(parent, 0x100) then
+                        parents[a11y.diagnostic_hex(parent)] = parent
+                    end
+                end
+            end
+            recent[#recent + 1] = string.format(
+                "%s %q name=%q age=%d",
+                key, a11y.diagnostic_text(entry.text),
+                a11y.diagnostic_text(name), age)
+        end
+    end
+    if selected_text then
+        -- These rotating choices never appear inside the Usar/Não usar
+        -- dialog, so their presence also proves that prompt is closed.
+        a11y.game_plan_basic_prompt_active = false
+        a11y.game_plan_last_menu_focus = selected_text
+        local announcement = a11y.game_plan_focus_speech(
+            selected_text, selected_key)
+        if announcement then speak(announcement) end
+    end
+    if not a11y.diagnostic_mode then return end
+    table.sort(recent)
+    local parent_fields = {}
+    for key, address in pairs(parents) do
+        local fields = {}
+        for offset = 0, 0xfc, 4 do
+            local value = memory.unpack(
+                "u32", memory.read(address + offset, 4))
+            if value ~= 0 then
+                fields[#fields + 1] = string.format(
+                    "+0x%x=%x", offset, value)
+            end
+        end
+        parent_fields[#parent_fields + 1] = key .. " {" ..
+            table.concat(fields, ",") .. "}"
+    end
+    table.sort(parent_fields)
+    a11y.diagnostic_sequence = a11y.diagnostic_sequence + 1
+    a11y.diagnostic_write({
+        string.format(
+            "EVENT %d frame=%d kind=game-plan-menu-probe action=%s context=%q",
+            a11y.diagnostic_sequence, frame,
+            a11y.diagnostic_text(a11y.game_plan_menu_probe_action),
+            a11y.diagnostic_text(a11y.game_plan_context)),
+        "recent_widgets={" .. table.concat(recent, "; ") .. "}",
+        "title_parents={" .. table.concat(parent_fields, "; ") .. "}",
         "",
     })
 end
@@ -958,12 +1177,20 @@ local function reset_message_state()
     recent_message_frame = -10000
     pending_message_text = nil
     pending_message_key = nil
+    a11y.pending_message_widget_key = nil
     pending_message_due_ms = nil
     last_announced_message_key = nil
     modal_focus_hold_until_ms = 0
+    a11y.last_modal_message_text = nil
+    a11y.modal_navigation_last_ms = nil
+    a11y.modal_dialog_start_frame = -10000
+    a11y.nvda_stop_requested = false
     last_modal_button_frame = -10000
     modal_message_spoken_frame = -10000
     instruction_message_locked = false
+    a11y.pending_modal_button_text = nil
+    a11y.modal_message_backlog = {}
+    a11y.deferred_modal_announcement = nil
     recent_heading_text = nil
     recent_heading_frame = -10000
     focused_control_hint = nil
@@ -976,12 +1203,13 @@ end
 
 local function reset_side_state()
     side_position = nil
+    a11y.side_last_user = nil
     side_screen_active = false
     side_widget_positions = {}
     side_widget_count = 0
 end
 
-local function reset_focus_reuse_state()
+function a11y.reset_focus_reuse_state()
     ui_focus_candidate_key = nil
     ui_focus_candidate_since = 0
     last_ui_focus_announcement = nil
@@ -992,12 +1220,17 @@ local function reset_focus_reuse_state()
     a11y.diagnostic_candidate_since = frame
 end
 
+function a11y.focus_widget_reused(previous_focus, text)
+    return previous_focus ~= nil and previous_focus.text ~= text
+        and frame - (previous_focus.last_seen or frame) > 30
+end
+
 local function reset_navigation_generation()
     ui_focus_widgets = {}
     ui_focus_widget_count = 0
     ui_focus_state = {}
     ui_focus_activated = {}
-    reset_focus_reuse_state()
+    a11y.reset_focus_reuse_state()
     last_selected_ui_entry = nil
     active_control_row = nil
     active_controller_label = nil
@@ -1013,6 +1246,12 @@ local function reset_navigation_generation()
     main_menu_tooltip_due_ms = nil
     main_menu_focus_guard_until = 0
     last_screen_title_key = nil
+    a11y.last_screen_title_frame = -10000
+    a11y.title_pending_first_item = nil
+    a11y.title_pending_first_item_until_ms = 0
+    a11y.transition_old_focus_texts = nil
+    a11y.transition_guard_until_ms = 0
+    a11y.skip_hint_last_frame = -10000
     last_controller_announcement = nil
     last_announced_control_row = nil
     last_announced_selector_label = nil
@@ -1043,6 +1282,8 @@ local non_control_labels = {
     ["Confirmar"] = true,
     ["Voltar"] = true,
     ["Início"] = true,
+    ["Conecte o controle."] = true,
+    ["Connect the controller."] = true,
 }
 local ui_focus_offsets = {
     -- 0x114/0x110 are used by the virtualized league and club lists.
@@ -1101,6 +1342,7 @@ ffi.cdef[[
     typedef int (__cdecl *FLACCESS_PRISM_BACKEND_INITIALIZE)(void *backend);
     typedef int (__cdecl *FLACCESS_PRISM_BACKEND_SPEAK)(
         void *backend, const char *text, bool interrupt);
+    typedef int (__cdecl *FLACCESS_PRISM_BACKEND_STOP)(void *backend);
     typedef struct {
         unsigned short wButtons;
         unsigned char bLeftTrigger;
@@ -1229,6 +1471,10 @@ function a11y.initialize_native_prism()
         end
         a11y.prism_functions[specification[1]] = fn
     end
+    -- Older Prism builds may lack these optional APIs. Navigation still uses
+    -- interrupting speak when they are unavailable.
+    a11y.prism_functions.backend_stop = a11y.prism_proc(
+        "prism_backend_stop", "FLACCESS_PRISM_BACKEND_STOP")
     local prism = a11y.prism_functions
     a11y.prism_context = prism.init(nil)
     if a11y.prism_context == nil then
@@ -1328,6 +1574,7 @@ local function game_is_foreground()
     return tonumber(foreground_process_id[0]) ==
         tonumber(ffi.C.GetCurrentProcessId())
 end
+a11y.game_is_foreground = game_is_foreground
 
 local function clean_text(text)
     -- PES formatting markers use control byte 0x11 plus two command bytes.
@@ -1431,6 +1678,90 @@ function a11y.detect_ui_language(text)
     end
 end
 
+function a11y.load_text_assets()
+    if not a11y.use_text_assets or not a11y.sider_dir then
+        return false
+    end
+    local loaded = false
+    for _, language in ipairs({"pt", "en"}) do
+        local path = a11y.sider_dir .. "\\modules\\FLAccess-text\\" ..
+            language .. ".tsv"
+        local file = io.open(path, "rt")
+        if file then
+            local roles = {}
+            local templates = {}
+            local count = 0
+            for line in file:lines() do
+                if line:sub(1, 1) ~= "#" then
+                    local role, text = line:match("^([^\t]+)\t(.+)$")
+                    if role and text and roles[text] == nil then
+                        roles[text] = role
+                        count = count + 1
+                        if (role == "dialog" or role == "instruction")
+                                and text:find("%%%d*%$?s") then
+                            local pieces = {}
+                            local position = 1
+                            local first_prefix = ""
+                            while true do
+                                local first, last = text:find(
+                                    "%%%d*%$?s", position)
+                                if not first then break end
+                                local literal = text:sub(position, first - 1)
+                                if #pieces == 0 then first_prefix = literal end
+                                pieces[#pieces + 1] = literal:gsub(
+                                    "([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1")
+                                position = last + 1
+                            end
+                            local suffix = text:sub(position)
+                            pieces[#pieces + 1] = suffix:gsub(
+                                "([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1")
+                            if #first_prefix + #suffix >= 15 then
+                                templates[#templates + 1] = {
+                                    role=role,
+                                    prefix=first_prefix,
+                                    suffix=suffix,
+                                    pattern="^" .. table.concat(pieces, ".+") .. "$",
+                                }
+                            end
+                        end
+                    end
+                end
+            end
+            file:close()
+            a11y.text_asset_roles[language] = roles
+            a11y.text_asset_templates[language] = templates
+            a11y.text_asset_counts[language] = count
+            loaded = true
+            log(string.format(
+                "[FLAccess] text-assets-loaded language=%s count=%d path=%q",
+                language, count, path))
+        else
+            log(string.format(
+                "[FLAccess] text-assets-missing language=%s path=%q",
+                language, path))
+        end
+    end
+    return loaded
+end
+
+function a11y.text_asset_role(text)
+    if not a11y.use_text_assets or not text or text == "" then
+        return nil
+    end
+    local roles = a11y.text_asset_roles[a11y.ui_language]
+    local role = roles and roles[text] or nil
+    if role or #text < 60 then return role end
+    for _, template in ipairs(a11y.text_asset_templates[a11y.ui_language]) do
+        if text:sub(1, #template.prefix) == template.prefix
+                and (#template.suffix == 0
+                    or text:sub(-#template.suffix) == template.suffix)
+                and text:match(template.pattern) then
+            return template.role
+        end
+    end
+    return nil
+end
+
 function a11y.load_config()
     local file = a11y.config_path and io.open(a11y.config_path, "rt") or nil
     if not file then
@@ -1441,6 +1772,9 @@ function a11y.load_config()
         if name == "read_tooltips" then
             value = value:lower()
             a11y.read_tooltips = value ~= "false" and value ~= "no" and value ~= "0"
+        elseif name == "use_text_assets" then
+            value = value:lower()
+            a11y.use_text_assets = value ~= "false" and value ~= "no" and value ~= "0"
         end
     end
     file:close()
@@ -1460,6 +1794,7 @@ function a11y.save_config()
     end
     file:write("# FLAccess settings\n")
     file:write("read_tooltips = ", a11y.read_tooltips and "true" or "false", "\n")
+    file:write("use_text_assets = ", a11y.use_text_assets and "true" or "false", "\n")
     file:close()
 end
 
@@ -1634,6 +1969,16 @@ local function control_label_from_tooltip(text)
         return "Efeitos sonoros do menu"
     elseif text:find("volume da música de fundo", 1, true) then
         return "Volume da música de fundo"
+    elseif text:find("volume da narração e dos comentários", 1, true) then
+        return "Volume dos comentários"
+    elseif text:find("sons e cantos da torcida", 1, true) then
+        return "Em jogo: Barulho da torcida"
+    elseif text:find("anúncios do sistema de som", 1, true) then
+        return "Em jogo: Anúncios do estádio"
+    elseif text:find("músicas do jogo tocadas nos estádios", 1, true) then
+        return "Em jogo: Músicas do estádio"
+    elseif text:find("sons do campo", 1, true) then
+        return "Em jogo: Sons do campo"
     elseif text:find("número de usuários participantes", 1, true) then
         return "Número de usuários"
     elseif text:find("nível de dificuldade das partidas", 1, true) then
@@ -1642,18 +1987,56 @@ local function control_label_from_tooltip(text)
         return "Duração da partida"
     elseif text:find("jogadores sofrem lesões", 1, true) then
         return "Lesões"
+    elseif text:find("configurações de câmera que serão usadas", 1, true) then
+        return "Configurações de câmera"
     end
     return nil
 end
 
 local function looks_like_message(text)
-    return not is_noninteractive_text(text) and not is_splash_text(text)
-        and (#text >= 55
+    if is_noninteractive_text(text) or is_splash_text(text) then
+        return false
+    end
+    local role = a11y.text_asset_role(text)
+    if role == "dialog" or role == "instruction" or role == "status"
+            or role == "tooltip-or-description" then
+        return true
+    elseif role == "control" or role == "dialog-button"
+            or role == "menu-item-or-title" or role == "label-or-name" then
+        return false
+    end
+    return (#text >= 55
         or (#text >= 28 and text:match("[%.%!%?]$") ~= nil)
     )
 end
 
+local function is_cup_group_message(text)
+    local lower = text:lower()
+    return lower:find("agrupamentos da fase de grupos", 1, true) ~= nil
+        or lower:find("group stage groups", 1, true) ~= nil
+        or lower:find("groupings for the group stage", 1, true) ~= nil
+end
+
+function a11y.activate_cup_group_table(reset_cells)
+    if a11y.cup_group_table_active and not reset_cells then return end
+    a11y.cup_group_table_active = true
+    a11y.cup_group_cell_by_widget = {}
+    a11y.cup_group_current_cell = nil
+    a11y.cup_group_last_announced = nil
+    a11y.cup_group_last_navigation_frame = -10000
+    a11y.reset_focus_reuse_state()
+end
+
+function a11y.is_cup_group_header(widget, text)
+    return text and (text:match("^Grupo [A-H]$")
+        or text:match("^Group [A-H]$"))
+        and a11y.widget_internal_name(widget) == "groupName" or false
+end
+
 function a11y.is_instruction_message(text)
+    if a11y.text_asset_role(text) == "instruction" then
+        return true
+    end
     local lower = text:lower()
     return lower:find("enquanto segura", 1, true) ~= nil
         or lower:find("mantendo pressionado", 1, true) ~= nil
@@ -1664,7 +2047,9 @@ function a11y.is_instruction_message(text)
 end
 
 local function is_modal_button(text)
-    return text == "Sim" or text == "Não" or text == "OK"
+    return text == "Concordo." or text == "I agree."
+        or a11y.text_asset_role(text) == "dialog-button"
+        or text == "Sim" or text == "Não" or text == "OK"
 end
 
 local function is_data_notice(text)
@@ -1719,7 +2104,30 @@ local function remember_message_text(text, widget_key)
     if is_modal_button(text) or is_noninteractive_text(text) then
         return
     end
+    if control_label_from_tooltip(text) then
+        -- Focus help belongs after its label/type/value, not in the modal
+        -- paragraph queue. The UI text hook schedules it as a tooltip.
+        return
+    end
+    local message_role = a11y.text_asset_role(text)
+    if message_role == "dialog" or message_role == "instruction" then
+        a11y.transition_old_focus_texts = nil
+        a11y.transition_guard_until_ms = 0
+    end
+    if a11y.pre_match_active and a11y.pre_match_notice_text == text then
+        -- The ready notice is redrawn in the background of pre-match
+        -- submenus. Re-queuing it on each draw can mute real navigation.
+        return
+    end
     local lower = text:lower()
+    local cup_group_message = is_cup_group_message(text)
+    if cup_group_message then
+        -- Cup group assignment is a focusable table, but unlike the league and
+        -- club carousels it does not pass through either native list renderer.
+        -- Reset the cell map after its introduction, including when the
+        -- structural group headers enabled the table earlier.
+        a11y.activate_cup_group_table(true)
+    end
     if lower:find("quer usar a configuração básica", 1, true)
             or lower:find("use basic settings", 1, true) then
         -- The prompt's Usar/Não usar widgets remain allocated after the
@@ -1784,7 +2192,11 @@ local function remember_message_text(text, widget_key)
         log(string.format(
             "[FLAccess] message-append text=%q",
             recent_message_text))
-        if is_data_notice(recent_message_text)
+        if (pending_message_text
+                and a11y.pending_message_widget_key == recent_message_widget_key
+                and recent_message_text:sub(1, #pending_message_text)
+                    == pending_message_text)
+                or is_data_notice(recent_message_text)
                 or frame - last_modal_button_frame <= 120 then
             queue_recent_message()
         elseif a11y.is_instruction_message(recent_message_text) then
@@ -1806,7 +2218,8 @@ local function remember_message_text(text, widget_key)
         log(string.format(
             "[FLAccess] message-candidate text=%q",
             recent_message_text))
-        if text:find("A partida começará quando os dois times", 1, true)
+        if cup_group_message
+                or text:find("A partida começará quando os dois times", 1, true)
                 or is_data_notice(recent_message_text)
                 or frame - last_modal_button_frame <= 120 then
             queue_recent_message()
@@ -1848,12 +2261,59 @@ queue_recent_message = function()
     end
     local key = (recent_message_widget_key or "") .. "\0" ..
         recent_message_text
+    local now_ms = tonumber(ffi.C.GetTickCount64())
     if key == last_announced_message_key then
+        return
+    end
+    if pending_message_text then
+        if pending_message_key == key then return end
+        if a11y.pending_message_widget_key == recent_message_widget_key
+                and recent_message_text:sub(1, #pending_message_text)
+                    == pending_message_text then
+            -- A dialog sentence can arrive in two UI text writes. Replace
+            -- the pending prefix instead of speaking prefix and full copy.
+            pending_message_text = recent_message_text
+            pending_message_key = key
+            pending_message_due_ms = now_ms + 40
+            return
+        end
+        for _, entry in ipairs(a11y.modal_message_backlog) do
+            if entry.key == key then return end
+        end
+        a11y.modal_message_backlog[#a11y.modal_message_backlog + 1] = {
+            text=recent_message_text,
+            key=key,
+        }
         return
     end
     pending_message_text = recent_message_text
     pending_message_key = key
-    pending_message_due_ms = tonumber(ffi.C.GetTickCount64()) + 40
+    a11y.pending_message_widget_key = recent_message_widget_key
+    pending_message_due_ms = now_ms
+        + (recent_message_text:match("[%.%!%?]$") and 40 or 160)
+    -- Any fresh message may own a paired Sim/Não confirmation. Require its
+    -- buttons to be rendered with this message before using their focus bits.
+    a11y.modal_dialog_start_frame = frame
+    a11y.confirmation_dialog_until_frame = frame + 900
+    a11y.modal_navigation_last_ms = nil
+    -- A newly detected dialog owns the next output. Drop focus announcements
+    -- captured earlier in this render slice before the text hook arrived.
+    local pending_title
+    if last_screen_title_key and frame - a11y.last_screen_title_frame <= 120 then
+        for index = a11y.native_speech_first,
+                a11y.native_speech_last do
+            local entry = a11y.native_speech_queue[index]
+            if entry and entry.text == last_screen_title_key then
+                pending_title = entry
+                break
+            end
+        end
+    end
+    a11y.native_speech_queue = pending_title and {pending_title} or {}
+    a11y.native_speech_first = 1
+    a11y.native_speech_last = pending_title and 1 or 0
+    a11y.deferred_modal_announcement = nil
+    a11y.pending_modal_button_text = nil
     pending_controller_tooltip = nil
     pending_controller_tooltip_label = nil
     controller_tooltip_due_ms = nil
@@ -1863,8 +2323,27 @@ queue_recent_message = function()
     main_menu_tooltip_due_ms = nil
 end
 
-local function speak(text, interrupt)
+function a11y.capture_resolved_dialog(text, text_id, caller_rva)
+    if caller_rva == 0xe4901d or not text or #text < 60
+            or control_label_from_tooltip(text) then
+        return false
+    end
+    local role = a11y.text_asset_role(text)
+    if role ~= "dialog" and role ~= "instruction" then
+        return false
+    end
+    remember_message_text(text, "resolved-dialog:" .. tostring(text_id))
+    queue_recent_message()
+    return true
+end
+
+speak = function(text, interrupt, modal)
     if not text or text == "" then
+        return
+    end
+    if a11y.cup_group_table_active
+            and (text == "OK, item selecionado"
+                or text == "OK, botão selecionado") then
         return
     end
     if a11y.game_plan_active then
@@ -1884,8 +2363,41 @@ local function speak(text, interrupt)
         return
     end
     local now_ms = tonumber(ffi.C.GetTickCount64())
-    if text == last_spoken_text and now_ms - last_spoken_ms < 800 then
+    if (text == "OK, item selecionado"
+            or text == "OK, botão selecionado")
+            and (pending_message_text
+                or (modal_message_spoken_frame > 0
+                    and now_ms < modal_focus_hold_until_ms + 1000)) then
         return
+    end
+    if text == last_spoken_text and now_ms - last_spoken_ms < 40 then
+        return
+    end
+    if pending_message_text and not modal then
+        a11y.deferred_modal_announcement = text
+        return
+    end
+    -- Prism has no completion callback. While a modal paragraph is expected
+    -- to be spoken, send later announcements to its non-interrupting queue.
+    if now_ms < modal_focus_hold_until_ms then
+        if interrupt ~= false and not modal then
+            -- Rapid focus changes during a paragraph should not leave every
+            -- obsolete item queued in Prism. Keep only the latest announcement.
+            a11y.deferred_modal_announcement = text
+            return
+        end
+        interrupt = false
+    elseif interrupt ~= false then
+        a11y.deferred_modal_announcement = nil
+    end
+    if a11y.title_pending_first_item then
+        if now_ms <= a11y.title_pending_first_item_until_ms
+                and text ~= a11y.title_pending_first_item then
+            -- The automatically focused first row must not interrupt the
+            -- title that was just submitted to the screen reader.
+            interrupt = false
+        end
+        a11y.title_pending_first_item = nil
     end
     speech_sequence = speech_sequence + 1
     local mode = interrupt == false and "queue" or "interrupt"
@@ -1945,21 +2457,84 @@ function a11y.flush_native_speech(now_ms)
     a11y.native_speech_last = 0
 end
 
-local function is_screen_title(text)
-    return text == "Escolha seu time"
+function a11y.stop_nvda_if_requested()
+    if not a11y.nvda_stop_requested then return end
+    a11y.nvda_stop_requested = false
+    if a11y.prism_backend_name == "NVDA" and a11y.prism_backend
+            and a11y.prism_functions
+            and a11y.prism_functions.backend_stop then
+        local result = a11y.prism_functions.backend_stop(
+            a11y.prism_backend)
+        if result ~= 0 then
+            log(string.format("[FLAccess] nvda-stop-failed error=%d", result))
+        end
+    end
+end
+
+local function is_screen_title(text, widget)
+    local role = a11y.text_asset_role(text)
+    local widget_name = widget and a11y.widget_internal_name(widget) or nil
+    if (widget_name == "title" or widget_name == "text_title")
+            and #text <= 80 and not text:find("%", 1, true)
+            and role ~= "control" and role ~= "dialog-button"
+            and role ~= "status" and role ~= "technical"
+            and not looks_like_message(text) then
+        return true
+    end
+    return (role == "menu-item-or-title" and #text <= 55
+            and not text:match("[%.%!%?]$")
+            and (text:match("^Escolha ") or text:match("^Escolher ")
+                or text:match("^Selecionar ")
+                or text:match("^Choose ") or text:match("^Select ")))
+        or text == "Selecionar time"
+        or text == "Selecionar Time"
+        or text == "Selecionar time."
+        or text == "Select Team"
+        or text == "Escolha seu time"
         or text == "Escolher seu time"
         or text == "Escolha o seu time"
 end
 
-local function announce_screen_title(text, widget_key)
-    if not is_screen_title(text) then
+local function announce_screen_title(text, widget_key, widget)
+    if not is_screen_title(text, widget) then
         return
     end
-    local key = (widget_key or "") .. "\0" .. text
-    if key ~= last_screen_title_key then
+    a11y.transition_old_focus_texts = nil
+    a11y.transition_guard_until_ms = 0
+    -- Returning from group assignment to team selection ends the table mode.
+    a11y.cup_group_table_active = false
+    a11y.screen_title_hold_until_ms =
+        tonumber(ffi.C.GetTickCount64()) + 500
+    local key = text
+    if key ~= last_screen_title_key
+            or frame - a11y.last_screen_title_frame > 120 then
         last_screen_title_key = key
+        a11y.last_screen_title_frame = frame
+        a11y.title_pending_first_item = nil
         speak(text)
+        a11y.title_pending_first_item = text
+        a11y.title_pending_first_item_until_ms =
+            tonumber(ffi.C.GetTickCount64()) + 2000
     end
+end
+
+function a11y.announce_skip_hint(text)
+    if not text or frame - a11y.skip_hint_last_frame < 300
+            or not a11y.game_is_foreground() then
+        return false
+    end
+    local lower = text:lower()
+    local skip_marker = text:find("<Pular>", 1, true)
+        or text:find("<Skip>", 1, true)
+        or (lower:find("options", 1, true)
+            and (lower:find("pular", 1, true)
+                or lower:find("skip", 1, true)))
+    if not skip_marker then return false end
+    a11y.skip_hint_last_frame = frame
+    speak(a11y.ui_language == "pt"
+        and "Pressione Options para pular."
+        or "Press Options to skip.")
+    return true
 end
 
 local function enqueue_startup_speech(text, duration_ms)
@@ -2202,6 +2777,19 @@ function a11y.read_msvc_string(object)
     return clean_text(memory.read(source, length))
 end
 
+function a11y.widget_internal_name(widget)
+    -- The UI text widget contains another MSVC string at +0x18. In captured
+    -- FL26 objects this is a stable engine-side name (teamName, btnH_str,
+    -- ok_text, setName), not the localized caption. Read it only for
+    -- diagnostics until its semantics are verified across more surfaces.
+    if not widget or widget < 0x10000 then return nil end
+    local name = a11y.read_msvc_string(widget + 0x18)
+    if name and #name <= 64 and name:match("^[%w_%.%-]+$") then
+        return name
+    end
+    return nil
+end
+
 local function current_row_label()
     if last_focused_id and widgets[last_focused_id] then
         return widgets[last_focused_id].text
@@ -2256,6 +2844,9 @@ local function ui_focus_speech(text)
     if text == "Em casa" or text == "Fora" or text == "Neutro" then
         return text .. ", opção selecionada"
     end
+    if text == "Concordo." or text == "I agree." then
+        return text:sub(1, -2) .. ", botão selecionado"
+    end
     if text == "Sim" or text == "Não"
             or a11y.game_plan_basic_prompt_items[text] then
         return text .. ", botão selecionado"
@@ -2284,6 +2875,82 @@ local function ui_focus_speech(text)
         return "Formation " .. text .. ", selected"
     end
     return text .. ", item selecionado"
+end
+
+a11y.cup_group_non_team_items = {
+    ["OK"] = true,
+    ["Confirmar"] = true,
+    ["Voltar"] = true,
+    ["Substituir"] = true,
+    ["Atualizar"] = true,
+    ["Aleatório"] = true,
+    ["Cancelar"] = true,
+    ["botão A"] = true,
+}
+
+function a11y.cup_group_team_speech(text, widget_key)
+    if not a11y.cup_group_table_active
+            or a11y.cup_group_non_team_items[text]
+            or text:match("^Grupo [A-H]$")
+            or text:match("^Group [A-H]$") then
+        return nil
+    end
+
+    local cell = a11y.cup_group_cell_by_widget[widget_key]
+    if not cell then
+        local current = a11y.cup_group_current_cell
+        local action = a11y.navigation_action
+        local recent_navigation = frame - a11y.navigation_frame <= 20
+            and a11y.navigation_frame ~=
+                a11y.cup_group_last_navigation_frame
+        if current then
+            cell = {group=current.group, row=current.row}
+            if recent_navigation then
+                if action == "left" and cell.group % 4 ~= 1 then
+                    cell.group = cell.group - 1
+                elseif action == "right" and cell.group % 4 ~= 0 then
+                    cell.group = cell.group + 1
+                elseif action == "up" then
+                    if cell.row > 1 then
+                        cell.row = cell.row - 1
+                    elseif cell.group > 4 then
+                        cell.group = cell.group - 4
+                        cell.row = 4
+                    end
+                elseif action == "down" then
+                    if cell.row < 4 then
+                        cell.row = cell.row + 1
+                    elseif cell.group <= 4 then
+                        cell.group = cell.group + 4
+                        cell.row = 1
+                    end
+                end
+            end
+        else
+            -- Group assignment opens on the first team in Group A.
+            cell = {group=1, row=1}
+        end
+        a11y.cup_group_cell_by_widget[widget_key] = cell
+    end
+
+    if frame - a11y.navigation_frame <= 20 then
+        a11y.cup_group_last_navigation_frame = a11y.navigation_frame
+    end
+    a11y.cup_group_current_cell = cell
+    local prefix = ""
+    if cell.group ~= a11y.cup_group_last_announced then
+        a11y.cup_group_last_announced = cell.group
+        local letter = string.char(string.byte("A") + cell.group - 1)
+        prefix = (a11y.ui_language == "pt" and "Grupo " or "Group ")
+            .. letter .. ". "
+    end
+    return prefix .. ui_focus_speech(text)
+end
+
+function a11y.ignore_cup_group_focus(text)
+    -- The group-assignment grid exposes an extra OK focus cell after its
+    -- final team. It is not a team and adds no useful navigation information.
+    return a11y.cup_group_table_active and text == "OK"
 end
 
 function a11y.game_plan_player_section(text, heading_widget_key)
@@ -2502,6 +3169,7 @@ end
 function a11y.process_game_plan_selected_heading(modal_focus_blocked)
     local due = a11y.game_plan_selected_heading_due_frame
     if not due or frame < due or modal_focus_blocked
+            or a11y.game_plan_main_surface
             or tonumber(ffi.C.GetTickCount64()) <=
                 a11y.game_plan_attribute_panel_until_ms then return false end
     a11y.game_plan_selected_heading_due_frame = nil
@@ -2793,6 +3461,7 @@ local function speak_side(user, position)
 end
 
 local function begin_side_screen(initial_position, widget_key, user)
+    local was_active = side_screen_active
     side_screen_active = true
     local mapped_position = side_widget_positions[widget_key]
     if initial_position then
@@ -2811,8 +3480,13 @@ local function begin_side_screen(initial_position, widget_key, user)
             widget_key,
             mapped_position))
     end
+    local repeated = was_active and side_position == mapped_position
+        and a11y.side_last_user == user
     side_position = mapped_position
-    speak_side(user, side_position)
+    a11y.side_last_user = user
+    if not repeated then
+        speak_side(user, side_position)
+    end
 end
 
 local function end_side_screen()
@@ -2822,6 +3496,7 @@ local function end_side_screen()
     end
     side_screen_active = false
     side_position = nil
+    a11y.side_last_user = nil
 end
 
 local function is_focused(text_id)
@@ -2871,8 +3546,33 @@ local function register_control_label(label, widget, role, is_control)
     return row
 end
 
+function a11y.valid_control_value(widget, value)
+    if not value or value == "" or is_modal_button(value)
+            or non_control_labels[value] or is_noninteractive_text(value)
+            or looks_like_message(value) then
+        return false
+    end
+    local name = a11y.widget_internal_name(widget)
+    if name == "listName" or name == "teamName"
+            or name == "playerName" or name == "groupName"
+            or name == "title" or (name and name:match("_item$")) then
+        return false
+    end
+    return true
+end
+
 local function attach_control_value(row, widget, value)
-    if not row or widget == row.label_widget then
+    if not row or widget == row.label_widget
+            or not a11y.valid_control_value(widget, value) then
+        return false
+    end
+    local label_name = a11y.widget_internal_name(row.label_widget)
+    local value_name = a11y.widget_internal_name(widget)
+    local structural_stem = label_name
+        and label_name:match("^(.-)_item$")
+    if structural_stem and value_name ~= structural_stem .. "_value" then
+        -- A rules page redraws competition names alongside its selectors.
+        -- Render order alone must not make a club or another field the value.
         return false
     end
     local value_key = memory.hex(widget)
@@ -2906,6 +3606,19 @@ local function attach_control_value(row, widget, value)
             and row.value_variant_count >= 2)
     control_row_by_value_widget[value_key] = row
     return true
+end
+
+function a11y.structural_control_row(widget)
+    local name = a11y.widget_internal_name(widget)
+    local stem = name and name:match("^(.-)_value$")
+    if not stem then return nil end
+    for _, row in pairs(control_rows_by_label_widget) do
+        if a11y.widget_internal_name(row.label_widget)
+                == stem .. "_item" then
+            return row
+        end
+    end
+    return nil
 end
 
 local function formatted_slider_value(row, value)
@@ -3187,14 +3900,27 @@ function m.on_ui_text_set(ctx, event_id, registers)
     end
     local previous = ui_text_by_widget[widget_key]
     ui_text_by_widget[widget_key] = text
+    if previous ~= text then
+        a11y.announce_skip_hint(text)
+    end
+    if not a11y.cup_group_table_active
+            and a11y.is_cup_group_header(widget, text) then
+        -- Captured headers arrive before the trailing grid OK and before the
+        -- explanatory paragraph. Identify the table while that OK is still
+        -- a background cell, not after it has already reached speech.
+        a11y.activate_cup_group_table(false)
+    end
     local normal_game_plan_marker = text == "Escalação/Editar posição"
         or text == "Team Sheet/Edit Position"
-    if normal_game_plan_marker and not a11y.game_plan_active then
+    if normal_game_plan_marker and not a11y.game_plan_active
+            and (not a11y.pre_match_active
+                or a11y.game_plan_entry_requested) then
         -- The normal Game Plan screen does not expose its visible "Plano de
         -- jogo" caption through the dedicated title widget used by submenus.
         -- Its Team Sheet/Edit Position command is unique to this surface and
         -- therefore provides a safe structural entry marker.
         a11y.game_plan_active = true
+        a11y.game_plan_entry_requested = false
         a11y.game_plan_main_surface = true
         a11y.game_plan_context = a11y.ui_language == "pt"
             and "Plano de jogo normal" or "Normal Game Plan"
@@ -3220,14 +3946,9 @@ function m.on_ui_text_set(ctx, event_id, registers)
         -- Control widgets are aggressively recycled between screens. Do not
         -- let the last selector on the previous screen claim a Game Plan
         -- command (for example "Agressiva, Gestão de dados") as its value.
-        active_control_row = nil
-        active_controller_label = nil
-        pending_control_row = nil
+        a11y.reset_control_tracking_state()
         focused_control_hint = nil
-        pending_controller_tooltip = nil
-        pending_controller_tooltip_label = nil
-        controller_tooltip_due_ms = nil
-        reset_focus_reuse_state()
+        a11y.reset_focus_reuse_state()
         -- This default command can exist for only one render frame before the
         -- first-use tutorial opens. Capture and announce it synchronously so
         -- a quick confirmation still enters Edit Position with the right
@@ -3264,8 +3985,9 @@ function m.on_ui_text_set(ctx, event_id, registers)
             "Configurações táticas básicas"
             and a11y.game_plan_context ~= "Basic Tactical Settings"
         if entering_tactical then
+            a11y.game_plan_basic_prompt_active = false
             a11y.game_plan_formation_active = false
-            reset_focus_reuse_state()
+            a11y.reset_focus_reuse_state()
             a11y.game_plan_last_focus_text = nil
             a11y.game_plan_announced_context = nil
         end
@@ -3363,7 +4085,7 @@ function m.on_ui_text_set(ctx, event_id, registers)
         if previous_game_plan_context ~= text then
             a11y.game_plan_formation_active = false
             a11y.game_plan_last_menu_focus = nil
-            reset_focus_reuse_state()
+            a11y.reset_focus_reuse_state()
             a11y.game_plan_last_focus_text = nil
             a11y.game_plan_last_focus_widget = nil
             a11y.game_plan_announced_context = nil
@@ -3388,6 +4110,7 @@ function m.on_ui_text_set(ctx, event_id, registers)
         a11y.pre_match_active = false
         a11y.pre_match_entry_pending = false
         a11y.stadium_active = false
+        a11y.cup_group_table_active = false
     elseif text == "Configurações do sistema"
             or text == "System Settings" then
         if not a11y.pre_match_active then
@@ -3410,6 +4133,7 @@ function m.on_ui_text_set(ctx, event_id, registers)
         a11y.game_plan_active_tactical_label = nil
         a11y.game_plan_active_tactical_value = nil
         a11y.stadium_active = false
+        a11y.cup_group_table_active = false
     elseif text == "Altura da grama" or text == "Grass Length" then
         if not a11y.stadium_active
                 or frame - a11y.stadium_last_marker_frame > 120 then
@@ -3465,13 +4189,10 @@ function m.on_ui_text_set(ctx, event_id, registers)
         end
     end
     local tooltip_control_label = control_label_from_tooltip(text)
-    if last_ui_text_ms > 0 and now_ms - last_ui_text_ms > 500 then
-        -- A pause between text updates is not a screen boundary. Lists and
-        -- side-selector cells legitimately create widgets after such a pause.
-        reset_focus_reuse_state()
-    end
+    -- A pause between text writes is not a new focus. The same Informações
+    -- widget can redraw after a pause while the selection never moved.
     if previous ~= text then
-        announce_screen_title(text, widget_key)
+        announce_screen_title(text, widget_key, widget)
         local tactical_tooltip = a11y.game_plan_active
             and a11y.game_plan_active_tactical_label
             and frame - a11y.game_plan_active_tactical_frame <= 90
@@ -3538,8 +4259,8 @@ function m.on_ui_text_set(ctx, event_id, registers)
             and not is_selector_label(text)
             and text ~= pending_controller_tooltip then
         local previous_focus = ui_focus_widgets[widget_key]
-        if previous_focus and frame - previous_focus.last_seen > 30 then
-            reset_focus_reuse_state()
+        if a11y.focus_widget_reused(previous_focus, text) then
+            a11y.reset_focus_reuse_state()
         end
         if not ui_focus_widgets[widget_key] then
             if ui_focus_widget_count >= 300 then
@@ -3583,7 +4304,12 @@ function m.on_ui_text_set(ctx, event_id, registers)
     end
 
     local value_row
-    if label_row and text == label_row.label then
+    local structural_row = a11y.structural_control_row(widget)
+    if structural_row and attach_control_value(
+            structural_row, widget, text) then
+        value_row = structural_row
+        pending_control_row = nil
+    elseif label_row and text == label_row.label then
         pending_control_row = label_row
     elseif active_control_row
             and not active_control_row.native_slider
@@ -3593,19 +4319,23 @@ function m.on_ui_text_set(ctx, event_id, registers)
             and widget ~= active_control_row.label_widget
             and not label_row
             and is_widget_focused(widget) then
-        value_row = active_control_row
-        attach_control_value(value_row, widget, text)
+        if attach_control_value(active_control_row, widget, text) then
+            value_row = active_control_row
+        end
         pending_control_row = nil
-    elseif pending_control_row
+    elseif pending_control_row and not a11y.game_plan_active
             and frame - (pending_control_row.created_frame or frame) <= 2
             and widget ~= pending_control_row.label_widget then
-        value_row = pending_control_row
-        attach_control_value(value_row, widget, text)
+        if attach_control_value(pending_control_row, widget, text) then
+            value_row = pending_control_row
+        end
         pending_control_row = nil
     else
         value_row = control_row_by_value_widget[widget_key]
         if value_row and not value_row.native_slider then
-            attach_control_value(value_row, widget, text)
+            if not attach_control_value(value_row, widget, text) then
+                value_row = nil
+            end
         elseif value_row and value_row.native_slider then
             value_row = nil
         end
@@ -3680,7 +4410,9 @@ function m.on_list_item_render(ctx, event_id, registers)
             "[FLAccess] native-list-focus text=%q record=%s",
             text,
             memory.hex(record)))
-        speak(ui_focus_speech(text))
+        local preserve_title = tonumber(ffi.C.GetTickCount64()) <
+            a11y.screen_title_hold_until_ms
+        speak(ui_focus_speech(text), not preserve_title)
     end
 end
 
@@ -3712,7 +4444,9 @@ function m.on_team_item_text(ctx, event_id, registers)
         log(string.format(
             "[FLAccess] native-team-focus text=%q",
             text))
-        speak(ui_focus_speech(text))
+        local preserve_title = tonumber(ffi.C.GetTickCount64()) <
+            a11y.screen_title_hold_until_ms
+        speak(ui_focus_speech(text), not preserve_title)
     end
 end
 
@@ -3748,6 +4482,11 @@ function m.on_resolved_text(ctx, event_id, registers)
     local text_id = tonumber(ffi.cast("uint32_t", read_u64(registers.rdi)))
     local resolved_text = clean_text(text)
     a11y.detect_ui_language(resolved_text)
+    a11y.announce_skip_hint(resolved_text)
+    -- Some presentation pages resolve their paragraph without passing it
+    -- through the ordinary UI-widget text setter. The lexicon role is more
+    -- reliable than a screen-specific phrase or a minimum character count.
+    a11y.capture_resolved_dialog(resolved_text, text_id, caller_rva)
     if caller_rva == 0xb22537 and resolved_text ~= "" then
         language_options[resolved_text] = true
     end
@@ -3860,6 +4599,8 @@ function m.on_resolved_text(ctx, event_id, registers)
             end
             if #spoken <= 60 and not audio_ids[text_id]
                     and not non_control_labels[spoken]
+                    and (controller_labels[spoken]
+                        or not spoken:match("[%.%!%?]$"))
                     and not is_noninteractive_text(spoken)
                     and not is_splash_text(spoken)
                     and not looks_like_message(spoken)
@@ -3884,16 +4625,19 @@ function m.on_resolved_text(ctx, event_id, registers)
                 reset_navigation_generation()
                 startup_complete = true
                 startup_completed_frame = frame
-                main_menu_focus_guard_until = frame + 45
+                main_menu_focus_guard_until = frame + 4
                 current_main_menu_title = spoken
                 -- Speak now for navigation and retain a short fallback for the
                 -- first main-menu frame, which can arrive just before Windows
                 -- reports the game as foreground. Duplicate suppression keeps
                 -- this from speaking twice during ordinary navigation.
-                dynamic_text_candidate = is_initial_featured
-                    and nil or spoken .. ", item"
+                local title_needs_retry = not is_initial_featured
+                    and not a11y.game_is_foreground()
+                dynamic_text_candidate = title_needs_retry
+                    and spoken .. ", item" or nil
                 dynamic_text_due_ms = is_initial_featured
-                    and nil or tonumber(ffi.C.GetTickCount64()) + 250
+                    and nil or (title_needs_retry
+                        and tonumber(ffi.C.GetTickCount64()) + 250 or nil)
                 main_menu_tooltip = nil
                 main_menu_tooltip_due_ms = nil
                 log(string.format(
@@ -3901,7 +4645,7 @@ function m.on_resolved_text(ctx, event_id, registers)
                     widget_key,
                     previous_widget_text or "",
                     spoken))
-                if not is_initial_featured then
+                if not is_initial_featured and not title_needs_retry then
                     speak(spoken .. ", item")
                 end
             elseif main_menu_title_widget_key
@@ -4143,6 +4887,10 @@ function a11y.diagnostic_role(widget_key, entry)
     if a11y.pre_match_actions[entry.text] then
         return "pre-match-action", nil
     end
+    local asset_role = a11y.text_asset_role(entry.text)
+    if asset_role and asset_role ~= "text" then
+        return asset_role, nil
+    end
     if a11y.is_instruction_message(entry.text) then
         return "instruction-dialog-text", nil
     end
@@ -4197,6 +4945,14 @@ function a11y.record_focus(kind, widget_key, entry, selected_offset,
     end
 
     local address = entry.address
+    lines[#lines + 1] = string.format(
+        "widget_internal_name=%q source=msvc-string@+0x18",
+        a11y.diagnostic_text(a11y.widget_internal_name(address)))
+    if address and readable(address + 0x38, 8) then
+        lines[#lines + 1] = "widget_relation_candidate=" ..
+            a11y.diagnostic_hex(read_u64(memory.read(address + 0x38, 8))) ..
+            " source=pointer@+0x38"
+    end
     local raw = {}
     if address and readable(address, 0x40) then
         for offset = 0, 0x38, 8 do
@@ -4301,11 +5057,20 @@ function a11y.record_focus(kind, widget_key, entry, selected_offset,
     local inventory = {}
     for index = 1, math.min(#recent, 40) do
         local candidate = recent[index]
+        local observed = ui_focus_widgets[candidate.key]
+        local candidate_address = observed and observed.address
+        local relation = "unreadable"
+        if candidate_address and readable(candidate_address + 0x38, 8) then
+            relation = a11y.diagnostic_hex(read_u64(
+                memory.read(candidate_address + 0x38, 8)))
+        end
         inventory[#inventory + 1] = string.format(
-            "%s %q age=%d",
+            "%s %q age=%d name=%q relation=%s",
             candidate.key,
             a11y.diagnostic_text(candidate.text),
-            candidate.age)
+            candidate.age,
+            a11y.diagnostic_text(a11y.widget_internal_name(candidate_address)),
+            relation)
     end
     lines[#lines + 1] = string.format(
         "recent_screen_inventory count=%d shown=%d {%s}",
@@ -4404,8 +5169,16 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
         selected_seen[index] = -1
     end
     local game_plan_menu_bank_active = false
+    local game_plan_menu_best_key
+    local game_plan_menu_best_index
+    local game_plan_menu_best_activation = -1
     for widget_key, entry in pairs(ui_focus_widgets) do
         if not is_noninteractive_text(entry.text)
+                and not (entry.text == "OK" and a11y.game_plan_active
+                    and (a11y.game_plan_context ==
+                            "Configurações táticas básicas"
+                        or a11y.game_plan_context ==
+                            "Basic Tactical Settings"))
                 and readable(entry.address + 0xf0, 0x30) then
             local bytes = memory.read(entry.address + 0xf0, 0x30)
             local state = ui_focus_state[widget_key] or {}
@@ -4421,6 +5194,14 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
                 end
                 state[index] = value
                 if value == 1 then
+                    if a11y.game_plan_main_surface
+                            and a11y.game_plan_menu_items[entry.text]
+                            and (activated[index] or -1)
+                                > game_plan_menu_best_activation then
+                        game_plan_menu_best_activation = activated[index]
+                        game_plan_menu_best_key = widget_key
+                        game_plan_menu_best_index = index
+                    end
                     if index == 5 and a11y.game_plan_active
                             and a11y.game_plan_menu_items[entry.text] then
                         game_plan_menu_bank_active = true
@@ -4512,8 +5293,14 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
                 and ui_focus_activated[selected[index]][index] or -1
             if entry and not a11y.game_plan_title_widgets[selected[index]]
                     and (a11y.game_plan_menu_items[entry.text]
-                    or a11y.game_plan_basic_prompt_items[entry.text])
-                    and activation > basic_menu_activation then
+                    or (a11y.game_plan_basic_prompt_active
+                        and a11y.game_plan_basic_prompt_items[entry.text]))
+                    and (activation > basic_menu_activation
+                        or (activation == basic_menu_activation
+                            and selected_seen[index] >
+                                (basic_menu_offset_index
+                                    and selected_seen[basic_menu_offset_index]
+                                    or -1))) then
                 basic_menu_activation = activation
                 basic_menu_offset_index = index
             end
@@ -4524,13 +5311,34 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
             or a11y.game_plan_basic_prompt_items[primary_entry.text]
             or primary_entry.text:match("%(%s*[%d%-]+%s*%)")
             or primary_entry.text:match("^%d[%d%-]+$"))
-    if basic_settings_menu then
+    if a11y.game_plan_main_surface and game_plan_menu_best_key
+            and frame - game_plan_menu_best_activation <= 120 then
+        -- Player cards can refresh after the focused command and replace the
+        -- per-bank freshest entry. Select the command by its focus edge.
+        selected[game_plan_menu_best_index] = game_plan_menu_best_key
+        selected_seen[game_plan_menu_best_index] =
+            game_plan_menu_best_activation
+        selected_offset_index = game_plan_menu_best_index
+    elseif basic_settings_menu then
         -- Team and player cards keep their focus flags behind this menu.
-        -- Only its actual commands and Use/Do not use dialog are eligible.
+        -- Only its actual commands and an open Use/Do not use dialog are
+        -- eligible. Text can update without a 0->1 focus edge, so a stale
+        -- activation alone cannot make the whole menu permanently silent.
         if basic_menu_offset_index
-                and frame - basic_menu_activation <= 120 then
+                and (frame - basic_menu_activation <= 120
+                    or (selected[basic_menu_offset_index]
+                        and frame - (ui_focus_widgets[
+                            selected[basic_menu_offset_index]].last_seen
+                            or frame) <= 12)) then
             selected_offset_index = basic_menu_offset_index
         else
+            if a11y.diagnostic_mode and frame - a11y.navigation_frame <= 2
+                    and selected[1] then
+                a11y.record_focus("unresolved-game-plan",
+                    selected[1], ui_focus_widgets[selected[1]],
+                    ui_focus_offsets[1], counts, selected, selected_seen,
+                    dense_virtual_list)
+            end
             return false
         end
     elseif a11y.game_plan_active and primary_is_game_plan_control then
@@ -4629,6 +5437,15 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
         and preserved_pre_match_row.label
         or inferred_pre_match_text
         or (selected_entry and selected_entry.text or nil)
+    if a11y.transition_old_focus_texts then
+        if now_ms >= a11y.transition_guard_until_ms
+                or (selected_focus_text and not
+                    a11y.transition_old_focus_texts[selected_focus_text]) then
+            a11y.transition_old_focus_texts = nil
+        else
+            return false
+        end
+    end
     local selected_formation_inside = selected_focus_text
         and selected_focus_text:match("%((.-)%)") or nil
     local selected_compact_formation = selected_formation_inside
@@ -4668,9 +5485,33 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
         -- stale focus flag used to say "Usar, selecionado" between players.
         return false
     end
+    if a11y.ignore_cup_group_focus(selected_focus_text) then
+        return false
+    end
+    if selected_focus_text == "OK" and last_screen_title_key
+            and not pending_message_text
+            and now_ms < a11y.screen_title_hold_until_ms + 2000 then
+        -- Title and lone OK commonly precede a notice whose paragraph is
+        -- created later. Give that text hook time to claim speech priority.
+        return false
+    end
     local candidate_key = selected_entry and (
         (dense_virtual_list and "virtual-list:" or selected_key .. ":") ..
         selected_focus_text) or nil
+    if pending_message_text ~= nil then
+        -- The game's focus widget may be ready before its dialog text hook.
+        -- Let the paragraph enter Prism first, then queue its button.
+        if selected_focus_text and is_modal_button(selected_focus_text)
+                and selected_focus_text ~= "Sim"
+                and selected_focus_text ~= "Não" then
+            a11y.pending_modal_button_text = selected_focus_text
+        else
+            a11y.pending_modal_button_text = nil
+        end
+        ui_focus_candidate_key = candidate_key
+        ui_focus_candidate_since = frame
+        return selected_entry ~= nil
+    end
     local pre_match_action = selected_focus_text and a11y.pre_match_active
         and a11y.pre_match_actions[selected_focus_text] or false
     local dialog_dismissed
@@ -4685,8 +5526,13 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
             or control_row_by_value_widget[selected_key]
             or controller_labels[selected_focus_text]
             or a11y.fast_focus_items[selected_focus_text])
-    local focus_debounce_frames = pre_match_action and 4
+    local focus_debounce_frames = (selected_focus_text
+            and is_modal_button(selected_focus_text) and 10)
+        or pre_match_action and 4
         or (game_plan_roster_context and selected_offset == 0xfc and 18)
+        or (recent_navigation and selected_offset == 0x104
+            and selected_activity and frame - selected_activity <= 2
+            and 0)
         -- 0x104 is the verified active-focus bank on ordinary PES menus.
         -- Hidden widgets may retain bits elsewhere, but cannot enter this
         -- fast path unless the selection resolver chose this exact bank.
@@ -4723,10 +5569,8 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
     -- Keep the initial item silent after an instructional paragraph. There is
     -- no reliable NVDA completion callback here. A real arrow movement changes
     -- the focus after the paragraph began and is announced immediately.
-    if candidate_key and modal_focus_blocked and not changed_after_message
-            and not pre_match_action then
-        last_ui_focus_announcement = candidate_key
-    end
+    -- A focus seen while a title/dialog speaks has not been announced yet.
+    -- Do not mark it as read: the same row must still be available afterward.
     local startup_focus_allowed = selected_entry and (
         (startup_complete and frame - startup_completed_frame >= 12)
         or selected_is_startup_item)
@@ -4769,7 +5613,9 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
         ui_focus_candidate_since = frame
         local game_plan_menu_navigation = recent_navigation
             and a11y.game_plan_active
-            and (((a11y.navigation_action == "up"
+            and ((a11y.game_plan_basic_prompt_active
+                    and a11y.game_plan_basic_prompt_items[selected_focus_text])
+                or ((a11y.navigation_action == "up"
                         or a11y.navigation_action == "down")
                     and selected_is_formation
                     and (a11y.game_plan_context == "Alterar formação"
@@ -4808,6 +5654,7 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
                 or pre_match_action)
             and startup_focus_allowed
             and (not dense_virtual_list or a11y.game_plan_active
+                or a11y.cup_group_table_active
                 or selected_is_startup_item)
             and (not dialog_active or selected_is_modal_button)
             and candidate_key ~= last_ui_focus_announcement then
@@ -4909,7 +5756,9 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
             handled_control = true
         elseif focused_control_hint
                 and now_ms - focused_control_hint_ms <= 1500
-                and selected_entry.text ~= focused_control_hint then
+                and selected_entry.text ~= focused_control_hint
+                and a11y.valid_control_value(
+                    selected_entry.address, selected_entry.text) then
             local hinted_row = controller_rows[focused_control_hint] or {
                 label = focused_control_hint,
                 role = "seletor",
@@ -4921,10 +5770,20 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
             announce_control(hinted_row)
             focused_control_hint = nil
             handled_control = true
-        elseif selected_control and selected_control.is_control then
+        elseif selected_control and (selected_control.is_control
+                or (selected_control.value
+                    and selected_control.value ~= ""
+                    and not is_modal_button(selected_control.value)
+                    and not non_control_labels[selected_control.label])) then
             announce_control(selected_control)
             handled_control = true
-        elseif selected_value_control and selected_value_control.is_control then
+        elseif selected_value_control and (selected_value_control.is_control
+                or (selected_value_control.value
+                    and selected_value_control.value ~= ""
+                    and not is_modal_button(selected_value_control.value)
+                    and not non_control_labels[selected_value_control.label]))
+                and a11y.valid_control_value(
+                    selected_entry.address, selected_entry.text) then
             announce_control_value(
                 selected_value_control,
                 selected_entry.text)
@@ -4935,13 +5794,17 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
                 and not a11y.game_plan_active
                 and now_ms - active_control_focused_ms <= 500
                 and selected_entry.address ~= active_control_row.label_widget
-                and not control_rows_by_label_widget[selected_key] then
-            attach_control_value(
+                and not control_rows_by_label_widget[selected_key]
+                and a11y.valid_control_value(
+                    selected_entry.address, selected_entry.text) then
+            local attached = attach_control_value(
                 active_control_row,
                 selected_entry.address,
                 selected_entry.text)
-            announce_control_value(active_control_row, selected_entry.text)
-            handled_control = true
+            if attached then
+                announce_control_value(active_control_row, selected_entry.text)
+                handled_control = true
+            end
         end
         if not handled_control then
             if side_user(selected_entry.text) then
@@ -4960,15 +5823,16 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
                 if pre_match_action then
                     a11y.pre_match_last_action = selected_focus_text
                 end
-                local announcement = a11y.game_plan_focus_speech(
+                local announcement = a11y.cup_group_team_speech(
                     selected_focus_text,
-                    selected_key)
+                    selected_key) or a11y.game_plan_focus_speech(
+                        selected_focus_text,
+                        selected_key)
                 if announcement then
                     speak(announcement)
                 end
-                if changed_after_message then
-                    modal_focus_hold_until_ms = 0
-                end
+                -- Navigation while a dialog is speaking is deferred by
+                -- speak(); it must not shorten the paragraph's reading time.
             end
         end
     end
@@ -5024,12 +5888,17 @@ function m.display_frame(ctx)
         prism_started = true
         start_native_prism(ctx)
     end
-    if prism_started then
-        a11y.flush_native_speech(tonumber(ffi.C.GetTickCount64()))
-    end
     if not game_is_foreground() then
         game_was_foreground = false
+        a11y.nvda_stop_requested = false
+        a11y.native_speech_queue = {}
+        a11y.native_speech_first = 1
+        a11y.native_speech_last = 0
         return
+    end
+    if prism_started then
+        a11y.stop_nvda_if_requested()
+        a11y.flush_native_speech(tonumber(ffi.C.GetTickCount64()))
     end
     if not game_was_foreground then
         game_was_foreground = true
@@ -5048,6 +5917,7 @@ function m.display_frame(ctx)
     end
     local now_ms = tonumber(ffi.C.GetTickCount64())
     a11y.poll_attribute_input(now_ms)
+    a11y.record_game_plan_menu_probe()
     if a11y.game_plan_lineup_due_ms
             and now_ms >= a11y.game_plan_lineup_due_ms then
         a11y.read_visible_game_plan_lineup()
@@ -5062,18 +5932,52 @@ function m.display_frame(ctx)
             and now_ms >= pending_message_due_ms then
         if pending_message_text and pending_message_text ~= ""
                 and pending_message_key ~= last_announced_message_key then
-            speak(pending_message_text)
+            speak(pending_message_text, nil, true)
             a11y.dialog_button_queued_for_message = false
             modal_message_spoken_frame = frame
             last_announced_message_key = pending_message_key
+            a11y.last_modal_message_text = pending_message_text
             local reading_time = #pending_message_text * 65 + 500
             if reading_time < 1800 then reading_time = 1800 end
             if reading_time > 10000 then reading_time = 10000 end
-            modal_focus_hold_until_ms = now_ms + reading_time
+            -- Consecutive dialog pages are queued in Prism. Keep focus
+            -- blocked until the entire queued reading finishes, not only
+            -- until the most recently detected page would finish alone.
+            modal_focus_hold_until_ms =
+                math.max(now_ms, modal_focus_hold_until_ms) + reading_time
+            if #a11y.modal_message_backlog == 0
+                    and a11y.pending_modal_button_text
+                    and not a11y.ignore_cup_group_focus(
+                        a11y.pending_modal_button_text) then
+                if a11y.deferred_modal_announcement
+                        and a11y.deferred_modal_announcement:sub(
+                            1, #a11y.pending_modal_button_text)
+                                == a11y.pending_modal_button_text then
+                    a11y.deferred_modal_announcement = nil
+                end
+                local button = a11y.pending_modal_button_text == "OK"
+                    and (a11y.ui_language == "pt" and "Avançar" or "Next")
+                    or a11y.pending_modal_button_text
+                speak(button ..
+                    ", botão selecionado", false, true)
+                a11y.dialog_button_queued_for_message = true
+            end
+            if #a11y.modal_message_backlog == 0 then
+                a11y.pending_modal_button_text = nil
+            end
         end
         pending_message_text = nil
         pending_message_key = nil
+        a11y.pending_message_widget_key = nil
         pending_message_due_ms = nil
+        if #a11y.modal_message_backlog > 0 then
+            local next_message = table.remove(a11y.modal_message_backlog, 1)
+            pending_message_text = next_message.text
+            pending_message_key = next_message.key
+            a11y.pending_message_widget_key =
+                next_message.key:match("^(.-)%z")
+            pending_message_due_ms = now_ms + 40
+        end
     end
     -- Startup and dialog work above can enqueue speech before later guards
     -- return early. Deliver it now instead of paying another render frame.
@@ -5113,8 +6017,12 @@ function m.display_frame(ctx)
     local modal_focus_blocked = startup_busy
         or pending_message_text ~= nil
         or now_ms < modal_focus_hold_until_ms
+        or now_ms < a11y.screen_title_hold_until_ms
     local dialog_active = frame <= a11y.confirmation_dialog_until_frame
-        and dialog_is_active() or false
+        and dialog_is_active()
+        and math.min(dialog_options.Sim.last_seen,
+            dialog_options["Não"].last_seen)
+                >= a11y.modal_dialog_start_frame - 5 or false
     a11y.process_game_plan_selected_heading(
         modal_focus_blocked or dialog_active)
     a11y.process_game_plan_basic_menu_heading(
@@ -5136,6 +6044,11 @@ function m.display_frame(ctx)
     -- Delayed speech is evaluated after focus. A newly focused item can then
     -- cancel an obsolete tooltip before it reaches the screen reader.
     process_delayed_speech(now_ms, modal_focus_blocked)
+    if not modal_focus_blocked and a11y.deferred_modal_announcement then
+        local announcement = a11y.deferred_modal_announcement
+        a11y.deferred_modal_announcement = nil
+        speak(announcement, false)
+    end
     -- Hooks and focus scanning enqueue only. Flush again after processing so
     -- confirmed navigation reaches Prism in this render frame rather than the
     -- next one. Prism calls remain serialized on display_frame.
@@ -5194,6 +6107,9 @@ function m.show(ctx)
     pending_message_text = nil
     pending_message_key = nil
     pending_message_due_ms = nil
+    a11y.pending_modal_button_text = nil
+    a11y.modal_message_backlog = {}
+    a11y.deferred_modal_announcement = nil
     a11y.clear_pending_tooltips()
     dynamic_text_candidate = nil
     dynamic_text_due_ms = nil
@@ -5483,6 +6399,14 @@ function a11y.reset_selection_tracking_state()
 end
 
 function m.context_reset(ctx)
+    -- A screen transition invalidates announcements captured on the old
+    -- screen, including commands still waiting for the render-thread flush.
+    a11y.native_speech_queue = {}
+    a11y.native_speech_first = 1
+    a11y.native_speech_last = 0
+    a11y.deferred_modal_announcement = nil
+    last_spoken_text = nil
+    last_spoken_ms = 0
     a11y.reset_widget_tracking_state()
     a11y.reset_dialog_and_message_state()
     a11y.reset_menu_tracking_state()
@@ -5491,6 +6415,9 @@ function m.context_reset(ctx)
     a11y.pre_match_active = false
     a11y.game_plan_active = false
     a11y.game_plan_main_surface = false
+    a11y.game_plan_entry_requested = false
+    a11y.game_plan_menu_probe_due_frame = nil
+    a11y.game_plan_menu_probe_action = nil
     a11y.game_plan_context = nil
     a11y.game_plan_announced_context = nil
     a11y.game_plan_last_focus_text = nil
@@ -5544,6 +6471,12 @@ function m.context_reset(ctx)
     a11y.pre_match_entry_pending = false
     a11y.pre_match_entry_guard_until_frame = 0
     a11y.pre_match_last_action = nil
+    a11y.cup_group_table_active = false
+    a11y.cup_group_cell_by_widget = {}
+    a11y.cup_group_current_cell = nil
+    a11y.cup_group_last_announced = nil
+    a11y.cup_group_last_navigation_frame = -10000
+    a11y.screen_title_hold_until_ms = 0
     reset_side_state()
     last_widget_frame = frame
     log("[FLAccess] context-reset")
@@ -5697,6 +6630,7 @@ function m.init(ctx)
     if not a11y.load_config() then
         a11y.save_config()
     end
+    a11y.load_text_assets()
     ctx.register("custom:flaccess_resolved_text", m.on_resolved_text)
     ctx.register("custom:flaccess_slider_init", m.on_slider_init)
     ctx.register("custom:flaccess_slider_set", m.on_slider_set)

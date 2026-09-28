@@ -10,6 +10,9 @@ mesmo arquivo.
   painéis do Sider; usa diretamente a API C nativa do Prism.
 - `FLAccess-Prism/`: `prism.dll` e licenças. A DLL seleciona leitores
   compatíveis e usa SAPI quando nenhum estiver disponível.
+- `FLAccess-text/`: índices UTF-8 compactos de textos em português e inglês.
+  Cada entrada associa o texto exato do jogo a um papel semântico. O módulo usa
+  essa informação antes das heurísticas e mantém foco/contexto como autoridade.
 - `FLAccess_gameplay.lua`: componente reservado para acessibilidade durante a
   partida, como localização sonora da bola, jogador, gol e limites do campo.
   Na versão 0.1.5 ele não instala hooks nem produz áudio.

@@ -1,0 +1,3 @@
+textAssets/catalog.sqlite.zip filter=lfs diff=lfs merge=lfs -text
+textAssets/localization/*.jsonl filter=lfs diff=lfs merge=lfs -text
+textAssets/by-role/*.jsonl filter=lfs diff=lfs merge=lfs -text

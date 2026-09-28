@@ -170,10 +170,13 @@ O resolvedor retorna o ponteiro da string em `RAX`, o tamanho em `R8` e o ID de 
 
 ## Diagnóstico estrutural de uma tela
 
+Os sinais estruturais já encontrados, suas limitações e o analisador offline
+estão em [Sondagem estrutural da interface](STRUCTURAL-UI-PROBE.pt-BR.md).
+
 1. Abra o painel do mod com `Espaço`.
 2. Use `6` ou `7` até ouvir `Modo de diagnóstico`.
 3. Use `9` ou `0` para ativar. O arquivo anterior é substituído nesse momento.
-4. Feche o Sider e reproduza apenas a tela problemática, passando uma vez por
+4. Feche o painel com `Espaço` (não encerre o Sider) e reproduza apenas a tela problemática, passando uma vez por
    cada opção relevante.
 5. Abra o painel novamente, selecione `Modo de diagnóstico` e use `9` ou `0`
    para desativar.

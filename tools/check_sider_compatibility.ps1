@@ -47,6 +47,12 @@ try {
         throw "Native Prism runtime is missing from modules\FLAccess-Prism."
     }
     Copy-Item -LiteralPath $prismRuntime -Destination $temporaryModules -Recurse -Force
+    $textRuntime = Join-Path $projectRoot "modules\FLAccess-text"
+    if (-not (Test-Path -LiteralPath (Join-Path $textRuntime "pt.tsv")) -or
+            -not (Test-Path -LiteralPath (Join-Path $textRuntime "en.tsv"))) {
+        throw "Runtime text assets are missing from modules\FLAccess-text."
+    }
+    Copy-Item -LiteralPath $textRuntime -Destination $temporaryModules -Recurse -Force
     & $luaJit $harness $sourcePath $temporarySider
     if ($LASTEXITCODE -ne 0) {
         throw "Sider sandbox initialization failed."
@@ -116,7 +122,7 @@ if (Test-Path -LiteralPath $GameExePath) {
             $expected = $entry.Value
             $stream.Position = $section.RawPointer + ($rva - $section.VirtualAddress)
             $bytes = $reader.ReadBytes($expected.Length / 2)
-            $actual = [Convert]::ToHexString($bytes).ToLowerInvariant()
+            $actual = ([BitConverter]::ToString($bytes) -replace '-', '').ToLowerInvariant()
             if ($actual -ne $expected) {
                 throw "FL_2026 hook mismatch at RVA 0x$($rva.ToString('x'))."
             }

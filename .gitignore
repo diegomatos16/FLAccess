@@ -24,3 +24,8 @@ capture-*.txt
 .idea/
 .DS_Store
 Thumbs.db
+
+# Generated text-catalog transient files
+textAssets/catalog.sqlite
+textAssets/catalog.sqlite-shm
+textAssets/catalog.sqlite-wal
