@@ -15,6 +15,13 @@ if (-not $GameExePath) {
 }
 
 $source = [IO.File]::ReadAllText($sourcePath)
+$duplicateDefinitions = [regex]::Matches(
+    $source, '(?m)^(?:local\s+)?function\s+([\w.:]+)\s*\(') |
+    ForEach-Object { $_.Groups[1].Value } |
+    Group-Object | Where-Object Count -gt 1
+if ($duplicateDefinitions) {
+    throw "Duplicate named Lua definitions: $($duplicateDefinitions.Name -join ', ')"
+}
 $forbiddenCalls = [regex]::Matches(
     $source,
     '(?m)(?<![\w\.:])(?:pcall|xpcall|require|dofile|loadfile|loadstring|setfenv|getfenv|rawget|rawset|rawequal|setmetatable|getmetatable)\s*\(')
@@ -77,7 +84,9 @@ if (Test-Path -LiteralPath $GameExePath) {
         0x1496a3c = "488bd0488bcb488b5c24304883c420"
         0x0e59f80 = "48895c2418488974242041564883ec20"
         0x0e5a190 = "48895c241048896c2418574883ec20"
-        0x0e48bf0 = "488bc455565741564157488d68a14881ec00010000"
+        0x0e49070 = "488bc45556574881ec0001000048c7442420feffffff"
+        0x0e48af0 = "48895c24084889742410574883ec20"
+        0x0e7a990 = "488bc455574156488d68d84881ec10010000"
         0x0c97408 = "458b074d8d4f40488b4c2478488bd0"
         0x0c97c32 = "904533c94533c0488d55e7488bcf"
         0x0c97ca8 = "904533c94533c0488d55e7488bcf"
@@ -86,6 +95,7 @@ if (Test-Path -LiteralPath $GameExePath) {
         0x0b22871 = "488b93a8000000488bcb8bf08b3cb2"
         0x0c6d770 = "0f10020f11010f104a100f114910"
         0x08e1e47 = "488b402c488902488bc2c3cccccc"
+        0x08f8392 = "488d4c2430ba0d0000000f1f4000"
     }
     $stream = [IO.File]::OpenRead((Resolve-Path $GameExePath).Path)
     $reader = [IO.BinaryReader]::new($stream)

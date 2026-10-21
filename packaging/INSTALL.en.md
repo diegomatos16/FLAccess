@@ -1,25 +1,22 @@
-# Installing FLAccess 0.1.5
+# FLAccess 0.1.7
 
-1. Close the game and Sider.
-2. Back up the installation's `SiderAddons` directory.
-3. Copy `sider.dll` into `SiderAddons`, replacing only the existing 7.3.3 DLL.
-4. Copy this package's `modules` directory into `SiderAddons`, merging it with
-   the existing `SiderAddons/modules` directory.
-5. Add the line from `sider.ini.snippet` to the `[sider]` section of your `sider.ini`.
-6. Start the game normally with Sider.
+Released October 21, 2026. Experimental non-OCR menu accessibility for SP Football
+Life 2026 / PES 2021. Reads native game text and focus through Sider and Prism.
+This is not complete match accessibility.
 
-Do not replace your complete `sider.ini`. The Lua module, `prism.dll`, and its
-licenses all live under `SiderAddons/modules`. The module loads Prism directly;
-there is no EXE, CMD, terminal, or .NET requirement.
-The included `sider.dll` is the official 7.3.3 core with one accessibility
-event added so every module's overlay text can be spoken, plus the official
-7.3.4 stack-alignment fix. Do not use this DLL with another Sider version.
+## Installation
 
-In the Sider accessibility panel, use `6` and `7` to navigate options, `9` and
-`0` to change one, and `8` to restore its default. `Read tooltips` is saved in
-`SiderAddons/modules/FLAccess.ini`; diagnostics always start disabled.
+Requires Windows x64, the compatible `FL_2026.exe` and working Sider 7.3.3.
+NVDA or another supported screen reader is recommended; Prism can fall back to SAPI.
 
-Compatibility: experimental build made for the studied `FL_2026.exe`. See `docs/README.en.md` for limitations and recovery.
+1. Close the game and Sider; back up the files you will replace.
+2. Extract `FLAccess-0.1.7-sider.zip` and merge its `modules` folder into
+   `SiderAddons/modules`.
+3. Add `lua.module = "FLAccess.lua"` once under `[sider]` in `sider.ini`.
+4. Start through Sider. Do not replace your entire configuration.
 
-Known 0.1.5 limitation: Game Plan, its submenus and player selection in Edit
-Position remain unreliable and will be investigated in 0.1.6.
+Includes Lua, Prism with its licenses and PT/EN text indices. Python is not
+required to use the mod. No `sider.dll` is distributed. Reading other Sider
+modules' textual overlays requires the modified core's `overlay_content` event;
+see `sider-core` for source and redistribution restrictions. Game-menu reading
+uses its own hooks. Existing compatible custom cores can be retained.

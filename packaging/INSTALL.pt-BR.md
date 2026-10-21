@@ -1,25 +1,30 @@
-# Instalação do FLAccess 0.1.5
+# FLAccess 0.1.7
 
-1. Feche o jogo e o Sider.
-2. Faça backup da pasta `SiderAddons` da instalação.
-3. Copie `sider.dll` para `SiderAddons`, substituindo somente o DLL 7.3.3 existente.
-4. Copie a pasta `modules` deste pacote para `SiderAddons`, mesclando-a com a
-   pasta `SiderAddons/modules` existente.
-5. Adicione a linha de `sider.ini.snippet` ao bloco `[sider]` do seu `sider.ini`.
-6. Abra o jogo normalmente com o Sider.
+Publicado em 21 de outubro de 2026. Leitura experimental de menus do SP Football
+Life 2026 / PES 2021, sem OCR, usando dados internos do jogo e o Prism.
+Não oferece acessibilidade completa às partidas.
 
-Não substitua o seu `sider.ini` inteiro. O módulo Lua, `prism.dll` e suas
-licenças ficam dentro de `SiderAddons/modules`. O Prism é carregado diretamente
-pelo módulo; não há EXE, CMD, terminal nem requisito do .NET.
-O `sider.dll` incluído é o núcleo oficial 7.3.3 com um evento de acessibilidade
-adicionado para ler o texto dos painéis de todos os módulos e a correção oficial
-de alinhamento de pilha do 7.3.4. Não use esse DLL em outra versão do Sider.
+## Instalação
 
-No painel de acessibilidade do Sider, use `6` e `7` para navegar pelas opções,
-`9` e `0` para alterar e `8` para restaurar o padrão. `Ler tooltips` é salvo em
-`SiderAddons/modules/FLAccess.ini`; o diagnóstico começa sempre desligado.
+Requer Windows x64, Football Life 2026 com o executável compatível `FL_2026.exe`
+e Sider 7.3.3 funcional. Use NVDA ou outro leitor compatível; sem leitor ativo,
+o Prism pode usar SAPI.
 
-Compatibilidade: versão experimental criada para o `FL_2026.exe` estudado. Consulte `docs/README.pt-BR.md` para limitações e recuperação.
+1. Feche o jogo e o Sider e faça backup dos arquivos que vai substituir.
+2. Extraia o pacote `FLAccess-0.1.7-sider.zip`.
+3. Copie a pasta `modules` do pacote para `SiderAddons/modules`, mesclando as pastas.
+4. No bloco `[sider]` do `sider.ini`, acrescente uma única linha:
 
-Limitação conhecida da 0.1.5: o Plano de jogo, seus submenus e a seleção de
-jogadores em Editar posição permanecem instáveis e serão investigados na 0.1.6.
+```ini
+lua.module = "FLAccess.lua"
+```
+
+5. Inicie pelo Sider. Não substitua o `sider.ini` inteiro.
+
+O pacote inclui o módulo Lua, o Prism com suas licenças e índices de texto PT/EN.
+Não é necessário Python nem um programa auxiliar para usar o mod.
+Não inclui `sider.dll`. A leitura dos painéis textuais dos outros módulos do
+Sider exige o núcleo modificado que fornece `overlay_content`; o código dessa
+alteração está em `sider-core`. Sua redistribuição compilada depende de
+autorização do mantenedor. A leitura dos menus do jogo usa os próprios hooks.
+Quem já usa o núcleo compatível pode mantê-lo.

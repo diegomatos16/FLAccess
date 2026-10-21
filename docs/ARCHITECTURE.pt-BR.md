@@ -1,5 +1,15 @@
 # Estrutura do FLAccess
 
+## Decisão de seleção — dev 20
+
+Os produtores de foco, controle, lista e resposta entregam seus dados ao resultado
+comum selection_result. A entrega e a revisão usam sua composição; a fila confere
+nome/valor/contexto/dono/geração atuais antes de falar. Adaptadores anteriores
+submetem seu foco pelo mesmo limite de validação, preservando extração aprovada.
+Parágrafos e avisos são eventos próprios. Apresentação não implica aceitar entrada;
+relações Task são lidas somente na família Window comprovada. Estado e limites:
+[decisão comum](DECISAO-COMUM-DEV20-2026-10-19.pt-BR.md).
+
 O projeto continua sendo distribuído como um único mod, mas possui componentes
 independentes para impedir que leitura de menus e áudio de partida cresçam no
 mesmo arquivo.
@@ -24,6 +34,12 @@ desativar leitor de menus. O componente de jogabilidade só será acrescentado
 ao `sider.ini` quando tiver uma função utilizável.
 
 ## Regra para código futuro
+
+O leitor agora mantém um modelo limitado de observações de widgets, separado
+das decisões de foco e das funções de fala dentro do mesmo módulo compatível
+com o sandbox. Campos estruturais são associados independentemente da ordem
+de captura. Veja [leitor estrutural](LEITOR-ESTRUTURAL.pt-BR.md) para funcionamento,
+testes, limites e reversão local.
 
 - texto, foco, controles, idiomas e fala pertencem ao leitor de telas;
 - posição, estado da partida e sons direcionais pertencem à jogabilidade;

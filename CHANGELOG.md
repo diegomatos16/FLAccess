@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.7 - 2026-10-21
+
+- Consolidate native component ownership, shared focus/name/value/context
+  decisions, text review, editing and dialog handling from local dev 21.
+- Revalidate queued and paragraph-deferred speech before delivery; reject
+  stale values, recycled objects and previous-context output.
+- Include regression tests and implementation reports. Internal tests passed;
+  final live-game validation is incomplete and known reports remain open.
+- Public package includes Lua, PT/EN indices and Prism licenses. Modified Sider
+  DLL is excluded pending upstream redistribution permission.
+- See docs/RELEASE-0.1.7.pt-BR.md for evidence and unresolved reports.
+
+
 ## 0.1.6 - 2026-09-28
 
 Experimental release: text catalog and runtime lexicons are included. Game Plan

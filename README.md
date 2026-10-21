@@ -1,20 +1,17 @@
 # FLAccess
 
-Experimental, non-OCR menu accessibility for SP Football Life 2026 / PES 2021.
+Current release: **0.1.7** (experimental).
 
-Current release: **0.1.6** (experimental; known bugs remain).
+Menu accessibility for SP Football Life 2026 / PES 2021, using native game text
+and focus through Sider and [Prism](https://github.com/ethindp/prism), without OCR.
+Supports screen readers such as NVDA, with SAPI fallback.
 
-- [Documentação em português](docs/README.pt-BR.md)
-- [English documentation](docs/README.en.md)
+- [Download 0.1.7](https://github.com/diegomatos16/FLAccess/releases/tag/v0.1.7)
+- [Português: instalação, teclas e limitações](docs/README.pt-BR.md)
+- [English: installation, controls and limitations](docs/README.en.md)
+- [Notas da versão](docs/RELEASE-0.1.7.pt-BR.md)
 - [Changelog](CHANGELOG.md)
-- [Revisão e suíte de testes](tests/REVIEW.pt-BR.md)
-- [Roteiro de validação no jogo](tests/MANUAL.pt-BR.md)
 
-The project reads strings and focus-related state inside the game through a Sider Lua module. The module calls [Prism](https://github.com/ethindp/prism) directly through its native C API to announce through NVDA or another screen reader, with Microsoft SAPI as fallback.
-
-This is a research build tied to the studied `FL_2026.exe`. It does not patch
-the executable and it is not complete gameplay accessibility. Game Plan
-navigation has improved, but its main command screen and Edit Position still
-need in-game validation and bug fixes. See the
-language-specific documentation for installation, architecture, verified
-behavior and known limitations.
+This is experimental menu accessibility, not complete gameplay access. Known
+reports remain open. The release excludes the modified Sider DLL; see the
+installation instructions and `sider-core/README.md`.

@@ -1,11 +1,11 @@
 local m = {}
 
-local VERSION = "0.1.5"
+local VERSION = "0.1.7"
 local DEBUG_TRACE = false
 local RESOLVED_TEXT_RVA = 0x1496a3c
 local SLIDER_INIT_RVA = 0xe59f80
 local SLIDER_SET_RVA = 0xe5a190
-local UI_TEXT_SET_RVA = 0xe48bf0
+local UI_TEXT_SET_RVA = 0xe49070
 local LIST_ITEM_RENDER_RVA = 0xc97408
 local TEAM_ITEM_TEXT_A_RVA = 0xc97c32
 local TEAM_ITEM_TEXT_B_RVA = 0xc97ca8
@@ -13,6 +13,9 @@ local GAME_TEXT_LANGUAGE_SET_RVA = 0xb22a50
 local COMMENTARY_LANGUAGE_SET_RVA = 0xb229f0
 local GAME_TEXT_LANGUAGE_NAV_RVA = 0xb22871
 local a11y = {
+    build = 21,
+    runtime_version = VERSION,
+    keyboard_echo_insertions = false,
     previous_option_key = 0x36, -- 6
     next_option_key = 0x37, -- 7
     restore_key = 0x38, -- 8
@@ -46,7 +49,6 @@ local a11y = {
     diagnostic_selected_heading_widget = nil,
     diagnostic_selection_sequence = 0,
     diagnostic_player_visits = {},
-    ui_string_object_by_widget = {},
     prism_library = nil,
     prism_context = nil,
     prism_backend = nil,
@@ -191,15 +193,11 @@ local LANGUAGE_NAV_PROLOGUE =
     "\x48\x8b\xcb" ..
     "\x8b\xf0" ..
     "\x8b\x3c\xb2"
+-- Final NodeRectText setter, also called directly without e48bf0.
 local UI_TEXT_SET_PROLOGUE =
-    "\x48\x8b\xc4" ..
-    "\x55" ..
-    "\x56" ..
-    "\x57" ..
-    "\x41\x56" ..
-    "\x41\x57" ..
-    "\x48\x8d\x68\xa1" ..
-    "\x48\x81\xec\x00\x01\x00\x00"
+    "\x48\x8b\xc4\x55\x56\x57" ..
+    "\x48\x81\xec\x00\x01\x00\x00" ..
+    "\x48\xc7\x44\x24\x20\xfe\xff\xff\xff"
 local LIST_ITEM_RENDER_PROLOGUE =
     "\x45\x8b\x07" ..
     "\x4d\x8d\x4f\x40" ..
@@ -231,7 +229,6 @@ local ui_focus_widgets = {}
 local ui_focus_widget_count = 0
 local ui_focus_state = {}
 local ui_focus_activated = {}
-local last_ui_text_ms = 0
 local ui_focus_candidate_key
 local ui_focus_candidate_since = 0
 local last_ui_focus_announcement
@@ -265,8 +262,6 @@ local main_menu_tooltip
 local main_menu_tooltip_due_ms
 local main_menu_focus_guard_until = 0
 local last_screen_title_key
-local last_native_list_text
-local last_native_list_frame = -10000
 local football_life_tooltip_title
 local football_life_tooltip_description
 local controller_rows = {}
@@ -275,7 +270,6 @@ local control_row_by_value_widget = {}
 local pending_control_row
 local active_control_row
 local active_control_focused_ms = 0
-local pending_controller_label
 local active_controller_label
 local last_controller_announcement
 local last_announced_control_row
@@ -293,19 +287,11 @@ local last_audio_id
 local speech_sequence = 0
 local last_spoken_text
 local last_spoken_ms = 0
-local last_focused_id
-local focus_candidate_id
-local focus_candidate_since = 0
-local last_announced_focus_key
 local last_widget_frame = -10000
 local prism_started = false
 local frame = 0
 local startup_complete = false
 local startup_completed_frame = -10000
-local side_position
-local side_screen_active = false
-local side_widget_positions = {}
-local side_widget_count = 0
 local game_was_foreground = true
 local foreground_resume_frame = 0
 local overlay_visible = false
@@ -605,6 +591,22 @@ end
 
 function a11y.record_game_plan_input(action, source)
     if overlay_visible or sider_overlay_visible then return end
+    if (action == "A" or action == "B" or action == "escape")
+            and a11y.read_context and a11y.read_context.question
+            and pending_message_text == nil and #a11y.modal_message_backlog == 0 then
+        if action == "A" and a11y.read_context.answer_owners then
+            a11y.answer_chain = {owners=a11y.read_context.answer_owners,
+                message_key=a11y.read_context.message_key, frame=frame,
+                model_generation=a11y.ui_model and a11y.ui_model.generation}
+        else
+            a11y.answer_chain = nil
+        end
+        a11y.reset_read_context("dialog-input")
+    end
+    if action == "up" or action == "down" or action == "left" or action == "right"
+            or action == "A" or action == "B" or action == "escape" then
+        a11y.begin_focus_trace(action)
+    end
     a11y.diagnostic_last_input_action = action
     a11y.diagnostic_last_input_source = source
     a11y.diagnostic_last_input_frame = frame
@@ -625,12 +627,18 @@ function a11y.record_game_plan_input(action, source)
             for _, entry in pairs(ui_focus_widgets) do
                 old_texts[entry.text] = true
             end
+            a11y.transition_old_focus_nodes = {}
+            for key, entry in pairs(ui_focus_widgets) do
+                local node = a11y.ui_model and a11y.ui_model.nodes[key]
+                a11y.transition_old_focus_nodes[key] = {
+                    identity=node and node.identity, text=entry.text,
+                }
+            end
+            a11y.transition_started_frame = frame
             a11y.transition_old_focus_texts = old_texts
             a11y.transition_guard_until_ms =
                 tonumber(ffi.C.GetTickCount64()) + 30000
-            a11y.native_speech_queue = {}
-            a11y.native_speech_first = 1
-            a11y.native_speech_last = 0
+            a11y.clear_speech_queue()
             a11y.deferred_modal_announcement = nil
         end
     end
@@ -647,9 +655,7 @@ function a11y.record_game_plan_input(action, source)
             a11y.deferred_modal_announcement = nil
             a11y.last_modal_message_text = nil
             a11y.nvda_stop_requested = true
-            a11y.native_speech_queue = {}
-            a11y.native_speech_first = 1
-            a11y.native_speech_last = 0
+            a11y.clear_speech_queue()
             a11y.reset_focus_reuse_state()
             dialog_focus_candidate = nil
             last_dialog_announcement = nil
@@ -1178,6 +1184,7 @@ local function reset_message_state()
     pending_message_text = nil
     pending_message_key = nil
     a11y.pending_message_widget_key = nil
+    a11y.pending_message_owner=nil
     pending_message_due_ms = nil
     last_announced_message_key = nil
     modal_focus_hold_until_ms = 0
@@ -1201,21 +1208,14 @@ local function reset_message_state()
     a11y.diagnostic_last_key = nil
 end
 
-local function reset_side_state()
-    side_position = nil
-    a11y.side_last_user = nil
-    side_screen_active = false
-    side_widget_positions = {}
-    side_widget_count = 0
-end
-
 function a11y.reset_focus_reuse_state()
+    a11y.control_focus_owner = nil
+    last_controller_announcement, last_announced_control_row = nil, nil
+    last_announced_selector_label = nil
     ui_focus_candidate_key = nil
     ui_focus_candidate_since = 0
     last_ui_focus_announcement = nil
     ui_focus_preferred_offset_index = nil
-    focus_candidate_id = nil
-    last_announced_focus_key = nil
     a11y.diagnostic_candidate_key = nil
     a11y.diagnostic_candidate_since = frame
 end
@@ -1226,20 +1226,13 @@ function a11y.focus_widget_reused(previous_focus, text)
 end
 
 local function reset_navigation_generation()
+    a11y.reset_control_tracking_state()
     ui_focus_widgets = {}
     ui_focus_widget_count = 0
     ui_focus_state = {}
     ui_focus_activated = {}
     a11y.reset_focus_reuse_state()
     last_selected_ui_entry = nil
-    active_control_row = nil
-    active_controller_label = nil
-    pending_control_row = nil
-    pending_controller_label = nil
-    pending_controller_tooltip = nil
-    pending_controller_tooltip_label = nil
-    controller_tooltip_due_ms = nil
-    last_spoken_controller_tooltip_key = nil
     dynamic_text_candidate = nil
     dynamic_text_due_ms = nil
     main_menu_tooltip = nil
@@ -1252,12 +1245,6 @@ local function reset_navigation_generation()
     a11y.transition_old_focus_texts = nil
     a11y.transition_guard_until_ms = 0
     a11y.skip_hint_last_frame = -10000
-    last_controller_announcement = nil
-    last_announced_control_row = nil
-    last_announced_selector_label = nil
-    control_rows_by_label_widget = {}
-    control_row_by_value_widget = {}
-    controller_rows = {}
     a11y.ui_text_caller_by_widget = {}
     slider_rows = {}
     slider_values = {}
@@ -1267,10 +1254,7 @@ local function reset_navigation_generation()
     dialog_preferred_offset = nil
     dialog_focus_candidate = nil
     last_dialog_announcement = nil
-    last_native_list_text = nil
-    last_native_list_frame = -10000
     reset_message_state()
-    reset_side_state()
 end
 local featured_initial_ids = {
     [60948637] = true,
@@ -1580,6 +1564,7 @@ local function clean_text(text)
     -- PES formatting markers use control byte 0x11 plus two command bytes.
     -- Keep the controls used by Game Plan tutorials. Stripping every marker
     -- made sentences such as "hold A" become only "hold".
+    if a11y.control_symbol_text then text=a11y.control_symbol_text(text) end
     if a11y.ui_language == "pt" then
         text = text:gsub("\17ka", "botão A")
         text = text:gsub("\17jm", "analógico esquerdo")
@@ -1863,7 +1848,7 @@ function a11y.start_diagnostic(reason)
     a11y.diagnostic_selection_sequence = 0
     a11y.diagnostic_player_visits = {}
     file:write("FLAccess diagnostic\n")
-    file:write("version=", VERSION, "\n")
+    file:write("version=", VERSION, "\nbuild=", tostring(a11y.build), "\n")
     file:write("started=", os.date("!%Y-%m-%dT%H:%M:%SZ"), "\n")
     file:write("reason=", a11y.diagnostic_text(reason), "\n")
     file:write("policy=stable focus changes, bounded snapshots, and correlated Game Plan input/selection events; no continuous memory dump\n\n")
@@ -1993,7 +1978,8 @@ local function control_label_from_tooltip(text)
     return nil
 end
 
-local function looks_like_message(text)
+local function looks_like_message(text, widget)
+    if a11y.is_structural_answer(text, widget and memory.hex(widget)) then return false end
     if is_noninteractive_text(text) or is_splash_text(text) then
         return false
     end
@@ -2003,6 +1989,10 @@ local function looks_like_message(text)
         return true
     elseif role == "control" or role == "dialog-button"
             or role == "menu-item-or-title" or role == "label-or-name" then
+        return false
+    end
+    local name = widget and a11y.widget_internal_name(widget)
+    if name and (name:match("_item$") or name:match("_value$")) then
         return false
     end
     return (#text >= 55
@@ -2074,6 +2064,7 @@ local function register_dialog_option(text, widget, widget_key)
         address = widget,
         key = widget_key,
         last_seen = frame,
+        native_owner = a11y.native_owner_token(),
     }
     local yes = dialog_options["Sim"]
     local no = dialog_options["Não"]
@@ -2101,15 +2092,30 @@ local function add_recent_heading_to_message()
 end
 
 local function remember_message_text(text, widget_key)
+    if not a11y.native_key_allowed(widget_key) then return end
+    local observed=widget_key and a11y.ui_model and a11y.ui_model.nodes[widget_key]
+    if observed and a11y.capture_reading_panel(observed) then return end
+    if observed and not a11y.native_presentation_ready(observed.address) then
+        a11y.defer_bound_guidance(observed.address,text)
+        return
+    end
+    local message_role = a11y.text_asset_role(text)
+    if a11y.dashboard_review and not a11y.read_context_state().structural_question
+            and not a11y.read_context_state().structural_event then
+        -- Loaded flow metadata must not silence a bound, current dialog.
+        -- Keep ambient panel content in review; require an observed object.
+        local node = a11y.ui_model and a11y.ui_model.nodes[widget_key]
+        if message_role ~= "dialog" or not node or node.text ~= text then return end
+    end
+    if a11y.is_structural_answer(text,widget_key) then return end
     if is_modal_button(text) or is_noninteractive_text(text) then
         return
     end
-    if control_label_from_tooltip(text) then
+    if control_label_from_tooltip(text) or a11y.is_control_help(text) then
         -- Focus help belongs after its label/type/value, not in the modal
         -- paragraph queue. The UI text hook schedules it as a tooltip.
         return
     end
-    local message_role = a11y.text_asset_role(text)
     if message_role == "dialog" or message_role == "instruction" then
         a11y.transition_old_focus_texts = nil
         a11y.transition_guard_until_ms = 0
@@ -2144,17 +2150,7 @@ local function remember_message_text(text, widget_key)
             a11y.pre_match_last_action = nil
         end
         a11y.pre_match_active = true
-        a11y.game_plan_active = false
-        a11y.game_plan_main_surface = false
-        a11y.game_plan_attribute_panel_until_ms = 0
-        a11y.game_plan_attribute_locked_name = nil
-        a11y.game_plan_context = nil
-        a11y.game_plan_announced_context = nil
-        a11y.game_plan_last_focus_text = nil
-        a11y.game_plan_last_menu_focus = nil
-        a11y.game_plan_attribute_due_ms = nil
-        a11y.game_plan_attribute_hold_until_ms = 0
-        a11y.game_plan_basic_prompt_active = false
+        a11y.leave_game_plan()
         a11y.stadium_active = false
         a11y.pre_match_notice_text = text
     elseif text:find("Se você voltar à tela anterior", 1, true)
@@ -2182,6 +2178,7 @@ local function remember_message_text(text, widget_key)
     end
     if recent_message_text
             and frame - recent_message_frame <= 4
+            and widget_key == recent_message_widget_key
             and not is_data_notice(recent_message_text)
             and not recent_message_text:match("[%.%!%?]$")
             and recent_message_text ~= text
@@ -2211,14 +2208,17 @@ local function remember_message_text(text, widget_key)
         end
         return
     end
-    if looks_like_message(text) or is_data_notice(text) then
+    local observed = a11y.ui_model and a11y.ui_model.nodes[widget_key]
+    if looks_like_message(text, observed and observed.address)
+            or a11y.is_instruction_message(text) or is_data_notice(text) then
         recent_message_text = text
         recent_message_widget_key = widget_key
         recent_message_frame = frame
         log(string.format(
             "[FLAccess] message-candidate text=%q",
             recent_message_text))
-        if cup_group_message
+        if message_role == "dialog" or (text:match("%?$"))
+                or cup_group_message
                 or text:find("A partida começará quando os dois times", 1, true)
                 or is_data_notice(recent_message_text)
                 or frame - last_modal_button_frame <= 120 then
@@ -2241,10 +2241,12 @@ function a11y.poll_direct_message_update()
             or not recent_message_text
             or not a11y.is_instruction_message(recent_message_text)
             or frame - recent_message_frame > 3600 then return end
-    local string_object =
-        a11y.ui_string_object_by_widget[recent_message_widget_key]
-    if not string_object then return end
-    local text = a11y.read_msvc_string(string_object)
+    -- Setter arguments frequently point into a caller's temporary stack.
+    -- Only copied observations may survive the callback; never poll that pointer.
+    local node=a11y.ui_model and a11y.ui_model.nodes[recent_message_widget_key]
+    if not node or not a11y.native_widget_allowed(node.address)
+            or not a11y.ui_node_matches_live(node) then return end
+    local text=node.text
     if not text or text == ""
             or text == ui_text_by_widget[recent_message_widget_key] then return end
     ui_text_by_widget[recent_message_widget_key] = text
@@ -2275,6 +2277,7 @@ queue_recent_message = function()
             pending_message_text = recent_message_text
             pending_message_key = key
             pending_message_due_ms = now_ms + 40
+            a11y.open_read_dialog(recent_message_text, recent_message_widget_key)
             return
         end
         for _, entry in ipairs(a11y.modal_message_backlog) do
@@ -2289,12 +2292,14 @@ queue_recent_message = function()
     pending_message_text = recent_message_text
     pending_message_key = key
     a11y.pending_message_widget_key = recent_message_widget_key
+    a11y.pending_message_owner=a11y.native_owner_token()
     pending_message_due_ms = now_ms
         + (recent_message_text:match("[%.%!%?]$") and 40 or 160)
     -- Any fresh message may own a paired Sim/Não confirmation. Require its
     -- buttons to be rendered with this message before using their focus bits.
     a11y.modal_dialog_start_frame = frame
     a11y.confirmation_dialog_until_frame = frame + 900
+    a11y.open_read_dialog(recent_message_text, recent_message_widget_key)
     a11y.modal_navigation_last_ms = nil
     -- A newly detected dialog owns the next output. Drop focus announcements
     -- captured earlier in this render slice before the text hook arrived.
@@ -2309,9 +2314,7 @@ queue_recent_message = function()
             end
         end
     end
-    a11y.native_speech_queue = pending_title and {pending_title} or {}
-    a11y.native_speech_first = 1
-    a11y.native_speech_last = pending_title and 1 or 0
+    a11y.clear_speech_queue(pending_title)
     a11y.deferred_modal_announcement = nil
     a11y.pending_modal_button_text = nil
     pending_controller_tooltip = nil
@@ -2324,21 +2327,24 @@ queue_recent_message = function()
 end
 
 function a11y.capture_resolved_dialog(text, text_id, caller_rva)
-    if caller_rva == 0xe4901d or not text or #text < 60
-            or control_label_from_tooltip(text) then
+    if a11y.is_structural_answer(text) then return false end
+    if a11y.dashboard_review then return false end
+    if caller_rva == 0xe4901d or not text or #text < 12
+            or control_label_from_tooltip(text) or a11y.is_control_help(text) then
         return false
     end
     local role = a11y.text_asset_role(text)
     if role ~= "dialog" and role ~= "instruction" then
         return false
     end
+    if role == "instruction" and #text < 60 then return false end
     remember_message_text(text, "resolved-dialog:" .. tostring(text_id))
     queue_recent_message()
     return true
 end
 
-speak = function(text, interrupt, modal)
-    if not text or text == "" then
+speak = function(text, interrupt, modal, identity, origin_widget)
+    if not text or text == "" or text == "No String" or text == "/" or a11y.unresolved_format(text) then
         return
     end
     if a11y.cup_group_table_active
@@ -2365,16 +2371,17 @@ speak = function(text, interrupt, modal)
     local now_ms = tonumber(ffi.C.GetTickCount64())
     if (text == "OK, item selecionado"
             or text == "OK, botão selecionado")
-            and (pending_message_text
+            and not modal and (pending_message_text
                 or (modal_message_spoken_frame > 0
                     and now_ms < modal_focus_hold_until_ms + 1000)) then
         return
     end
-    if text == last_spoken_text and now_ms - last_spoken_ms < 40 then
+    if text == last_spoken_text and now_ms - last_spoken_ms < 40
+            and (not identity or identity == a11y.last_spoken_identity) then
         return
     end
     if pending_message_text and not modal then
-        a11y.deferred_modal_announcement = text
+        a11y.defer_speech(text,identity,origin_widget)
         return
     end
     -- Prism has no completion callback. While a modal paragraph is expected
@@ -2383,12 +2390,13 @@ speak = function(text, interrupt, modal)
         if interrupt ~= false and not modal then
             -- Rapid focus changes during a paragraph should not leave every
             -- obsolete item queued in Prism. Keep only the latest announcement.
-            a11y.deferred_modal_announcement = text
+            a11y.defer_speech(text,identity,origin_widget)
             return
         end
         interrupt = false
     elseif interrupt ~= false then
         a11y.deferred_modal_announcement = nil
+        a11y.deferred_speech=nil
     end
     if a11y.title_pending_first_item then
         if now_ms <= a11y.title_pending_first_item_until_ms
@@ -2402,6 +2410,7 @@ speak = function(text, interrupt, modal)
     speech_sequence = speech_sequence + 1
     local mode = interrupt == false and "queue" or "interrupt"
     last_spoken_text = text
+    a11y.last_spoken_identity = identity
     last_spoken_ms = now_ms
     a11y.native_speech_last = a11y.native_speech_last + 1
     a11y.native_speech_queue[a11y.native_speech_last] = {
@@ -2409,7 +2418,39 @@ speak = function(text, interrupt, modal)
         text=text,
         interrupt=interrupt ~= false,
         mode=mode,
+        identity=identity,
+        presentation_owner=a11y.native_owner_token(),
+        origin=origin_widget and a11y.capture_speech_origin(origin_widget) or nil,
     }
+    if origin_widget then
+        log("[FLAccess] speech-origin sequence=" .. tostring(speech_sequence) .. " widget=" .. memory.hex(origin_widget)
+            .. " owner=" .. tostring(a11y.native_owner_token()))
+    else
+        log("[FLAccess] speech-origin sequence=" .. tostring(speech_sequence) .. " source=legacy-or-system")
+    end
+end
+
+-- All queue replacement goes through this function, including modal takeover.
+function a11y.clear_speech_queue(preserved_entry)
+    for index=a11y.native_speech_first,a11y.native_speech_last do
+        local entry=a11y.native_speech_queue[index]
+        if entry and entry~=preserved_entry and entry.selection_result
+                and entry.selection_result.status=="queued" then entry.selection_result.status="discarded" end
+    end
+    a11y.native_speech_queue = preserved_entry and {preserved_entry} or {}
+    a11y.native_speech_first = 1
+    a11y.native_speech_last = preserved_entry and 1 or 0
+end
+
+function a11y.speech_entry_allowed(entry)
+    return entry ~= nil
+        and (not entry.presentation_owner or entry.presentation_owner == a11y.native_owner_token())
+        and (not entry.origin or a11y.speech_origin_allowed(entry.origin))
+        and (not entry.engine_focus or a11y.engine_focus_delivery_allowed(entry.engine_focus))
+        and (not entry.native_list or a11y.native_list_delivery_allowed(entry.native_list))
+        and (not entry.reading_selection or a11y.reading_selection_delivery_allowed(entry.reading_selection))
+        and (not entry.page_context or a11y.page_delivery_allowed(entry.page_context))
+        and (not entry.selection_result or a11y.selection_result_allowed(entry.selection_result))
 end
 
 function a11y.flush_native_speech(now_ms)
@@ -2417,18 +2458,25 @@ function a11y.flush_native_speech(now_ms)
     if not a11y.initialize_native_prism()
             or not a11y.refresh_native_prism(now_ms) then
         if a11y.prism_failed then
-            a11y.native_speech_queue = {}
-            a11y.native_speech_first = 1
-            a11y.native_speech_last = 0
+            a11y.clear_speech_queue()
         end
         return
     end
     while a11y.native_speech_first <= a11y.native_speech_last do
         local entry = a11y.native_speech_queue[a11y.native_speech_first]
-        local native_text = a11y.to_c_string(entry.text)
+        if not a11y.speech_entry_allowed(entry) then
+            if entry and entry.selection_result then entry.selection_result.status="discarded" end
+            log("[FLAccess] speech-discard reason=origin-or-focus-changed sequence=" .. tostring(entry and entry.sequence))
+        else
+        -- Preserve a complete literal caption supplied by the game. Strip
+        -- synthetic role additions, not matching words inside real dialogue.
+        local spoken=entry.origin and entry.origin.text==entry.text and entry.text
+            or a11y.output_speech_text(entry.text)
+        local native_text = a11y.to_c_string(spoken)
         local error_code = a11y.prism_functions.backend_speak(
             a11y.prism_backend, native_text, entry.interrupt)
         if error_code ~= 0 then
+            if entry.selection_result then entry.selection_result.status="failed" end
             local failed_name = a11y.prism_backend_name
             if a11y.select_prism_backend(failed_name) then
                 error_code = a11y.prism_functions.backend_speak(
@@ -2440,21 +2488,21 @@ function a11y.flush_native_speech(now_ms)
                 "[FLAccess] native-prism-speak-failed backend=%q error=%d text=%q",
                 a11y.prism_backend_name or "none",
                 error_code,
-                entry.text))
+                spoken))
         else
+            if entry.selection_result then entry.selection_result.status="delivered" end
             log(string.format(
                 "[FLAccess] speech sequence=%d backend=%q mode=%s text=%q",
                 entry.sequence,
                 a11y.prism_backend_name,
                 entry.mode,
-                entry.text))
+                spoken))
+        end
         end
         a11y.native_speech_queue[a11y.native_speech_first] = nil
         a11y.native_speech_first = a11y.native_speech_first + 1
     end
-    a11y.native_speech_queue = {}
-    a11y.native_speech_first = 1
-    a11y.native_speech_last = 0
+    a11y.clear_speech_queue()
 end
 
 function a11y.stop_nvda_if_requested()
@@ -2499,10 +2547,37 @@ local function announce_screen_title(text, widget_key, widget)
     if not is_screen_title(text, widget) then
         return
     end
+    local panel=a11y.read_context_state()
+    if panel.native_reading_panel and panel.title==text and a11y.reading_panel_is_current() then return end
+    if widget and not a11y.native_presentation_ready(widget) then
+        a11y.defer_bound_guidance(widget,text)
+        return
+    end
+    local title_name = widget and a11y.widget_internal_name(widget)
+    local title_role = a11y.text_asset_role(text)
+    if (title_name == "title" or title_name == "text_title")
+            and (not title_role or title_role == "label-or-name") then
+        -- An unknown overlay caption must not reset a working menu. Keep it
+        -- pending only after an independently recognized context boundary.
+        if a11y.read_context_state().kind == "unknown" then
+            a11y.read_context.pending_title = text
+        end
+        return
+    end
+    if title_name == "title" or title_name == "text_title" then
+        -- A caption is presentation, not proof of a new native scene. A late
+        -- title must never erase controls already observed in that scene.
+        if a11y.ui_model then a11y.ui_model.surface = text end
+        -- A real submenu title ends the horizontal pre-match action reader.
+        -- Its background System Settings caption may still be rendered.
+        a11y.pre_match_active = false
+        a11y.pre_match_entry_pending = false
+    end
     a11y.transition_old_focus_texts = nil
     a11y.transition_guard_until_ms = 0
     -- Returning from group assignment to team selection ends the table mode.
     a11y.cup_group_table_active = false
+    a11y.set_read_title(text)
     a11y.screen_title_hold_until_ms =
         tonumber(ffi.C.GetTickCount64()) + 500
     local key = text
@@ -2511,30 +2586,147 @@ local function announce_screen_title(text, widget_key, widget)
         last_screen_title_key = key
         a11y.last_screen_title_frame = frame
         a11y.title_pending_first_item = nil
-        speak(text)
+        speak(text,not a11y.read_context_state().native_reading_panel,nil,nil,widget)
         a11y.title_pending_first_item = text
         a11y.title_pending_first_item_until_ms =
             tonumber(ffi.C.GetTickCount64()) + 2000
     end
 end
 
-function a11y.announce_skip_hint(text)
+function a11y.announce_skip_hint(text, node)
     if not text or frame - a11y.skip_hint_last_frame < 300
             or not a11y.game_is_foreground() then
         return false
     end
     local lower = text:lower()
+    if node and (text == "Pular" or text == "Skip") then
+        if not a11y.pending_skip_hint or a11y.pending_skip_hint.key ~= node.key then
+            a11y.pending_skip_hint = {owner=node.owner_link,key=node.key,started=frame,
+                text=text,native_owner=a11y.native_owner_token()}
+        end
+        return true
+    end
     local skip_marker = text:find("<Pular>", 1, true)
         or text:find("<Skip>", 1, true)
+        or text:match("[Pp]ressione%s+.+%s+para pular")
+        or text:match("[Pp]ress%s+.+%s+to skip")
         or (lower:find("options", 1, true)
             and (lower:find("pular", 1, true)
                 or lower:find("skip", 1, true)))
     if not skip_marker then return false end
+    if text:find("%%s") then return false end
     a11y.skip_hint_last_frame = frame
-    speak(a11y.ui_language == "pt"
-        and "Pressione Options para pular."
-        or "Press Options to skip.")
+    -- Preserve the game's wording rather than inventing an instruction.
+    local spoken=text:gsub("<Pular>","Pular"):gsub("<Skip>","Skip")
+    speak(spoken,nil,nil,nil,node and node.address)
     return true
+end
+
+function a11y.spoken_control_icon(text)
+    return text and (text:find("botão",1,true) or text:find("button",1,true)
+        or text:find("tecla ",1,true) or text:find("key ",1,true)
+        or text=="Options" or text=="Start" or text=="Menu" or text=="Esc" or text=="Enter")
+end
+
+function a11y.command_icon_for_node(source)
+    local snapshot=a11y.native_windows
+    -- GuideBar pairs follow the indexed nodes used by its presentation
+    -- routine. They need not be sibling UI nodes.
+    local bound_button
+    for _,pair in ipairs(snapshot and snapshot.command_bar and snapshot.command_bar.pairs or {}) do
+        if source and pair.caption==tonumber(source.address)
+                and a11y.native_widget_allowed(pair.icon) and a11y.native_widget_allowed(pair.caption) then
+            local caption=a11y.read_native_rendered_text(pair.caption)
+            local icon=a11y.read_native_rendered_text(pair.icon)
+            if caption==source.text and a11y.spoken_control_icon(icon) then
+                if bound_button and bound_button~=icon then return nil end
+                bound_button=icon
+            end
+        end
+    end
+    if bound_button then return bound_button end
+    local member=source and snapshot and snapshot.members[tonumber(source.address)]
+    if not member or not member.active then return nil end
+    local nodes=a11y.presented_nodes()
+    for _,owner in ipairs(member.owners or {}) do
+        local parents=owner.parents
+        local ancestor=parents and parents[tonumber(source.address)]
+        local visited={}
+        for _=1,8 do
+            if not owner.enabled or not ancestor or ancestor==owner.root or visited[ancestor] then break end
+            visited[ancestor]=true
+            local captions,icons,button=0,0,nil
+            for _,node in ipairs(nodes) do
+                local at,seen=tonumber(node.address),{}
+                for _=1,10 do
+                    if not at or seen[at] then break end
+                    seen[at]=true
+                    if at==ancestor then
+                        if node.name=="padIcon" then
+                            icons=icons+1
+                            if a11y.spoken_control_icon(node.text) then button=node.text end
+                        elseif node.text and node.text~="" then captions=captions+1 end
+                        break
+                    end
+                    at=parents[at]
+                end
+            end
+            if captions>1 then break end
+            if captions==1 and icons==1 and button then return button end
+            ancestor=parents[ancestor]
+        end
+    end
+end
+
+function a11y.poll_skip_hint()
+    local hint = a11y.pending_skip_hint
+    if not hint then return end
+    if hint.native_owner and hint.native_owner ~= a11y.native_owner_token() then
+        a11y.pending_skip_hint=nil
+        return
+    end
+    if not a11y.native_key_allowed(hint.key) then a11y.pending_skip_hint=nil; return end
+    local button,ambiguous
+    local source=a11y.ui_model and a11y.ui_model.nodes[hint.key]
+    for _, node in pairs(a11y.ui_model and a11y.ui_model.nodes or {}) do
+        local peers=source and a11y.component_peers(source.address,node.address)
+        if (peers==true or (peers==nil and hint.owner and node.owner_link==hint.owner))
+                and node.name == "padIcon" and a11y.ui_node_matches_live(node)
+                and a11y.native_widget_allowed(node.address)
+                and a11y.spoken_control_icon(node.text) then
+            if button and button ~= node.text then ambiguous=true end
+            button=node.text
+        end
+    end
+    if ambiguous then button=nil end
+    if not button and not ambiguous then button=a11y.command_icon_for_node(source) end
+    if not button then
+        if frame-hint.started < 12 then return end
+        if not hint.label_spoken then
+            hint.label_spoken=true
+            local source=a11y.ui_model and a11y.ui_model.nodes[hint.key]
+            speak(hint.text or (source and source.text),nil,nil,nil,source and source.address)
+            a11y.component_evidence(source,"skip-button-unresolved")
+            local parts={}
+            for _,node in pairs(a11y.ui_model and a11y.ui_model.nodes or {}) do
+                if node.name=="padIcon" and #parts<8 and a11y.native_widget_allowed(node.address) then
+                    local _,native_raw,native_font=a11y.read_native_rendered_text(node.address)
+                    parts[#parts+1]=string.format("%s raw=%q font=%s",node.key,
+                        native_raw or node.raw_text or node.text or "",tostring(native_font or node.native_font))
+                end
+            end
+            log("[FLAccess] skip-icon-unresolved widget=" .. hint.key .. " ambiguous=" .. tostring(ambiguous)
+                .. " font-family=" .. tostring(a11y.control_font_family) .. " icons=" .. table.concat(parts," | "))
+        end
+        if frame-hint.started>120 then a11y.pending_skip_hint=nil end
+        return
+    end
+    a11y.pending_skip_hint = nil
+    if frame - a11y.skip_hint_last_frame < 300 then return end
+    a11y.skip_hint_last_frame = frame
+    local source=a11y.ui_model and a11y.ui_model.nodes[hint.key]
+    speak((hint.text or (source and source.text) or "") .. ", " .. button,
+        nil,nil,nil,source and source.address)
 end
 
 local function enqueue_startup_speech(text, duration_ms)
@@ -2597,6 +2789,9 @@ local function process_startup_speech(now_ms)
 end
 
 local function selector_role(label)
+    if label == "Nome do treinador" or label == "Manager Name" or label == "Coach Name" then
+        return "ativar para editar"
+    end
     if label == "Nome dos ajustes" then
         return "campo de texto"
     end
@@ -2611,13 +2806,295 @@ local function control_speech(row)
     return spoken
 end
 
+function a11y.track_control_focus(key)
+    local row = a11y.control_for_widget(key)
+    local owner = row or key
+    if a11y.control_focus_owner ~= owner then
+        a11y.control_focus_owner = owner
+        last_controller_announcement, last_announced_control_row = nil, nil
+        last_announced_selector_label = nil
+    end
+end
+
+function a11y.secondary_focus_is_current(key, index)
+    local model = a11y.ui_model
+    local edge = ui_focus_activated[key] and ui_focus_activated[key][index] or -1
+    return not model or not model.last_primary_edge or edge >= model.last_primary_edge
+end
+
+-- Investigation only: bounded observations, never used as visibility or focus authority.
+function a11y.capture_focus_trace(stage)
+    local trace = a11y.focus_trace
+    if not trace or not a11y.sider_dir or (trace.bytes or 0) >= 2097152 then return end
+    local lines = {string.format("TRACE input=%d frame=%d stage=%s action=%s generation=%s reason=%s",
+        trace.sequence, frame, stage, tostring(trace.action),
+        tostring(a11y.ui_model and a11y.ui_model.generation),
+        tostring(a11y.ui_model and a11y.ui_model.focus_reason))}
+    local generation = a11y.ui_model and a11y.ui_model.generation
+    if trace.sample_generation ~= generation then
+        trace.samples, trace.owner_samples, trace.sample_generation = {}, {}, generation
+    end
+    trace.samples = trace.samples or {}
+    local nodes = {}
+    for _, node in pairs(a11y.ui_model and a11y.ui_model.nodes or {}) do nodes[#nodes + 1] = node end
+    table.sort(nodes, function(left, right) return left.sequence > right.sequence end)
+    for position, node in ipairs(nodes) do
+        if position > 80 then break end
+        if readable(node.address, 0x180) then
+            local bytes = memory.read(node.address, 0x180)
+            if bytes and #bytes == 0x180 then
+                local previous = trace.samples[node.identity]
+                local fields = {}
+                for offset = 0, 0x17c, 4 do
+                    local relative = offset
+                    local value = memory.unpack("u32", bytes:sub(relative + 1, relative + 4))
+                    local old = previous and memory.unpack("u32", previous.bytes:sub(relative + 1, relative + 4))
+                    if (not previous and value ~= 0) or (previous and value ~= old) then
+                        fields[#fields + 1] = string.format("%x=%x", offset, value)
+                    end
+                end
+                trace.samples[node.identity] = {bytes=bytes, text=node.text}
+                local row = a11y.control_for_widget(node.key)
+                if not previous or #fields > 0 or previous.text ~= node.text then
+                lines[#lines + 1] = string.format("node=%s identity=%s name=%q text=%q age=%d control=%s fields={%s}",
+                    node.key, node.identity, node.name or "", node.text or "", frame-node.last_seen,
+                    row and control_speech(row) or "none", table.concat(fields, ","))
+                end
+            end
+        end
+    end
+    local owners, owner_count = {}, 0
+    trace.owner_samples = trace.owner_samples or {}
+    for _, node in ipairs(nodes) do
+        local owner = node.owner_link
+        if owner and not owners[owner] and owner_count < 16 then
+            owners[owner], owner_count = true, owner_count + 1
+            if readable(owner, 0x100) then
+                local bytes = memory.read(owner, 0x100)
+                if bytes and #bytes == 0x100 then
+                    local previous, fields = trace.owner_samples[owner], {}
+                    for offset = 0, 0xfc, 4 do
+                        local value = memory.unpack("u32",bytes:sub(offset+1,offset+4))
+                        local old = previous and memory.unpack("u32",previous:sub(offset+1,offset+4))
+                        if (not previous and value ~= 0) or (previous and value ~= old) then
+                            fields[#fields+1] = string.format("%x=%x",offset,value)
+                        end
+                    end
+                    trace.owner_samples[owner] = bytes
+                    if #fields > 0 then
+                        lines[#lines+1] = "owner-candidate=" .. tostring(owner) .. " fields={" .. table.concat(fields,",") .. "}"
+                    end
+                end
+            end
+        end
+    end
+    local output = table.concat(lines, "\n") .. "\n\n"
+    local file = io.open(a11y.sider_dir .. "\\FLAccess-focus-trace.log", trace.started and "at" or "wt")
+    if not file then return end
+    file:write(output); file:close()
+    trace.started, trace.bytes = true, (trace.bytes or 0) + #output
+end
+
+function a11y.begin_focus_trace(action)
+    local trace = a11y.focus_trace or {sequence=0, bytes=0}
+    if trace.sequence >= 120 or trace.bytes >= 2097152 then return end
+    trace.sequence, trace.action, trace.input_frame = trace.sequence + 1, action, frame
+    trace.followups = {frame + 4, frame + 12}
+    a11y.focus_trace = trace
+    a11y.capture_focus_trace("input")
+end
+
+function a11y.poll_focus_trace()
+    local trace = a11y.focus_trace
+    if not trace or not trace.followups then return end
+    while trace.followups[1] and frame >= trace.followups[1] do
+        local due = table.remove(trace.followups, 1)
+        a11y.capture_focus_trace("after-" .. tostring(due - trace.input_frame))
+    end
+end
+
+-- Structured, opt-in evidence. These records never grant speech authority.
+-- Capture changes throughout a session, not only its first 120 inputs.
+function a11y.start_component_capture(path)
+    local file=path and io.open(path,"wt")
+    if not file then return false end
+    file:write("FLACCESS_COMPONENTS format=1 build=",tostring(a11y.build),
+        " started=",os.date("!%Y-%m-%dT%H:%M:%SZ"),"\n")
+    file:close()
+    a11y.component_capture={active=true,path=path,bytes=0,sequence=0,nodes={},parents={}}
+    return true
+end
+
+function a11y.start_armed_component_capture()
+    if not a11y.sider_dir then return false end
+    local marker=a11y.sider_dir .. "\\FLAccess-components.capture"
+    local file=io.open(marker,"rt")
+    if not file then return false end
+    local armed=file:read("*l")=="armed"
+    file:close()
+    if not armed or not a11y.start_component_capture(a11y.sider_dir .. "\\FLAccess-components.log") then return false end
+    file=io.open(marker,"wt")
+    if not file then a11y.component_capture.active=false; return false end
+    file:write("consumed\n");file:close()
+    log("[FLAccess] component-capture=started policy=changes-only one-session")
+    return true
+end
+
+function a11y.component_capture_lines(capture)
+    local snapshot=a11y.native_windows
+    local owner=a11y.native_owner_token() or ""
+    local lines,ordered,parents={}, {}, {}
+    local generation=a11y.ui_model and a11y.ui_model.generation
+    if capture.owner~=owner or capture.generation~=generation then
+        capture.owner,capture.generation,capture.nodes,capture.parents=owner,generation,{},{}
+    end
+    lines[#lines+1]=string.format("SNAP sequence=%d frame=%d owner=%q generation=%s reason=%q action=%q keyboard=%s font=%s base=%s",
+        capture.sequence,frame,owner,tostring(a11y.ui_model and a11y.ui_model.generation),
+        a11y.ui_model and a11y.ui_model.focus_reason or "",a11y.diagnostic_last_input_action or "",
+        tostring(a11y.keyboard_window),tostring(a11y.control_font_family),tostring(tonumber(process_base_u64)))
+    for _,window in ipairs(snapshot and snapshot.windows or {}) do
+        local d=window.cursor_detail or {}
+        lines[#lines+1]=string.format("WINDOW address=%s root=%s input=%s selected=%s group=%s index=%s status=%q owned_roots=%q type=%s impl=%s presentation=%s task_parent=%s task_child=%s",
+            tostring(window.address),tostring(window.root),tostring(window.enabled),tostring(d.selected),
+            tostring(d.group),tostring(d.item_index),d.status or "no-cursor",table.concat(window.owned_roots or {},","),
+            tostring(a11y.menu_read(window.address,"u64")),tostring(window.impl),
+            tostring(window.impl and a11y.menu_read(window.impl+0x90,"u64")),
+            tostring(a11y.menu_read(window.address+0x38,"u64")),
+            tostring(a11y.menu_read(window.address+0x40,"u64")))
+        for _,item in ipairs(window.tree_evidence and window.tree_evidence.frontier or {}) do
+            lines[#lines+1]="FRONTIER window=" .. tostring(window.address) .. " address=" .. tostring(item.address)
+                .. " rva=" .. tostring(item.rva) .. " fields=" .. a11y.native_node_summary(item.address)
+        end
+    end
+    for _,line in ipairs(a11y.component_link_capture_lines(snapshot)) do lines[#lines+1]=line end
+    local list=a11y.native_list_selection
+    if list then
+        lines[#lines+1]=string.format("LIST widget=%s identity=%q text=%q observed=%s committed=%s",
+            tostring(list.widget),list.identity or "",a11y.diagnostic_text(list.text),tostring(list.observed),tostring(list.committed))
+    end
+    for key,node in pairs(a11y.ui_model and a11y.ui_model.nodes or {}) do
+        local address=tonumber(node.address)
+        if address then
+            local member=snapshot and snapshot.members and snapshot.members[address]
+            local selected=snapshot and snapshot.selected_members and snapshot.selected_members[address]
+            ordered[#ordered+1]={key=key,node=node,member=member,selected=selected==true,
+                rank=selected and 0 or member and member.active and 1 or not member and 2 or 3}
+        end
+    end
+    table.sort(ordered,function(a,b)
+        if a.rank~=b.rank then return a.rank<b.rank end
+        if (a.node.last_seen or 0)~=(b.node.last_seen or 0) then return (a.node.last_seen or 0)>(b.node.last_seen or 0) end
+        return a.key<b.key
+    end)
+    local live={}
+    for index,item in ipairs(ordered) do
+        if index>128 then break end
+        local node,member=item.node,item.member
+        local address=tonumber(node.address)
+        local bound=a11y.control_for_widget(item.key)
+        local provisional=control_rows_by_label_widget[item.key]
+        local event=a11y.engine_focus and a11y.engine_focus.nodes and a11y.engine_focus.nodes[item.key]
+        local text,raw,font=a11y.read_native_rendered_text(address)
+        local path={}
+        for _,entry in ipairs(member and member.owners or {}) do
+            if entry.parents then
+                local at,visited=address,{}
+                for _=1,8 do
+                    if not at or visited[at] then break end
+                    visited[at]=true
+                    path[#path+1]=tostring(at)
+                    parents[at]=true
+                    if at==entry.root then break end
+                    at=entry.parents[at]
+                end
+                break
+            end
+        end
+        -- membership=unknown is intentionally not reported as visible.
+        local raw_hex=((raw or node.raw_text or ""):sub(1,128):gsub(".",function(byte) return string.format("%02x",byte:byte()) end))
+        local line=string.format("NODE key=%q identity=%q type=%s flags=%s focus104=%s event_edge=%s name=%q text=%q rendered=%q rendered_read=%s raw=%q raw_hex=%q font=%s member=%q selected=%s label=%q value=%q relation=%q provisional=%q link38=%s link40=%s link50=%s path=%q",
+            item.key,tostring(node.identity),tostring(a11y.menu_read(address,"u64")),
+            tostring(a11y.menu_read(address+0xc,"u32")),tostring(a11y.menu_read(address+0x104,"u32")),
+            tostring(event and event.edge),node.name or "",a11y.diagnostic_text(node.text),
+            a11y.diagnostic_text(text),tostring(text~=nil),a11y.diagnostic_text(raw or node.raw_text),raw_hex,tostring(font or node.native_font),
+            member and (member.active and "input-owner" or member.presented and "context-owner" or "inactive-owner") or "unknown",
+            tostring(item.selected),bound and a11y.diagnostic_text(bound.label) or "",
+            bound and a11y.diagnostic_text(bound.value) or "",
+            bound and (bound.native_field and "native-field" or bound.structural and "named-pair" or "provisional") or "none",
+            provisional and a11y.diagnostic_text(provisional.label) or "",
+            tostring(node.owner_link),tostring(a11y.menu_read(address+0x40,"u64")),
+            tostring(a11y.menu_read(address+0x50,"u64")),table.concat(path,">"))
+        live[item.key]=true
+        if capture.nodes[item.key]~=line then lines[#lines+1]=line;capture.nodes[item.key]=line end
+    end
+    local removed={}
+    for key in pairs(capture.nodes) do if not live[key] then removed[#removed+1]=key end end
+    table.sort(removed)
+    for _,key in ipairs(removed) do
+        lines[#lines+1]=string.format("DROP key=%q reason=outside-sampled-model",key)
+        capture.nodes[key]=nil
+    end
+    local addresses={}
+    for at in pairs(parents) do addresses[#addresses+1]=at end
+    table.sort(addresses)
+    for index,at in ipairs(addresses) do
+        if index>64 then break end
+        local line="PARENT address=" .. tostring(at) .. " name=" .. string.format("%q",a11y.widget_internal_name(at) or "")
+            .. " flags=" .. tostring(a11y.menu_read(at+0xc,"u32"))
+            .. " focus104=" .. tostring(a11y.menu_read(at+0x104,"u32"))
+            .. " fields=" .. a11y.native_node_summary(at)
+        if capture.parents[at]~=line then lines[#lines+1]=line;capture.parents[at]=line end
+    end
+    lines[#lines+1]="END sampled=" .. tostring(math.min(#ordered,128)) .. " total=" .. tostring(#ordered)
+    return lines
+end
+
+function a11y.poll_component_capture()
+    local capture=a11y.component_capture
+    if not capture or not capture.active or frame-(capture.last_poll or -10000)<12 then return end
+    capture.last_poll=frame
+    local signature=(a11y.native_owner_token() or "") .. ":" .. tostring(a11y.component_capture_dirty_frame)
+        .. ":" .. tostring(a11y.diagnostic_last_input_frame)
+        .. ":" .. tostring(a11y.native_cursor_identity)
+        .. ":" .. tostring(a11y.ui_model and a11y.ui_model.generation)
+    if signature==capture.signature then
+        if not capture.followup_due or frame<capture.followup_due then return end
+        capture.followup_due=nil
+    else
+        capture.signature=signature
+        capture.followup_due=frame+36
+    end
+    capture.sequence=capture.sequence+1
+    local output=table.concat(a11y.component_capture_lines(capture),"\n") .. "\n"
+    -- On reaching a limit, preserve the entire file and report it explicitly.
+    if capture.bytes+#output>33554432 or capture.sequence>20000 then
+        capture.active=false
+        log("[FLAccess] component-capture=limit-reached bytes=" .. tostring(capture.bytes))
+        return
+    end
+    local file=io.open(capture.path,"at")
+    if not file then capture.active=false;log("[FLAccess] component-capture=write-failed");return end
+    file:write(output);file:close();capture.bytes=capture.bytes+#output
+end
+
 local function announce_control(row)
+    if a11y.keyboard_window then return end
     if not row or not row.label then
         return
     end
+    if row.label_widget and not a11y.native_presentation_ready(row.label_widget) then return end
+    if a11y.read_context_state().kind == "dialog" then return end
     local spoken = control_speech(row)
-    if spoken ~= last_controller_announcement
-            or last_announced_control_row ~= row then
+    local result=a11y.selection_result({row=row,source="control",
+        identity=row.identity or row.label_widget_key or row.label})
+    if not result then return end
+    local page=result.page
+    if spoken ~= last_controller_announcement or (page and page.identity~=a11y.last_page_announcement)
+            or last_announced_control_row ~= row
+            or not a11y.read_context_state().selection_result
+            or a11y.read_context_state().selection_result.status=="discarded"
+            or a11y.read_context_state().selection_result.status=="failed"
+            or a11y.read_context_state().selection_result.signature~=result.signature then
         if active_control_row ~= row then
             last_spoken_controller_tooltip_key = nil
             pending_controller_tooltip = nil
@@ -2637,7 +3114,10 @@ local function announce_control(row)
             pending_controller_tooltip_label = row.label
             controller_tooltip_due_ms = active_control_focused_ms + 2000
         end
-        speak(spoken)
+        if not a11y.deliver_selection_result(result) then
+            -- A temporary modal hold is not a delivered control announcement.
+            last_controller_announcement,last_announced_control_row=nil,nil
+        end
     end
 end
 
@@ -2645,8 +3125,14 @@ local function announce_control_value(row, value)
     if not row or not value or value == "" then
         return
     end
+    if a11y.read_context_state().kind == "dialog" then return end
     row.value = value
+    if a11y.keyboard_window then return end
     local full = control_speech(row)
+    if row.label_widget and not a11y.native_widget_allowed(row.label_widget) then return end
+    local result=a11y.selection_result({row=row,source="control",
+        identity=row.identity or row.label_widget_key or row.label})
+    if not result then return end
     if full == last_controller_announcement
             and last_announced_control_row == row then
         return
@@ -2655,11 +3141,11 @@ local function announce_control_value(row, value)
     last_announced_control_row = row
     local row_key = row.label_widget_key or row.label
     if active_control_row == row and last_announced_selector_label == row_key then
-        speak(value)
+        a11y.deliver_selection_result(result,{value_only=true})
     else
         active_control_row = row
         last_announced_selector_label = row_key
-        speak(full)
+        a11y.deliver_selection_result(result)
     end
 end
 
@@ -2758,15 +3244,16 @@ local function announce_controller_row(label, value)
     announce_control(row)
 end
 
-function a11y.read_msvc_string(object)
+function a11y.read_msvc_string(object, raw)
     if not object or object < 0x10000 or not readable(object, 0x20) then
         return nil
     end
     local length = tonumber(read_u64(memory.read(object + 0x10, 8)))
     local capacity = tonumber(read_u64(memory.read(object + 0x18, 8)))
-    if not length or not capacity or length < 1 or length > 512 then
+    if not length or not capacity or length < 0 or length > 512 or capacity < length then
         return nil
     end
+    if length == 0 then return "" end
     local source = object
     if capacity >= 16 then
         source = read_u64(memory.read(object, 8))
@@ -2774,14 +3261,15 @@ function a11y.read_msvc_string(object)
     if not source or source < 0x10000 or not readable(source, length) then
         return nil
     end
-    return clean_text(memory.read(source, length))
+    local text=memory.read(source,length)
+    return raw and text or clean_text(text)
 end
 
 function a11y.widget_internal_name(widget)
     -- The UI text widget contains another MSVC string at +0x18. In captured
     -- FL26 objects this is a stable engine-side name (teamName, btnH_str,
     -- ok_text, setName), not the localized caption. Read it only for
-    -- diagnostics until its semantics are verified across more surfaces.
+    -- structural field pairs; a name alone does not prove visibility or focus.
     if not widget or widget < 0x10000 then return nil end
     local name = a11y.read_msvc_string(widget + 0x18)
     if name and #name <= 64 and name:match("^[%w_%.%-]+$") then
@@ -2790,47 +3278,2435 @@ function a11y.widget_internal_name(widget)
     return nil
 end
 
-local function current_row_label()
-    if last_focused_id and widgets[last_focused_id] then
-        return widgets[last_focused_id].text
+-- Bounded observations, independent of translated captions and render order.
+-- +0x38 is deliberately not used: its ownership semantics remain unproven.
+function a11y.reset_read_context(reason)
+    if reason == "transition" then a11y.answer_chain = nil end
+    local old = a11y.read_context
+    a11y.deferred_modal_announcement,a11y.deferred_speech=nil,nil
+    a11y.read_context = {
+        generation=(old and old.generation or 0) + 1,
+        kind="unknown", reason=reason, started_frame=frame,
+        cursor=1,
+        title=nil, question=nil, selection=nil, help=nil,
+    }
+    if reason == "dialog-input" and old and (old.structural_question or old.structural_event) then
+        a11y.read_context.kind = "dialog"
+        a11y.read_context.structural_question = old.structural_question
+        a11y.read_context.structural_event = old.structural_event
+        a11y.read_context.owner_link = old.owner_link
+        a11y.read_context.baseline, a11y.read_context.answer_owners = {},{}
+        a11y.read_context.expires_frame = frame + 3600
     end
-    return nil
 end
 
-local function spoken_row(text_id)
-    local entry = widgets[text_id]
-    if not entry then
-        return nil
+function a11y.is_structural_answer(text, key)
+    local context = a11y.read_context
+    if not context or not (context.structural_question or context.structural_event) or not context.owner_link then return false end
+    local model = a11y.ui_model
+    for node_key, node in pairs(model and model.nodes or {}) do
+        if (not key or node_key == key) and node.text == text and node.name == "text"
+                and node.owner_link == context.owner_link then return true end
     end
-    local value = slider_values[text_id]
-    if value ~= nil then
-        return string.format(
-            "%s, controle deslizante, %d de 15", entry.text, value)
-    end
-    if is_noninteractive_text(entry.text) then
-        return nil
-    end
-    if entry.text == "Em casa" or entry.text == "Fora"
-            or entry.text == "Neutro" then
-        return entry.text .. ", opção selecionada"
-    end
-    if is_plain_text(entry.text) or is_splash_text(entry.text)
-            or looks_like_message(entry.text) then
-        return entry.text
-    end
-    return entry.text .. ", item"
+    return false
 end
 
-local function is_controller_widget(widget)
+function a11y.capture_question_panel(node)
+    if not a11y.native_presentation_ready(node.address) then
+        a11y.defer_bound_guidance(node.address,node.text)
+        return false
+    end
+    if (node.name ~= "question" and node.name ~= "eventMsg") or not node.owner_link or not node.text or node.text == "" then return false end
+    a11y.dashboard_review = false
+    local context = a11y.read_context_state()
+    if (context.structural_question or context.structural_event) and context.message_key == node.key and context.question == node.text then
+        return true
+    end
+    a11y.open_read_dialog(node.text, node.key)
+    context = a11y.read_context_state()
+    context.kind, context.owner_link = "dialog", node.owner_link
+    context.structural_question, context.structural_event = node.name == "question", node.name == "eventMsg"
+    for key, other in pairs(a11y.ui_model.nodes) do
+        if context.structural_question and other.name == "text" and other.owner_link == node.owner_link then
+            context.answer_owners[key] = other.identity
+            if #other.text >= 2 and #other.text <= 512 and not ui_focus_widgets[key] then
+                ui_focus_widgets[key] = {address=other.address,text=other.text,last_seen=other.last_seen,identity=other.identity}
+                ui_focus_widget_count = ui_focus_widget_count + 1
+            end
+        end
+    end
+    -- The localization resolver may have queued options before their widgets
+    -- revealed the question layout. Replace that batch with the actual prompt.
+    a11y.native_speech_queue, a11y.native_speech_first, a11y.native_speech_last = {},1,0
+    a11y.modal_message_backlog = {}
+    a11y.pending_modal_button_text, a11y.deferred_modal_announcement = nil,nil
+    recent_message_text, recent_message_widget_key, recent_message_frame = node.text,node.key,frame
+    pending_message_text, pending_message_key = node.text,node.key .. "\0" .. node.text
+    a11y.pending_message_widget_key = node.key
+    a11y.pending_message_owner=a11y.native_owner_token()
+    pending_message_due_ms = tonumber(ffi.C.GetTickCount64()) + 40
+    a11y.clear_pending_tooltips()
+    a11y.transition_old_focus_texts, a11y.transition_old_focus_nodes = nil,nil
+    log(string.format("[FLAccess] question-panel owner=%s widget=%s",tostring(node.owner_link),node.key))
+    return true
+end
+
+function a11y.read_context_state()
+    if not a11y.read_context then a11y.reset_read_context("initial") end
+    return a11y.read_context
+end
+
+function a11y.open_read_dialog(text, key)
+    local context = a11y.read_context_state()
+    if context.question == text and context.message_key == key then return end
+    if context.message_key == key and context.question
+            and text:sub(1, #context.question) == context.question then
+        context.question = text
+        if a11y.text_asset_role(text) == "dialog" or text:match("%?$") then
+            context.kind = "dialog"
+        end
+        return
+    end
+    local owners = context.message_key == key and context.answer_owners or nil
+    local chain = a11y.answer_chain
+    if not owners and chain and chain.message_key == key
+            and frame - chain.frame <= 120 and a11y.ui_model
+            and chain.model_generation == a11y.ui_model.generation then
+        owners = chain.owners
+    end
+    a11y.answer_chain = nil
+    local baseline = {}
+    for widget_key, entry in pairs(ui_focus_widgets) do
+        baseline[widget_key] = {text=entry.text, seen=entry.last_seen}
+    end
+    a11y.reset_read_context("dialog")
+    context = a11y.read_context
+    context.kind = (a11y.text_asset_role(text) == "dialog" or text:match("%?$"))
+        and "dialog" or "notice"
+    context.question, context.message_key = text, key
+    local native_owner=a11y.native_owner_token()
+    context.native_owner=native_owner ~= "" and native_owner or nil
+    context.baseline = baseline
+    context.answer_owners = owners or {}
+    context.answer_queued = false
+    context.expires_frame = frame + 3600
+    log(string.format("[FLAccess] reading-context kind=%s generation=%d", context.kind, context.generation))
+end
+
+function a11y.set_read_title(text)
+    a11y.answer_chain = nil
+    local context = a11y.read_context_state()
+    if context.native_reading_panel and a11y.reading_panel_is_current() then
+        context.title=text
+        return
+    end
+    if context.question or context.structural_question or context.structural_event then a11y.reset_read_context("title") end
+    context = a11y.read_context_state()
+    context.title, context.kind, context.pending_title = text, "menu", nil
+end
+
+function a11y.set_read_help(text, label)
+    local context = a11y.read_context_state()
+    if context.kind ~= "dialog" then
+        context.help = {text=text, label=label, frame=frame}
+    end
+end
+
+function a11y.commit_read_selection(text, identity, source, label, widget)
+    local context = a11y.read_context_state()
+    if context.native_reading_panel and not a11y.reading_panel_is_current() then
+        a11y.reset_read_context("reading-panel-selection-changed")
+        context=a11y.read_context_state()
+    end
+    if context.kind == "dialog" and source ~= "dialog-answer" then return false end
+    if not text or text == "" or is_noninteractive_text(text)
+            or text == "No String" then return false end
+    if context.pending_title then
+        local title = context.pending_title
+        a11y.set_read_title(title)
+        context = a11y.read_context_state()
+        speak(title)
+        a11y.title_pending_first_item = title
+        a11y.title_pending_first_item_until_ms = tonumber(ffi.C.GetTickCount64()) + 2000
+    end
+    if context.selection and context.selection.identity ~= identity then
+        context.selection_result=nil
+        if context.help and context.help.label ~= label then context.help = nil end
+        context.cursor = 1
+    end
+    context.selection = {text=text, identity=identity, source=source, label=label, frame=frame,
+        origin=widget and a11y.capture_speech_origin(widget) or nil}
+    if context.kind == "unknown" then context.kind = "menu" end
+    return true
+end
+
+-- Producers supply observations; this boundary owns composition, review,
+-- deduplication and delivery validity. Missing context is not a blank value.
+function a11y.selection_result(request)
+    local address=request.widget or (request.row and request.row.label_widget)
+    if address and not a11y.native_presentation_ready(address) then return nil end
+    local context=a11y.read_context_state()
+    if context.kind=="dialog" and request.source~="dialog-answer" then return nil end
+    local key=address and memory.hex(address)
+    local node=request.node or (key and a11y.ui_model and a11y.ui_model.nodes[key])
+    local row=request.row or (key and a11y.control_for_widget(key))
+    if row and not row.is_control and not request.row then row=nil end
+    if request.text and not request.row then row=nil end
+    local label=request.text or (row and row.label) or (node and node.text)
+    if not label or a11y.empty_selection_caption(label) or a11y.unresolved_format(label) then return nil end
+    local value=row and row.value
+    local text=row and control_speech(row) or a11y.engine_focus_speech(label,node)
+    if request.text and not request.row then text=a11y.engine_focus_speech(request.text,node) end
+    if request.source=="dialog-answer" then
+        text=label .. (a11y.ui_language=="pt" and ", opção selecionada" or ", selected option")
+    end
+    if request.presentation then text=request.presentation end
+    local assignment=a11y.native_assignment_context(address)
+    if assignment then text=a11y.output_speech_text(text) .. ", " .. assignment.text end
+    local spoken,page=a11y.page_focus_speech(text,address)
+    local owner=a11y.native_owner_token()
+    local identity=request.identity or (key and node and a11y.engine_selection_identity(key,node)) or label
+    local result={widget=address,key=key,node=node,row=row,label=label,value=value,
+        text=text,spoken=spoken,page=page,assignment=assignment,owner=owner,generation=context.generation,
+        source=request.source or "component",identity=identity,
+        origin=address and a11y.capture_speech_origin(address),
+        value_origin=row and row.value_widget and a11y.capture_speech_origin(row.value_widget),
+        missing={}}
+    if row and value==nil then result.missing[#result.missing+1]="value" end
+    result.signature=a11y.selection_result_signature(result)
+    return result
+end
+
+function a11y.selection_result_signature(result)
+    return tostring(result.owner) .. ":" .. tostring(result.generation) .. ":"
+        .. result.identity .. ":" .. result.text .. ":" .. (result.page and result.page.identity or "")
+        .. ":" .. (result.assignment and result.assignment.identity or "")
+end
+
+function a11y.selection_result_allowed(result)
+    local context=a11y.read_context_state()
+    if context.generation~=result.generation or a11y.native_owner_token()~=result.owner then return false end
+    if not context.selection or context.selection.identity~=result.identity then return false end
+    if context.selection_result and context.selection_result.signature~=result.signature then return false end
+    if result.origin and not a11y.speech_origin_allowed(result.origin) then return false end
+    if result.value_origin and not a11y.speech_origin_allowed(result.value_origin) then return false end
+    for _,origin in ipairs({result.origin or false,result.value_origin or false}) do
+        if origin and origin.text then
+            local current=a11y.read_native_rendered_text(origin.address)
+            if current~=nil and current~=origin.text then return false end
+        end
+    end
+    if result.row and (result.row.label~=result.label or result.row.value~=result.value) then return false end
+    local current_page=a11y.native_page_context(result.widget)
+    if (result.page and result.page.identity or nil)~=(current_page and current_page.identity or nil) then return false end
+    local assignment=a11y.native_assignment_context(result.widget)
+    if (result.assignment and result.assignment.identity or nil)~=(assignment and assignment.identity or nil) then return false end
+    if result.node and result.key and result.source=="engine-focus"
+            and a11y.engine_selection_identity(result.key,result.node)~=result.identity then return false end
+    return true
+end
+
+function a11y.deliver_selection_result(result,options)
+    if not result or a11y.keyboard_window then return false end
+    options=options or {}
+    local context=a11y.read_context_state()
+    local previous=context.selection_result
+    if previous and previous.signature==result.signature
+            and (previous.status=="queued" or previous.status=="delivered") and context.selection
+            and context.selection.identity==result.identity then return true end
+    if not a11y.commit_read_selection(result.text,result.identity,result.source,result.label,result.widget) then return false end
+    -- commit may open a pending title; bind to the resulting context generation.
+    context=a11y.read_context_state()
+    result.generation=context.generation
+    result.signature=a11y.selection_result_signature(result)
+    local before=a11y.native_speech_last
+    local spoken=options.value_only and result.value or result.spoken
+    result.attempt=previous and previous.signature==result.signature and (previous.attempt or 0)+1 or 1
+    speak(spoken,options.interrupt,options.modal,result.signature .. ":attempt=" .. tostring(result.attempt),result.widget)
+    if a11y.native_speech_last==before then
+        local deferred=a11y.deferred_speech
+        if deferred and deferred.text==spoken and a11y.deferred_modal_announcement==spoken then
+            deferred.selection_result=result
+            deferred.options={interrupt=false,value_only=options.value_only,modal=options.modal}
+            context.selection_result=result
+            result.status="deferred"
+        end
+        return false
+    end
+    context.selection_result=result
+    result.status="queued"
+    if result.page then a11y.last_page_announcement=result.page.identity end
+    for index=before+1,a11y.native_speech_last do
+        local entry=a11y.native_speech_queue[index]
+        entry.selection_result=result
+        entry.page_context=result.page
+    end
+    log(string.format("[FLAccess] selection-result source=%s widget=%s label=%q value=%q missing=%q",
+        result.source,tostring(result.widget),result.label,result.value or "",table.concat(result.missing,",")))
+    return true
+end
+
+-- Deferral is still speech work: retain the same ownership/content evidence
+-- rather than converting a composed selection into an unbound literal string.
+function a11y.defer_speech(text,identity,address)
+    local context=a11y.read_context_state()
+    a11y.deferred_modal_announcement=text
+    a11y.deferred_speech={text=text,identity=identity,owner=a11y.native_owner_token(),
+        generation=context.generation,selection_identity=context.selection and context.selection.identity,
+        origin=address and a11y.capture_speech_origin(address)}
+end
+
+function a11y.drain_deferred_speech()
+    local now=tonumber(ffi.C.GetTickCount64())
+    if pending_message_text or now<modal_focus_hold_until_ms or now<(a11y.screen_title_hold_until_ms or 0) then return false end
+    local text,deferred=a11y.deferred_modal_announcement,a11y.deferred_speech
+    a11y.deferred_modal_announcement,a11y.deferred_speech=nil,nil
+    if not text then return false end
+    local context=a11y.read_context_state()
+    local valid=deferred and deferred.text==text and deferred.owner==a11y.native_owner_token()
+        and deferred.generation==context.generation
+        and (not deferred.selection_identity or (context.selection and context.selection.identity==deferred.selection_identity))
+        and (not deferred.origin or a11y.speech_origin_allowed(deferred.origin))
+    if valid and deferred.origin and deferred.origin.text then
+        local current=a11y.read_native_rendered_text(deferred.origin.address)
+        if current~=nil and current~=deferred.origin.text then valid=false end
+    end
+    if valid and deferred.selection_result then valid=a11y.selection_result_allowed(deferred.selection_result) end
+    if not valid then
+        if deferred and deferred.selection_result then deferred.selection_result.status="discarded" end
+        log("[FLAccess] deferred-speech-discard reason=context-or-content-changed")
+        return false
+    end
+    if deferred.selection_result then return a11y.deliver_selection_result(deferred.selection_result,deferred.options) end
+    speak(text,false,nil,deferred.identity,deferred.origin and deferred.origin.address)
+    return true
+end
+
+-- Compatibility producers retain their established extraction. They submit
+-- data here instead of bypassing the common validity and delivery decision.
+function a11y.offer_adapter_selection(text,identity,address,interrupt)
+    return a11y.deliver_selection_result(a11y.selection_result({widget=address,
+        text=text,presentation=text,identity=identity,source="adapter-focus"}),{interrupt=interrupt})
+end
+
+function a11y.dialog_answer_candidate(key, entry, offset, activity)
+    local context = a11y.read_context_state()
+    if context.kind ~= "dialog" or frame > context.expires_frame
+            or not entry or offset ~= 0x104
+            or pending_message_text or #a11y.modal_message_backlog > 0 then return false end
+    local role = a11y.text_asset_role(entry.text)
+    local scoped_node = a11y.ui_model and a11y.ui_model.nodes[key]
+    if context.structural_event then return false end
+    if context.structural_question then
+        return scoped_node and scoped_node.owner_link == context.owner_link and scoped_node.name == "text"
+            and not is_noninteractive_text(entry.text) and role ~= "technical" and role ~= "status"
+            and (entry.last_seen >= context.started_frame or context.answer_owners[key] == scoped_node.identity)
+    end
+    if key == context.message_key or entry.text == context.question
+            or role == "dialog" or role == "instruction" or role == "tooltip-or-description"
+            or is_noninteractive_text(entry.text) or is_splash_text(entry.text) then return false end
+    local previous = context.baseline[key]
+    local changed = previous and previous.text ~= entry.text
+    local introduced = not previous
+    local fresh_edge = activity and activity >= context.started_frame
+    local node = a11y.ui_model and a11y.ui_model.nodes[key]
+    local owned = node and context.answer_owners[key] == node.identity
+    local engine=a11y.engine_focus
+    local live_event=engine and engine.nodes[key]
+    local native_focus=node and context.native_owner and engine
+        and engine.owner==context.native_owner and a11y.native_owner_token()==context.native_owner
+        and live_event and live_event.edge>=context.started_frame
+        and live_event.edge==activity and a11y.native_widget_allowed(node.address)
+    -- A background row may redraw with the dialog. Redraw alone is not an
+    -- answer; require the primary selection edge or a newly introduced row.
+    if not introduced and not changed and not fresh_edge and not owned then return false end
+    if entry.last_seen < context.started_frame and not owned and not native_focus then return false end
+    if role == "technical" or role == "status" then return false end
+    return true
+end
+
+function a11y.announce_read_answer(key, entry, offset, activity)
+    if not a11y.dialog_answer_candidate(key, entry, offset, activity) then return false end
+    local context = a11y.read_context
+    local identity = tostring(context.generation) .. ":" .. a11y.ui_focus_identity(key, entry.text)
+    local text = entry.text .. (a11y.ui_language == "pt" and ", opção selecionada" or ", selected option")
+    a11y.commit_read_selection(text, identity, "dialog-answer")
+    context.selection.widget_key = key
+    local node = a11y.ui_model and a11y.ui_model.nodes[key]
+    if node then context.answer_owners[key] = node.identity end
+    if context.structural_question and (a11y.navigation_frame or -1) < context.started_frame then return true end
+    if context.last_answer ~= identity then
+        local queue = not context.answer_queued and tonumber(ffi.C.GetTickCount64()) < modal_focus_hold_until_ms
+        local before=a11y.native_speech_last
+        a11y.deliver_selection_result(a11y.selection_result({text=entry.text,widget=node and node.address,
+            identity=identity,source="dialog-answer"}),{interrupt=not queue,modal=true})
+        for index=before+1,a11y.native_speech_last do
+            a11y.native_speech_queue[index].reading_selection={generation=context.generation,identity=identity}
+        end
+        if a11y.native_speech_last>before then
+            context.last_answer, context.answer_queued = identity, true
+        end
+    end
+    return true
+end
+
+function a11y.reading_panel_is_current()
+    local context=a11y.read_context
+    local snapshot=a11y.native_windows
+    local node=context and context.message_key and a11y.ui_model and a11y.ui_model.nodes[context.message_key]
+    return context and context.native_reading_panel and context.native_owner==a11y.native_owner_token()
+        and node and snapshot and snapshot.selected_members and snapshot.selected_members[tonumber(node.address)]
+        and a11y.native_presentation_ready(node.address) and a11y.ui_node_matches_live(node)
+end
+
+function a11y.capture_reading_panel(node)
+    local snapshot=a11y.native_windows
+    local address=node and tonumber(node.address)
+    if not node or node.name~="text_contents" or not node.text or node.text==""
+            or a11y.unresolved_format(node.text) or not snapshot or not snapshot.selected_members or not snapshot.selected_members[address]
+            or not a11y.native_presentation_ready(address) or not a11y.ui_node_matches_live(node) then return false end
+    local count=0
+    for selected in pairs(snapshot.selected_members) do
+        local other=a11y.ui_model.nodes[memory.hex(selected)]
+        if other and other.name=="text_contents" and a11y.native_presentation_ready(selected) then count=count+1 end
+    end
+    if count~=1 then return false end
+    local context=a11y.read_context_state()
+    if context.structural_question or context.structural_event then return false end
+    local owner=a11y.native_owner_token()
+    if not owner or owner=="" then return false end
+    local identity=owner .. ":" .. node.identity .. ":" .. node.text
+    if context.native_reading_panel==identity then return true end
+    local changing=context.native_reading_panel~=nil
+    local title=context.title
+    reset_message_state()
+    a11y.reset_read_context("native-reading-panel")
+    context=a11y.read_context_state()
+    context.kind,context.question,context.message_key="notice",node.text,node.key
+    context.native_owner,context.native_reading_panel,context.title=owner,identity,title
+    modal_focus_hold_until_ms=0
+    a11y.clear_pending_tooltips()
+    speak(node.text,changing,true,identity,node.address)
+    return true
+end
+
+function a11y.process_read_dialog_focus(candidates)
+    local context = a11y.read_context_state()
+    if context.kind ~= "dialog" then return false end
+    if not context.structural_question and not context.structural_event
+            and a11y.native_control_help(context.question) then
+        local help=context.question
+        reset_message_state()
+        a11y.reset_read_context("native-field-help")
+        a11y.set_read_help(help)
+        modal_focus_hold_until_ms=0
+        return false
+    end
+    if frame > context.expires_frame then
+        a11y.reset_read_context("dialog-expired")
+        return false
+    end
+    local selected, reason = a11y.resolve_primary_focus(candidates)
+    local entry = selected and (ui_focus_widgets[selected.key]
+        or (a11y.ui_model and a11y.ui_model.nodes[selected.key]))
+    if not selected or not a11y.dialog_answer_candidate(selected.key, entry, 0x104, selected.edge) then
+        context.candidate = nil
+        local unresolved = pending_message_text and "message-pending"
+            or (selected and "context-ownership-unproven" or reason)
+        if unresolved ~= context.unresolved_reason then
+            context.unresolved_reason = unresolved
+            log(string.format("[FLAccess] dialog-selection-unresolved reason=%s candidates=%d", unresolved, #candidates))
+        end
+        return true
+    end
+    local identity = a11y.ui_focus_identity(selected.key, entry.text)
+    if identity ~= context.candidate then
+        context.candidate, context.candidate_frame = identity, frame
+    elseif frame - context.candidate_frame >= 4 then
+        a11y.announce_read_answer(selected.key, entry, 0x104, selected.edge)
+    end
+    if a11y.ui_model then a11y.ui_model.focus_reason = "dialog:" .. reason end
+    return true
+end
+
+function a11y.attribute_review_available()
+    return game_is_foreground() and not overlay_visible and not sider_overlay_visible
+        and a11y.game_plan_active and not a11y.read_context_state().question
+        and tonumber(ffi.C.GetTickCount64()) < a11y.game_plan_attribute_panel_until_ms
+        and #a11y.game_plan_attribute_items > 0
+end
+
+function a11y.entity_review_entries(nodes)
+    local item=a11y.native_list_selection
+    local snapshot=a11y.native_windows
+    local owner=a11y.native_owner_token()
+    if a11y.keyboard_window or a11y.read_context_state().kind=="dialog" then return nil end
+    local selection=a11y.read_context_state().selection
+    if selection and selection.origin and item and selection.origin.address~=item.widget then return nil end
+    if not item or not owner or item.committed~=owner .. ":" .. item.identity .. ":" .. item.text
+            or a11y.widget_internal_name(item.widget)~="teamName"
+            or a11y.read_native_rendered_text(item.widget)~=item.text then return nil end
+    local selected=snapshot and snapshot.members and snapshot.members[item.widget]
+    if not selected or not selected.active then return nil end
+    local windows={}
+    for _,entry in ipairs(selected.owners or {}) do if entry.enabled then windows[entry.address]=true end end
+    local players,roots={},{}
+    local function belongs(node,root)
+        local member=snapshot.members[tonumber(node.address)]
+        for _,entry in ipairs(member and member.owners or {}) do
+            if entry.enabled and windows[entry.address] and (not root or entry.root==root) then return entry.root end
+        end
+    end
+    for _,node in ipairs(nodes) do
+        if node.name and (node.name=="playerName" or node.name:match("^playerName_")) then
+            local root=belongs(node)
+            if root then roots[root]=true;players[#players+1]=node end
+        end
+    end
+    if #players==0 then return {item.text} end
+    local root
+    for value in pairs(roots) do if root then return {item.text} end;root=value end
+    local heading
+    for _,node in ipairs(nodes) do
+        if (node.name=="text_title" or node.name=="title" or node.name=="listHeader" or node.name=="header")
+                and belongs(node,root) then
+            if heading and heading~=node.text then heading=false;break end
+            heading=node.text
+        end
+    end
+    local result,seen={item.text},{[item.text]=true}
+    if heading and not seen[heading] then result[#result+1],seen[heading]=heading,true end
+    for _,node in ipairs(players) do
+        if not seen[node.text] then result[#result+1],seen[node.text]=node.text,true end
+    end
+    return result
+end
+
+function a11y.buffer_entries()
+    -- A review request reads the current rendered panel, including companion
+    -- lists, rather than the previous entity's cached captions.
+    a11y.poll_native_texts(true)
+    local entity=a11y.entity_review_entries(a11y.presented_nodes())
+    if entity then return entity end
+    local context = a11y.read_context_state()
+    local result, seen = {}, {}
+    local function add(text)
+        if text and text ~= "" and not seen[text] then
+            result[#result + 1], seen[text] = text, true
+        end
+    end
+    add(context.title)
+    add(context.question)
+    local selection=context.selection
+    if selection and (not selection.origin or a11y.speech_origin_allowed(selection.origin)) then
+        local committed=context.selection_result
+        local current=committed and a11y.selection_result({row=committed.row,widget=committed.widget,
+            identity=selection.identity,source=committed.source})
+        add(current and current.text or selection.text)
+    end
+    for _, item in ipairs(a11y.dashboard_texts or {}) do
+        local node=a11y.ui_model and a11y.ui_model.nodes[memory.hex(item.address)]
+        if #result < 80 and a11y.native_widget_allowed(item.address)
+                and (not item.owner or item.owner==a11y.native_owner_token())
+                and (not item.identity or (node and node.identity==item.identity and node.text==item.text)) then add(item.text) end
+    end
+    if context.kind ~= "dialog" then
+        for _,node in ipairs(a11y.presented_nodes()) do
+            if #result>=80 then break end
+            local role=a11y.text_asset_role(node.text)
+            if node.name~="padIcon" and role~="technical" and role~="status"
+                    and not is_noninteractive_text(node.text) then add(node.text) end
+        end
+    end
+    if a11y.attribute_review_available() then
+        for _, item in ipairs(a11y.game_plan_attribute_items) do
+            if #result < 80 then
+                add(item.label .. (item.value and ", " .. item.value or ""))
+            end
+        end
+    end
+    if context.help and context.selection
+            and (not context.help.label or context.help.label == context.selection.label) then
+        add(context.help.text)
+    end
+    return result
+end
+
+function a11y.read_buffer(action)
+    if not game_is_foreground() or overlay_visible or sider_overlay_visible then return false end
+    local context = a11y.read_context_state()
+    local entries = a11y.buffer_entries()
+    if #entries > 0 then
+        if context.cursor > #entries then context.cursor = 1 end
+        if action == "next" then context.cursor = context.cursor % #entries + 1 end
+        if action == "previous" then context.cursor = (context.cursor - 2) % #entries + 1 end
+        if action == "first" then context.cursor = 1 end
+    end
+    local text = entries[context.cursor] or (a11y.ui_language == "pt"
+        and "Sem conteúdo confirmado neste contexto." or "No confirmed content in this context.")
+    modal_focus_hold_until_ms = 0
+    a11y.title_pending_first_item = nil
+    a11y.deferred_modal_announcement = nil
+    speak(text, true, true)
+    return true
+end
+
+function a11y.transition_focus_blocked(key, entry, offset, edge, now_ms)
+    if not a11y.transition_old_focus_texts then return false end
+    local old = a11y.transition_old_focus_nodes and a11y.transition_old_focus_nodes[key]
+    local node = a11y.ui_model and a11y.ui_model.nodes[key]
+    local fresh = offset == 0x104 and edge > (a11y.transition_started_frame or frame)
+    if now_ms >= a11y.transition_guard_until_ms or fresh or (entry and
+            (not old or old.text ~= entry.text or (node and node.identity ~= old.identity))) then
+        a11y.transition_old_focus_texts, a11y.transition_old_focus_nodes = nil, nil
+        return false
+    end
+    return true
+end
+
+function a11y.capture_pending_modal_button(key, entry, offset, edge)
+    local context = a11y.read_context_state()
+    local previous = context.baseline and context.baseline[key]
+    local fresh = edge and edge >= context.started_frame
+    local eligible = context.question and entry and offset == 0x104
+        and key ~= context.message_key and is_modal_button(entry.text)
+        and entry.text ~= "Sim" and entry.text ~= "Não"
+        and entry.last_seen >= context.started_frame
+        and (not previous or previous.text ~= entry.text or fresh)
+    a11y.pending_modal_button_text = eligible and entry.text or nil
+    return eligible and true or false
+end
+
+function a11y.buffer_key(vkey)
+    if a11y.keyboard_window then return false end
+    local actions = {[0x49]="previous", [0x4b]="next", [0x4a]="first", [0x4c]="repeat"}
+    if actions[vkey] then
+        local now = tonumber(ffi.C.GetTickCount64())
+        if a11y.buffer_last_key == vkey and now - (a11y.buffer_last_ms or 0) < 120 then return true end
+        if a11y.read_buffer(actions[vkey]) then
+            a11y.buffer_last_key, a11y.buffer_last_ms = vkey, now
+            return true
+        end
+    end
+    return false
+end
+
+function a11y.review_right_stick(direction)
+    if not a11y.attribute_review_available() then return false end
+    local now = tonumber(ffi.C.GetTickCount64())
+    if a11y.review_stick_direction == direction and now - (a11y.review_stick_ms or 0) < 120 then return true end
+    a11y.review_stick_direction, a11y.review_stick_ms = direction, now
+    return a11y.read_buffer(direction < 0 and "previous" or "next")
+end
+
+function a11y.reset_ui_model()
+    a11y.reset_read_context("transition")
+    local generation = a11y.ui_model and a11y.ui_model.generation or 0
+    a11y.ui_model = {
+        generation = generation + 1, nodes = {}, names = {}, count = 0,
+        sequence = 0, focus_reason = nil,
+    }
+end
+
+function a11y.forget_ui_widget(key)
+    local model = a11y.ui_model
+    local node = model and model.nodes[key]
+    if node then
+        local context = a11y.read_context
+        if context then
+            if context.answer_owners then context.answer_owners[key] = nil end
+            local selected = context.selection
+            local identity = selected and tostring(selected.identity or "") or ""
+            if selected and (selected.widget_key == key or identity == node.identity
+                    or identity:sub(1, #node.identity + 1) == node.identity .. ":") then
+                context.selection, context.help = nil, nil
+            end
+        end
+        if a11y.answer_chain then a11y.answer_chain.owners[key] = nil end
+        if node.name and model.names[node.name] then
+            model.names[node.name][key] = nil
+            local remaining = false
+            for _ in pairs(model.names[node.name]) do remaining = true; break end
+            if not remaining then model.names[node.name] = nil end
+        end
+        model.nodes[key] = nil
+        model.count = model.count - 1
+    end
+    if ui_focus_widgets[key] then
+        ui_focus_widgets[key] = nil
+        ui_focus_widget_count = ui_focus_widget_count - 1
+    end
+    ui_focus_state[key], ui_focus_activated[key] = nil, nil
+    local row = control_rows_by_label_widget[key]
+    if row then
+        if controller_rows[row.label] == row then controller_rows[row.label] = nil end
+        if row.value_widget_key and control_row_by_value_widget[row.value_widget_key] == row then
+            control_row_by_value_widget[row.value_widget_key] = nil
+        end
+        if active_control_row == row then active_control_row = nil end
+        if pending_control_row == row then pending_control_row = nil end
+        control_rows_by_label_widget[key] = nil
+    end
+    local owner = control_row_by_value_widget[key]
+    if owner then
+        owner.value_widget, owner.value_widget_key, owner.value = nil, nil, nil
+        control_row_by_value_widget[key] = nil
+    end
+end
+
+function a11y.observe_ui_widget(widget, text)
+    if not a11y.ui_model then a11y.reset_ui_model() end
+    local model = a11y.ui_model
     local key = memory.hex(widget)
-    local label_row = control_rows_by_label_widget[key]
-    local value_row = control_row_by_value_widget[key]
-    return (label_row and label_row.is_control)
-        or (value_row and value_row.is_control)
+    local name = a11y.widget_internal_name(widget)
+    local node = model.nodes[key]
+    if node and node.name ~= name then
+        a11y.forget_ui_widget(key)
+        node = nil
+    end
+    if not node then
+        if model.count >= 1024 then
+            local oldest,old_rank
+            local snapshot=a11y.native_windows
+            for _, candidate in pairs(model.nodes) do
+                local address=tonumber(candidate.address)
+                local member=snapshot and snapshot.members and snapshot.members[address]
+                local rank=snapshot and snapshot.selected_members and snapshot.selected_members[address] and 2
+                    or member and member.active and 1 or 0
+                if not oldest or rank<old_rank or (rank==old_rank and (candidate.last_seen < oldest.last_seen
+                        or (candidate.last_seen == oldest.last_seen and candidate.sequence < oldest.sequence))) then
+                    oldest,old_rank=candidate,rank
+                end
+            end
+            if oldest then a11y.forget_ui_widget(oldest.key) end
+        end
+        model.sequence = model.sequence + 1
+        node = {key=key, address=widget, name=name, generation=model.generation,
+            sequence=model.sequence, identity=tostring(model.generation) .. ":" ..
+                tostring(model.sequence)}
+        model.nodes[key] = node
+        model.count = model.count + 1
+        if name then
+            model.names[name] = model.names[name] or {}
+            model.names[name][key] = node
+        end
+    end
+    if a11y.component_capture and a11y.component_capture.active and node.text~=text then
+        a11y.component_capture_dirty_frame=frame
+    end
+    node.text, node.last_seen = text, frame
+    node.owner_link = a11y.ui_owner_link(widget)
+    -- These are observations, not a synthetic accessibility tree.
+    node.role = name and name:match("_item$") and "control-label"
+        or name and name:match("_value$") and "control-value" or "unknown"
+    local stem = name and (name:match("^(.-)_item$") or name:match("^(.-)_value$"))
+    if stem and not a11y.unique_ui_name(name) then
+        a11y.invalidate_structural_pair(stem)
+    end
+    return node
 end
 
-local function is_selector_label(text)
-    return controller_labels[text] or false
+function a11y.unique_ui_name(name)
+    local model = a11y.ui_model
+    local bucket = model and model.names[name]
+    local found
+    for _, node in pairs(bucket or {}) do
+        if found then return nil, "ambiguous-name" end
+        found = node
+    end
+    return found, found and "unique-name" or "missing-name"
+end
+
+function a11y.control_for_widget(key)
+    -- Localization may register every short caption as a provisional label.
+    -- A value's proven native relation outranks that provisional registration.
+    local value = key and control_row_by_value_widget[key]
+    if value and value.native_field then return value end
+    return key and (control_rows_by_label_widget[key] or value) or nil
+end
+
+function a11y.resolve_primary_focus(candidates)
+    local groups, ordered = {}, {}
+    for _, candidate in ipairs(candidates) do
+        local row = a11y.control_for_widget(candidate.key)
+        local entry = ui_focus_widgets[candidate.key]
+            or (a11y.ui_model and a11y.ui_model.nodes[candidate.key])
+        -- Collapse only an existing label/value relation. Equal captions and
+        -- different controls remain independent selection candidates.
+        local related = row and (row.is_control or (row.value and row.value ~= ""
+            and not non_control_labels[row.label] and not is_modal_button(row.value))) and entry and
+            ((candidate.key == row.label_widget_key and entry.text == row.label)
+                or (candidate.key == row.value_widget_key and entry.text == row.value))
+        local owner = related and row or candidate.key
+        local group = groups[owner]
+        if not group then
+            group = {key=candidate.key,edge=candidate.edge or -1,row=related and row or nil}
+            groups[owner], ordered[#ordered+1] = group, group
+        else
+            group.edge = math.max(group.edge, candidate.edge or -1)
+            if row and candidate.key == row.label_widget_key then group.key = candidate.key end
+        end
+    end
+    local best, edge, tied = nil, -1, false
+    for _, candidate in ipairs(ordered) do
+        if not best or candidate.edge > edge then
+            best, edge, tied = candidate, candidate.edge, false
+        elseif candidate.edge == edge then
+            tied = true
+        end
+    end
+    local reason = not best and "no-selection"
+        or tied and "ambiguous-selection"
+        or #ordered == 1 and (#candidates > 1 and "control-label-value" or "unique-selection")
+        or "selection-edge"
+    if a11y.ui_model then a11y.ui_model.focus_reason = reason end
+    if tied then return nil, reason end
+    return best, reason
+end
+
+-- Native window authority is independent of captions and the sticky cursorOver
+-- field. These reads mirror WindowManager and Window getters in this EXE.
+-- Unknown membership stays with the existing reader; only proven background
+-- membership is rejected. No new native hooks or calls into game functions.
+function a11y.menu_read(address, kind)
+    local size = kind == "u64" and 8 or kind == "u8" and 1 or 4
+    if not address or address < 0x10000 or address > 0x7fffffffffff
+            or not readable(address, size) then return nil end
+    local bytes = memory.read(address, size)
+    if not bytes or #bytes ~= size then return nil end
+    return tonumber(memory.unpack(kind, bytes))
+end
+
+-- Immutable native schemas: shared by every traversal, never inferred from text.
+a11y.native_layout = {
+    holder_trees = {{8,0x30},{0x88,0x40},{0x78,0x40}},
+    containers = {[0x27bae88]=true,[0x27cb508]=true,[0x27b6490]=true,
+        [0x27b8d60]=true,[0x27cb298]=true},
+    holders = {[0x27bae88]=true,[0x27cb508]=true,[0x27b6490]=true,
+        [0x27b8d60]=true,[0x27cb298]=true,[0x27cbc08]=true,[0x27cbe98]=true},
+}
+
+-- NodeRectHolder dispatch walks three MSVC trees, not the indexed vector.
+-- e4db00 visits +8; the full e4dbd0 also visits +0x88 AND +0x78.
+-- Only callers with RTTI-proven holder layout may supply this address.
+function a11y.menu_holder_children(holder)
+    local children, seen_children = {}, {}
+    for _, spec in ipairs(a11y.native_layout.holder_trees) do
+        local head = a11y.menu_read(holder+spec[1], "u64")
+        if head and head >= 0x10000 and a11y.menu_read(head+0x19,"u8") == 1 then
+            local root = a11y.menu_read(head+8,"u64")
+            local stack, visited, count = {root}, {}, 0
+            while #stack > 0 and count < 256 do
+                local at = table.remove(stack)
+                if at and at >= 0x10000 and at ~= head and not visited[at] then
+                    visited[at], count = true, count+1
+                    if a11y.menu_read(at+0x19,"u8") == 0 then
+                        local child = a11y.menu_read(at+spec[2],"u64")
+                        if child and child >= 0x10000 and not seen_children[child] then
+                            seen_children[child] = true
+                            children[#children+1] = child
+                        end
+                        local left = a11y.menu_read(at,"u64")
+                        local right = a11y.menu_read(at+0x10,"u64")
+                        if left and left >= 0x10000 then stack[#stack+1] = left end
+                        if right and right >= 0x10000 then stack[#stack+1] = right end
+                    end
+                end
+            end
+        end
+    end
+    return children
+end
+
+function a11y.menu_tree(root, base)
+    local members, visited, queue, cursor, parents = {}, {}, {root}, 1, {}
+    local frontier = {}
+    -- RTTI-proven NodeBasicNodeBase and inline NodeRectHolder layouts.
+    -- NodeRectText and arbitrary NodeRect subclasses do not share these.
+    local containers, holders = a11y.native_layout.containers, a11y.native_layout.holders
+    while cursor <= #queue and cursor <= 600 do
+        local node = queue[cursor]
+        cursor = cursor + 1
+        if not visited[node] then
+            visited[node] = true
+            local vtable = a11y.menu_read(node, "u64")
+            if vtable then
+                local rva = vtable - base
+                if rva == 0x27b5260 or rva == 0x27c3a38 then members[node] = true end
+                -- NodeWindow forwards native state/event calls to +0x190.
+                -- NodeCursor resolves its choices from the parent at +0x88.
+                -- Follow these typed links too; its flat child vector can be empty.
+                local linked = rva == 0x27b6490 and a11y.menu_read(node+0x190,"u64")
+                    or rva == 0x27c1ac0 and a11y.menu_read(node+0x88,"u64")
+                -- PartsNormalBase forwards events/state to the NODE pointed
+                -- to by +98 (e8ecd0/e8ecb0). This is not an inline holder.
+                -- Verify both virtual methods before following that layout:
+                -- selectors, LR switches, help boxes and player cards share it.
+                if not linked and a11y.menu_read(vtable+0x88,"u64")==base+0xe8ecd0
+                        and a11y.menu_read(vtable+0x28,"u64")==base+0xe8ecb0 then
+                    linked=a11y.menu_read(node+0x98,"u64")
+                end
+                if linked and linked >= 0x10000 and not visited[linked] and #queue < 600 then
+                    parents[linked] = parents[linked] or node
+                    queue[#queue+1] = linked
+                end
+                if not linked and not holders[rva] and not containers[rva]
+                        and rva~=0x27b5260 and rva~=0x27c3a38 and #frontier<6 then
+                    frontier[#frontier+1]={address=node,rva=rva}
+                end
+                if holders[rva] then
+                    for _, child in ipairs(a11y.menu_holder_children(node+0x98)) do
+                        if not visited[child] and #queue < 600 then
+                            parents[child] = parents[child] or node
+                            queue[#queue+1] = child
+                        end
+                    end
+                end
+                if containers[rva] then
+                    local first = a11y.menu_read(node + 0x170, "u64")
+                    local last = a11y.menu_read(node + 0x178, "u64")
+                    if first and last and first >= 0x10000 and last >= first
+                            and (last - first) % 8 == 0 and last - first <= 2048 then
+                        for at = first, last - 8, 8 do
+                            local child = a11y.menu_read(at, "u64")
+                            if child and child >= 0x10000 and not visited[child]
+                                    and #queue < 600 then parents[child] = parents[child] or node
+                            queue[#queue + 1] = child end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return members, parents, {visited=cursor-1,queued=#queue,at_capacity=#queue>=600,frontier=frontier}
+end
+
+function a11y.menu_child(container, index)
+    if not container or not index or index < 0 or index >= 256 then return nil end
+    local first = a11y.menu_read(container + 0x170, "u64")
+    local last = a11y.menu_read(container + 0x178, "u64")
+    if not first or not last or first < 0x10000 or last < first
+            or (last-first)%8 ~= 0 or last-first > 2048 or index >= (last-first)/8 then return nil end
+    return a11y.menu_read(first + index * 8, "u64")
+end
+
+function a11y.menu_cursor_texts(root, base)
+    local cursor = a11y.menu_read(root + 0x190, "u64")
+    local detail = {root=root,cursor=cursor,
+        cursor_type=cursor and a11y.menu_read(cursor,"u64"),status="unknown-delegate"}
+    if not cursor or detail.cursor_type ~= base + 0x27c1ac0 then return nil,detail end
+    local parent = a11y.menu_read(cursor + 0x88, "u64")
+    detail.parent,detail.group_index,detail.item_index = parent,
+        a11y.menu_read(cursor+0x90,"u32"),a11y.menu_read(cursor+0x94,"u32")
+    local group = a11y.menu_child(parent, detail.group_index)
+    local selected = group and a11y.menu_child(group, detail.item_index)
+    detail.group,detail.selected = group,selected
+    detail.selected_type = selected and a11y.menu_read(selected,"u64")
+    if not selected or selected < 0x10000 then
+        detail.status = group and "missing-item" or "missing-group"
+        return nil,detail
+    end
+    local members,parents = a11y.menu_tree(selected, base)
+    parents[selected],parents[group]=group,parent
+    detail.parents=parents
+    detail.status = "no-text"
+    for _ in pairs(members) do detail.status="resolved"; return members,detail end
+    return nil,detail
+end
+
+-- Shared NodeRectText event dispatcher. Record only; speech runs next frame.
+function m.on_ui_focus_event(ctx,event_id,registers)
+    local base=tonumber(process_base_u64)
+    if not base then return end
+    local address=tonumber(read_u64(registers.rcx))
+    local event=tonumber(read_u64(registers.rdx))
+    local table_start=a11y.menu_read(base+0x36f9c28,"u64")
+    local table_end=a11y.menu_read(base+0x36f9c30,"u64")
+    if not table_start or not table_end or table_start < 0x10000
+            or table_end-table_start < 16*8 or table_end-table_start > 4096 then return end
+    local signature=a11y.menu_read(event,"u64")
+    if not signature or signature == 0 then return end
+    local entering=signature==a11y.menu_read(table_start+15*8,"u64")
+    local leaving=signature==a11y.menu_read(table_start+14*8,"u64")
+    if not entering and not leaving then return end
+    if a11y.menu_read(address,"u64") ~= base+0x27b5260 then return end
+    a11y.record_engine_focus(address,entering)
+end
+
+function a11y.record_engine_focus(address,entering)
+    local owner=a11y.native_owner_token()
+    local state=a11y.engine_focus
+    if not entering and (not state or state.owner ~= owner) then return end
+    if not state or state.owner ~= owner then
+        state={owner=owner,nodes={},count=0,sequence=0}
+        a11y.engine_focus=state
+    end
+    local key=memory.hex(address)
+    if not entering then
+        if state.nodes[key] then state.nodes[key]=nil; state.count=state.count-1 end
+        return
+    end
+    if not state.nodes[key] and state.count >= 128 then return end
+    if not state.nodes[key] then state.count=state.count+1 end
+    local previous=state.nodes[key]
+    state.sequence=state.sequence+1
+    state.nodes[key]={address=address,frame=frame,
+        edge=previous and previous.edge or frame,
+        sequence=previous and previous.sequence or state.sequence}
+    if not previous then
+        log("[FLAccess] engine-focus-enter frame=" .. tostring(frame)
+            .. " widget=" .. key .. " owner=" .. tostring(owner))
+    end
+end
+
+function a11y.ui_node_matches_live(node)
+    if not node then return false end
+    local name=a11y.widget_internal_name(node.address)
+    local link=a11y.ui_owner_link(node.address)
+    -- A resource link is not window ownership, but a changed link/name proves
+    -- that the cached caption no longer describes this same native object.
+    if (name and node.name and name ~= node.name)
+            or (link and node.owner_link and link ~= node.owner_link) then
+        log("[FLAccess] engine-focus-recycled widget=" .. node.key)
+        a11y.forget_ui_widget(node.key)
+        return false
+    end
+    return true
+end
+
+function a11y.engine_focus_candidates()
+    local state=a11y.engine_focus
+    local snapshot=a11y.native_windows
+    local cursor_keys={}
+    for address in pairs(snapshot and snapshot.selected_members or {}) do
+        cursor_keys[#cursor_keys+1]=memory.hex(address)
+    end
+    table.sort(cursor_keys)
+    local cursor_identity=table.concat(cursor_keys,",")
+    local owner=a11y.native_owner_token()
+    if state and state.owner ~= owner then state=nil; a11y.engine_focus=nil end
+    if not state and #cursor_keys>0 then
+        state={owner=owner,nodes={},count=0,sequence=0}
+        a11y.engine_focus=state
+    end
+    if not state then return nil end
+    if state.cursor_identity ~= cursor_identity then
+        -- Cursor indices are independent proof of selection. Do not preserve
+        -- an event from a different item merely because its sticky bit remains.
+        for key in pairs(state.cursor_nodes or {}) do
+            if state.nodes[key] and state.nodes[key].cursor then
+                state.nodes[key]=nil; state.count=state.count-1
+            end
+        end
+        state.cursor_identity,state.cursor_nodes=cursor_identity,{}
+        state.cursor_edge=frame
+    end
+    for _,key in ipairs(cursor_keys) do
+        local node=a11y.ui_model and a11y.ui_model.nodes[key]
+        if node then
+            if not state.nodes[key] then state.count=state.count+1 end
+            state.nodes[key]={address=node.address,frame=frame,edge=state.cursor_edge,
+                cursor=true,sequence=state.sequence}
+            state.cursor_nodes[key]=true
+        end
+    end
+    local candidates={}
+    local owners=a11y.command_icon_owners()
+    local pending_label=#cursor_keys>0
+    for key,event in pairs(state.nodes) do
+        -- Exclude recycled/background nodes; never decode captions in the hook.
+        local node=a11y.ui_model and a11y.ui_model.nodes[key]
+        local row=a11y.control_for_widget(key)
+        -- Numeric values remain valid when linked to an observed control; bare
+        -- glyph/counter nodes and controller-icon captions are not menu choices.
+        local value_member=row and node and row.value_widget_key==key and row.value==node.text
+        local decoration=node and (node.name=="padIcon" or node.name=="abilityNumber"
+            or (node.text and (node.text:match("^%d+$") or a11y.empty_selection_caption(node.text)) and not value_member))
+        local cursor_scope=snapshot and snapshot.cursor_members
+        local cursor_allowed=not cursor_scope or not cursor_scope[tonumber(event.address)]
+            or snapshot.selected_members[tonumber(event.address)]
+        if cursor_allowed and node and node.text and node.text ~= "" and not decoration
+                and a11y.ui_node_matches_live(node)
+                and a11y.native_widget_allowed(event.address)
+                and not is_noninteractive_text(node.text)
+                and not a11y.is_command_legend(key,true,owners)
+                and not looks_like_message(node.text,event.address)
+                and (not a11y.is_control_help(node.text) or a11y.is_structural_answer(node.text,key))
+                and not a11y.unresolved_format(node.text) then
+            state.accepted=true
+            if frame > event.edge then candidates[#candidates+1]={key=key,edge=event.edge} end
+        elseif (not node or not node.text or node.text=="") and frame-event.edge <= 30 then
+            pending_label=true
+        end
+    end
+    -- A title/paragraph event alone does not establish menu-selection authority.
+    if not state.accepted and not pending_label then return nil end
+    -- The native dispatcher focuses a whole compound row. In the common
+    -- text_item/infoText_* schema, the information slots share its resource
+    -- link and event edge, but are not independent choices. Preserve model
+    -- data; only collapse a proven sibling packet, never matching captions.
+    local primary={}
+    for _,candidate in ipairs(candidates) do
+        local node=a11y.ui_model.nodes[candidate.key]
+        if node.name=="text_item" and node.owner_link then
+            local packet=tostring(node.owner_link) .. ":" .. tostring(candidate.edge)
+            primary[packet]=(primary[packet] or 0)+1
+        end
+    end
+    local filtered={}
+    for _,candidate in ipairs(candidates) do
+        local node=a11y.ui_model.nodes[candidate.key]
+        local packet=node.owner_link and (tostring(node.owner_link) .. ":" .. tostring(candidate.edge))
+        local detail=false
+        if node.name=="description" or (node.name and node.name:match("^description_%d+$")) then
+            local labels=0
+            for _,other in ipairs(candidates) do
+                local label=a11y.ui_model.nodes[other.key]
+                if other.edge==candidate.edge and (label.role=="control-label" or label.name=="item" or label.name=="itemName")
+                        and a11y.component_peers(node.address,label.address)==true then labels=labels+1 end
+            end
+            detail=labels==1
+        end
+        if not detail and not (node.name and node.name:match("^infoText_")
+                and packet and primary[packet]==1) then filtered[#filtered+1]=candidate end
+    end
+    candidates=filtered
+    return candidates
+end
+
+function a11y.process_engine_focus(modal_blocked)
+    if a11y.process_native_list_focus(modal_blocked) then return true end
+    local candidates=a11y.engine_focus_candidates()
+    if not candidates then return false end -- Existing adapters remain a fallback.
+    if a11y.keyboard_window then return true end
+    for _,candidate in ipairs(candidates) do
+        if a11y.capture_reading_panel(a11y.ui_model.nodes[candidate.key]) then return true end
+    end
+    if a11y.process_read_dialog_focus(candidates) then return true end
+    local selected,reason=a11y.resolve_primary_focus(candidates)
+    if not selected then
+        local keys={}
+        for _,candidate in ipairs(candidates) do keys[#keys+1]=candidate.key end
+        table.sort(keys)
+        local unresolved=reason .. ":" .. table.concat(keys,",")
+        if unresolved ~= a11y.engine_focus.unresolved then
+            a11y.engine_focus.unresolved=unresolved
+            log("[FLAccess] engine-focus-unresolved reason=" .. reason .. " widgets=" .. table.concat(keys,","))
+            local state=a11y.engine_focus
+            state.gap_count=(state.gap_count or 0)+1
+            if state.gap_count<=40 then
+                local events={}
+                for key,event in pairs(state.nodes) do events[#events+1]={key=key,event=event} end
+                table.sort(events,function(a,b)
+                    if a.event.edge~=b.event.edge then return a.event.edge>b.event.edge end
+                    return a.key<b.key
+                end)
+                local parts={}
+                for index,item in ipairs(events) do
+                    if index>8 then break end
+                    local node=a11y.ui_model and a11y.ui_model.nodes[item.key]
+                    if node then a11y.component_evidence(node,"focus-" .. reason) end
+                    parts[#parts+1]=string.format("%s name=%q text=%q edge=%s flags=%s",
+                        item.key,(node and node.name) or a11y.widget_internal_name(item.event.address) or "",
+                        node and node.text or "",tostring(item.event.edge),
+                        tostring(a11y.menu_read(item.event.address+0xc,"u32")))
+                end
+                log("[FLAccess] engine-focus-gap " .. table.concat(parts," | "))
+            end
+        end
+        -- An empty/ambiguous frame is not a new selection. Keep the last
+        -- committed identity through construction and propagation bursts.
+        return true -- Wait for a label/settled selection, rather than old flags.
+    end
+    local node=a11y.ui_model.nodes[selected.key]
+    a11y.engine_focus.unresolved=nil
+    local event=a11y.engine_focus.nodes[selected.key]
+    if not event then return true end
+    -- A field keeps focus while its value changes. The value belongs in the
+    -- spoken-state identity, even when no new selection event was dispatched.
+    local row=a11y.control_for_widget(selected.key)
+    local identity=a11y.engine_selection_identity(selected.key,node)
+    if modal_blocked and event.edge <= modal_message_spoken_frame+2 then return true end
+    local now=tonumber(ffi.C.GetTickCount64())
+    if now < (a11y.screen_title_hold_until_ms or 0) then return true end
+    a11y.track_control_focus(selected.key)
+    local last_result=a11y.read_context_state().selection_result
+    if a11y.engine_focus.last_identity==identity and not (last_result
+            and (last_result.status=="discarded" or last_result.status=="failed")) then return true end
+    local queue_before=a11y.native_speech_last
+    if row and row.is_control then
+        announce_control(row)
+    else
+        a11y.deliver_selection_result(a11y.selection_result({node=node,widget=node.address,
+            identity=identity,source="engine-focus"}),{interrupt=true})
+    end
+    if a11y.native_speech_last==queue_before then
+        -- The text-update path may already have delivered this same field.
+        -- Record its current state only if control dedupe confirms delivery;
+        -- a modal/presentation hold must still retry.
+        if row and last_announced_control_row==row and last_controller_announcement==control_speech(row) then
+            a11y.engine_focus.last_identity=identity
+        end
+        return true
+    end
+    a11y.engine_focus.last_identity=identity
+    for index=queue_before+1,a11y.native_speech_last do
+        a11y.native_speech_queue[index].engine_focus={owner=a11y.engine_focus.owner,
+            key=selected.key,identity=identity}
+    end
+    if a11y.ui_model then a11y.ui_model.focus_reason="engine-event:" .. reason end
+    log("[FLAccess] engine-focus-commit widget=" .. selected.key .. " identity=" .. identity
+        .. " source=" .. (event.cursor and "native-cursor" or "native-event"))
+    return true
+end
+
+function a11y.reading_selection_delivery_allowed(origin)
+    local context=a11y.read_context
+    return context and context.generation==origin.generation and context.selection
+        and context.selection.identity==origin.identity
+end
+
+function a11y.engine_selection_identity(key,node)
+    local row=a11y.control_for_widget(key)
+    local identity=a11y.ui_focus_identity(key,node.text)
+    if row and row.is_control then identity=identity .. ":value=" .. (row.value or "") end
+    local page=a11y.native_page_context(node.address)
+    if page then identity=identity .. ":page=" .. page.identity end
+    local assignment=a11y.native_assignment_context(node.address)
+    if assignment then identity=identity .. ":assignment=" .. assignment.identity end
+    local member=a11y.native_windows and a11y.native_windows.members
+        and a11y.native_windows.members[tonumber(node.address)]
+    if member and member.active then
+        local _,slot=a11y.native_roster_section(node,member)
+        if slot then identity=identity .. ":roster=" .. slot end
+    end
+    return identity
+end
+
+-- Controller-assignment component: c67970 stores the selected column at +a4;
+-- c68e40 resolves root[group +94][column +a4] before showing the user name.
+-- c67ad0 converts column 1 to unassigned (0), 0 to side 1, 2 to side 2.
+-- Follow those exact links and native methods, never discovery order/captions.
+function a11y.native_assignment_context(address)
+    local snapshot=a11y.native_windows
+    local base=tonumber(process_base_u64)
+    if not address or not base or not snapshot or not snapshot.selected_members
+            or not snapshot.selected_members[tonumber(address)] then return nil end
+    local found
+    for _,window in ipairs(snapshot.windows or {}) do
+        local vt=a11y.menu_read(window.address,"u64")
+        if vt and a11y.menu_read(vt+0x140,"u64")==base+0xc68fd0
+                and a11y.menu_read(vt+0x148,"u64")==base+0xc67970 then
+            local state=a11y.menu_read(window.address+0xa4,"u32")
+            local index=a11y.menu_read(window.address+0x94,"u32")
+            if state and state<=2 and index and index<32 then
+                local group=a11y.menu_child(window.root,index)
+                local column=group and a11y.menu_child(group,state)
+                local texts=column and a11y.menu_tree(column,base)
+                if texts and texts[tonumber(address)] then
+                    local label
+                    if state==1 then
+                        label=a11y.ui_language=="pt" and "Neutro" or "Neutral"
+                    else
+                        local name=state==0 and "text_home" or "text_away"
+                        for _,node in ipairs(a11y.presented_nodes()) do
+                            if node.name==name then
+                                local member=snapshot.members[tonumber(node.address)]
+                                for _,owner in ipairs(member and member.owners or {}) do
+                                    if owner.address==window.address or owner.address==window.task_parent then
+                                        if label and label~=node.text then return nil end
+                                        label=node.text;break
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    if label and label~="" then
+                        local result={window=window.address,state=state,text=label,focus_address=address,
+                            identity=tostring(window.address) .. ":" .. tostring(group) .. ":" .. state .. ":" .. label}
+                        if found and found.identity~=result.identity then return nil end
+                        found=result
+                    end
+                end
+            end
+        end
+    end
+    return found
+end
+
+-- ListMultiPageBase selects TabPageInfo from its own vector (+1d8/+1e0,
+-- 40-byte records). eb1c87/eb1928 write +1d0; eb0e90/eb1090 animate
+-- the exact Node at record+20 as active/inactive. No caption/index catalogue.
+function a11y.native_page_context(address)
+    local base=tonumber(process_base_u64)
+    local snapshot=a11y.native_windows
+    local member=address and snapshot and snapshot.members[tonumber(address)]
+    if not base or not member or not member.active then return nil end
+    local result
+    for _,window in ipairs(snapshot.windows or {}) do
+        local vt=a11y.menu_read(window.address,"u64")
+        if (window.enabled or window.context_active) and vt and a11y.menu_read(vt+0x2e0,"u64")==base+0xeb17f0
+                and a11y.menu_read(vt+0x2e8,"u64")==base+0xeb1b60 then
+            local first=a11y.menu_read(window.address+0x1d8,"u64")
+            local last=a11y.menu_read(window.address+0x1e0,"u64")
+            local index=a11y.menu_read(window.address+0x1d0,"u32")
+            if first and last and first>=0x10000 and last>=first and (last-first)%0x40==0
+                    and last-first<=0x40*32 and index and index<(last-first)/0x40 then
+                local record=first+index*0x40
+                local child=a11y.menu_read(record+8,"u64")
+                local tab=a11y.menu_read(record+0x20,"u64")
+                local related=false
+                for _,owner in ipairs(member.owners or {}) do
+                    if owner.enabled and (owner.address==window.address or owner.address==child) then related=true end
+                end
+                if related and tab and tab>=0x10000 and a11y.menu_read(record,"u64")==base+0x27d6590 then
+                    local texts=a11y.menu_tree(tab,base)
+                    local caption,ambiguous
+                    for at in pairs(texts) do
+                        if a11y.widget_internal_name(at)=="tabText" and a11y.menu_node_active(at,base)
+                                and a11y.native_text_presented(at) then
+                            local text=a11y.read_native_rendered_text(at)
+                            if text and text~="" and not a11y.unresolved_format(text) then
+                                if caption then ambiguous=true end
+                                caption={address=at,text=text}
+                            end
+                        end
+                    end
+                    if caption and not ambiguous then
+                        caption.window,caption.index,caption.focus_address=window.address,index,address
+                        caption.identity=a11y.native_owner_token() .. ":" .. tostring(window.address)
+                            .. ":" .. tostring(record) .. ":" .. tostring(tab) .. ":" .. caption.text
+                        if result and result.identity~=caption.identity then return nil end
+                        result=caption
+                    end
+                end
+            end
+        end
+    end
+    return result
+end
+
+function a11y.page_focus_speech(text,address)
+    local page=a11y.native_page_context(address)
+    if page and page.identity~=a11y.last_page_announcement then return page.text .. ". " .. text,page end
+    return text,page
+end
+
+function a11y.page_delivery_allowed(origin)
+    local current=a11y.native_page_context(origin.focus_address or origin.address)
+    return current and current.identity==origin.identity
+end
+
+function a11y.engine_focus_delivery_allowed(origin)
+    local state=a11y.engine_focus
+    local node=a11y.ui_model and a11y.ui_model.nodes[origin.key]
+    return state and state.owner==origin.owner and state.owner==a11y.native_owner_token()
+        and state.last_identity==origin.identity and state.nodes[origin.key] ~= nil
+        and node and a11y.engine_selection_identity(origin.key,node)==origin.identity
+end
+
+function a11y.native_node_summary(address)
+    if not address or address < 0x10000 then return "none" end
+    local fields = {}
+    -- Diagnostic raw candidates only: these do not establish child ownership.
+    for _, offset in ipairs({0,0x38,0x98,0xa0,0x120,0x170,0x178,0x180,0x190}) do
+        local value = a11y.menu_read(address+offset,"u64")
+        if value then fields[#fields+1]=string.format("%x=%s",offset,memory.hex(value)) end
+    end
+    return table.concat(fields,",")
+end
+
+-- Bounded structural evidence for unresolved components. Never used to infer
+-- speech, visibility, a button mapping or roster status from an address/name.
+function a11y.component_evidence(node,reason)
+    if not node then return end
+    local owner=a11y.native_owner_token()
+    if a11y.component_evidence_owner~=owner or not a11y.component_evidence_seen then
+        a11y.component_evidence_owner,a11y.component_evidence_seen=owner,{}
+        a11y.component_evidence_count=0
+    end
+    local key=reason .. ":" .. node.key .. ":" .. node.text
+    if a11y.component_evidence_seen[key] or (a11y.component_evidence_count or 0)>=24 then return end
+    a11y.component_evidence_seen[key]=true
+    a11y.component_evidence_count=(a11y.component_evidence_count or 0)+1
+    local snapshot=a11y.native_windows
+    local member=snapshot and snapshot.members and snapshot.members[tonumber(node.address)]
+    local paths={}
+    for index,entry in ipairs(member and member.owners or {}) do
+        if index>2 then break end
+        local at,visited,parts=tonumber(node.address),{},{}
+        for _=1,12 do
+            if not at or visited[at] then break end
+            visited[at]=true
+            parts[#parts+1]=string.format("%s/%s/%s",memory.hex(at),
+                tostring(a11y.menu_read(at,"u64")),a11y.widget_internal_name(at) or "")
+            if at==entry.root then break end
+            at=entry.parents and entry.parents[at]
+        end
+        paths[#paths+1]=table.concat(parts,">")
+    end
+    local _,raw,font=a11y.read_native_rendered_text(node.address)
+    log(string.format("[FLAccess] component-evidence reason=%s widget=%s name=%q text=%q flags=%s font=%s raw=%q path=%s",
+        reason,node.key,node.name or "",node.text or "",tostring(a11y.menu_read(node.address+0xc,"u32")),
+        tostring(font),raw or "",table.concat(paths," | ")))
+end
+
+-- Window::close (e43450) walks Impl+70/+78 in 50-byte records and
+-- clears the shown state of each Node at record+40 through e4c240.
+-- These owned roots include passive presentation, not just Impl+98 navigation.
+function a11y.window_owned_roots(impl,primary,base)
+    local roots,seen={},{}
+    if primary and primary>=0x10000 then roots[1],seen[primary]=primary,true end
+    -- e3d790 returns the presentation Node, e3dc90 the navigation Node.
+    -- They can differ even while the same window owns both. Ownership does
+    -- not grant input authority to a disabled window.
+    local presentation=a11y.menu_read(impl+0x90,"u64")
+    if presentation and presentation>=0x10000 and not seen[presentation] then
+        local vt=a11y.menu_read(presentation,"u64")
+        if vt and a11y.native_layout.holders[vt-base] then
+            roots[#roots+1],seen[presentation]=presentation,true
+        end
+    end
+    local first,last=a11y.menu_read(impl+0x70,"u64"),a11y.menu_read(impl+0x78,"u64")
+    if not first or not last or first<0x10000 or last<first
+            or (last-first)%0x50~=0 or last-first>0x50*64 then return roots end
+    for at=first,last-0x50,0x50 do
+        if #roots>=16 then break end
+        local node=a11y.menu_read(at+0x40,"u64")
+        if node and node>=0x10000 and not seen[node] then
+            local vtable=a11y.menu_read(node,"u64")
+            local rva=vtable and vtable-base
+            local typed=rva and (a11y.native_layout.holders[rva] or rva==0x27b5260 or rva==0x27c3a38)
+            local delegate=vtable and a11y.menu_read(vtable+0x88,"u64")==base+0xe8ecd0
+                and a11y.menu_read(vtable+0x28,"u64")==base+0xe8ecb0
+            if typed or delegate then roots[#roots+1],seen[node]=node,true end
+        end
+    end
+    return roots
+end
+
+-- Read-only equivalent of e4d1c0: ordered holder+78 tree, value at +40,
+-- filtering the Node kind at +88. Tree order, not pointer/visit order,
+-- defines the index consumed by the game's presentation code.
+function a11y.holder_kind_nodes(holder,kind)
+    local head=a11y.menu_read(holder+0x78,"u64")
+    if not head or head<0x10000 or a11y.menu_read(head+0x19,"u8")~=1 then return nil end
+    local at=a11y.menu_read(head+8,"u64")
+    local stack,seen,nodes,count={},{},{},0
+    while (at and at~=head) or #stack>0 do
+        while at and at~=head do
+            if at<0x10000 or seen[at] or count>=256
+                    or a11y.menu_read(at+0x19,"u8")~=0 then return nil end
+            seen[at],count=true,count+1
+            stack[#stack+1]=at
+            at=a11y.menu_read(at,"u64")
+            if not at then return nil end
+        end
+        at=table.remove(stack)
+        local child=a11y.menu_read(at+0x40,"u64")
+        if child and child>=0x10000 and a11y.menu_read(child+0x88,"u32")==kind then
+            nodes[#nodes+1]=child
+        end
+        at=a11y.menu_read(at+0x10,"u64")
+        if not at then return nil end
+    end
+    return nodes
+end
+
+function a11y.read_native_command_bar(base)
+    -- e34b60 returns this typed singleton; e346e0 destroys +70 while hidden.
+    local address=a11y.menu_read(base+0x36f98f0,"u64")
+    if not address or a11y.menu_read(address,"u64")~=base+0x27b2668 then return nil end
+    local root=a11y.menu_read(address+0x70,"u64")
+    if not root or a11y.menu_read(root,"u64")~=base+0x27bae88
+            or a11y.menu_read(address+0x1b9,"u8")~=0 then return nil end
+    local flags=a11y.menu_read(root+0xc,"u32")
+    -- GuideBar is presentation, not an input window. Its shown/enabled bits
+    -- matter here; individual text nodes still pass the propagated-state gate.
+    if not flags or flags%8~=7 then return nil end
+    local pairs={}
+    -- e3594d/e35969 and e35a77/e35a94 resolve the seven displayed
+    -- icons at kind 19 indices 0..6 and captions at indices 7..13.
+    -- The constructor's +90 arrays contain other templates/placeholders.
+    local texts=a11y.holder_kind_nodes(root+0x98,0x13) or {}
+    for index=0,6 do
+        local icon,caption=texts[index+1],texts[index+8]
+        if icon and caption and a11y.menu_read(icon,"u64")==base+0x27b5260
+                and a11y.menu_read(caption,"u64")==base+0x27b5260 then
+            pairs[#pairs+1]={icon=icon,caption=caption,index=index}
+        end
+    end
+    return {address=address,root=root,pairs=pairs}
+end
+
+function a11y.component_link_capture_lines(snapshot)
+    local lines,seen={},{}
+    local result=a11y.read_context and a11y.read_context.selection_result
+    if result then
+        lines[#lines+1]=string.format("RESULT source=%q widget=%s generation=%s label=%q value=%q value_known=%s page=%q status=%q missing=%q",
+            result.source,tostring(result.widget),tostring(result.generation),result.label,result.value or "",
+            tostring(result.value~=nil),result.page and result.page.identity or "",result.status or "",
+            table.concat(result.missing,","))
+    end
+    local base=tonumber(process_base_u64)
+    for address in pairs(snapshot and snapshot.selected_members or {}) do
+        local page=a11y.native_page_context(address)
+        if page and not seen[page.identity] then
+            seen[page.identity]=true
+            lines[#lines+1]=string.format("PAGE window=%s index=%d caption=%s text=%q identity=%q",
+                tostring(page.window),page.index,tostring(page.address),page.text,page.identity)
+        end
+    end
+    local bar=snapshot and snapshot.command_bar
+    if bar then
+        for _,pair in ipairs(bar.pairs) do
+            local icon,raw,font=a11y.read_native_rendered_text(pair.icon)
+            local caption=a11y.read_native_rendered_text(pair.caption)
+            lines[#lines+1]=string.format("COMMAND bar=%s root=%s index=%d icon=%s caption=%s icon_text=%q raw=%q font=%s text=%q",
+                tostring(bar.address),tostring(bar.root),pair.index,tostring(pair.icon),tostring(pair.caption),
+                icon or "",raw or "",tostring(font),caption or "")
+        end
+    end
+    for _,window in ipairs(snapshot and snapshot.windows or {}) do
+        local vt=base and a11y.menu_read(window.address,"u64")
+        if vt and a11y.menu_read(vt+0x140,"u64")==base+0xc68fd0
+                and a11y.menu_read(vt+0x148,"u64")==base+0xc67970 then
+            lines[#lines+1]=string.format("ASSIGNMENT window=%s root=%s group=%s column=%s task_parent=%s",
+                tostring(window.address),tostring(window.root),tostring(a11y.menu_read(window.address+0x94,"u32")),
+                tostring(a11y.menu_read(window.address+0xa4,"u32")),tostring(window.task_parent))
+        end
+        if vt and (vt==base+0x261eaa0 or vt==base+0x261f788) then
+            local bound=a11y.roster_limits and a11y.roster_limits[window.address]
+            lines[#lines+1]=string.format("ROSTER window=%s type=%s root=%s input=%s side=%s scroll=%s boundary=%s boundary_root=%s",
+                tostring(window.address),tostring(vt),tostring(window.root),tostring(window.enabled),
+                tostring(a11y.menu_read(window.address+0x98,"u32")),
+                tostring(a11y.menu_read(window.address+0x4e8,"u32")),tostring(bound and bound.limit),tostring(bound and bound.root))
+            for index=0,(vt==base+0x261eaa0 and 10 or 11) do
+                lines[#lines+1]=string.format("SLOT window=%s index=%d card=%s selection_card=%s",
+                    tostring(window.address),index,tostring(a11y.menu_read(window.address+0xb8+index*8,"u64")),
+                    tostring(a11y.menu_read(window.address+0x118+index*8,"u64")))
+            end
+        end
+    end
+    return lines
+end
+
+-- Window instances inherit both lifecycle slots. Only this verified family
+-- shares Task links (+38 parent, +40 child anchor, +50 next sibling).
+-- Node objects use entirely different meanings for these offsets.
+function a11y.is_native_window_task(address,base)
+    local vt=address and address>=0x10000 and a11y.menu_read(address,"u64")
+    return vt and a11y.menu_read(vt+0x50,"u64")==base+0xe43510
+        and a11y.menu_read(vt+0x58,"u64")==base+0xe43450
+end
+
+function a11y.related_window_tasks(address,base)
+    local result={}
+    if not a11y.is_native_window_task(address,base) then return result end
+    local parent=a11y.menu_read(address+0x38,"u64")
+    if a11y.is_native_window_task(parent,base) then result[#result+1]=parent end
+    local child=a11y.menu_read(address+0x40,"u64")
+    local seen={}
+    while child and child>=0x10000 and not seen[child] and #result<32 do
+        seen[child]=true
+        if not a11y.is_native_window_task(child,base)
+                or a11y.menu_read(child+0x38,"u64")~=address then break end
+        result[#result+1]=child
+        child=a11y.menu_read(child+0x50,"u64")
+    end
+    return result
+end
+
+function a11y.bind_presented_window_contexts(snapshot,base)
+    local windows={}
+    for _,window in ipairs(snapshot.windows) do windows[window.address]=window end
+    for _,window in ipairs(snapshot.windows) do
+        if window.enabled then
+            local current,seen=window,{}
+            for depth=1,16 do
+                local parent=current.task_parent and windows[current.task_parent]
+                if not parent or seen[parent.address] then break end
+                seen[parent.address]=true
+                -- A Task relation proves ownership, not visibility. Demand the
+                -- native shown state of the parent's presentation root as well.
+                local flags=parent.presentation_root and a11y.menu_read(parent.presentation_root+0xc,"u32")
+                if not flags or flags%8~=7 then break end
+                parent.context_active=true
+                current=parent
+            end
+        end
+    end
+    for _,member in pairs(snapshot.members) do
+        member.presented=member.active
+        for _,owner in ipairs(member.owners or {}) do
+            if windows[owner.address] and windows[owner.address].context_active then member.presented=true end
+        end
+    end
+end
+
+function a11y.read_native_windows(base)
+    local manager = a11y.menu_read(base + 0x36f9c10, "u64")
+    if not manager or a11y.menu_read(manager, "u64") ~= base + 0x27c1568 then return nil end
+    local result = {manager=manager, windows={}, members={}, active={}, signature={},
+        selected_members={}, cursor_members={}}
+    local tree_cache = {}
+    local seen = {}
+    for slot = 0, 7 do
+        local window = a11y.menu_read(manager + 0xc8 + slot * 16, "u64")
+        local priority = a11y.menu_read(manager + 0xd0 + slot * 16, "i32")
+        if not window or priority == nil then return nil end
+        local registered = {}
+        local first = a11y.menu_read(manager + 8 + slot * 24, "u64")
+        local last = a11y.menu_read(manager + 16 + slot * 24, "u64")
+        if not first or not last or last < first or (last - first) % 16 ~= 0
+                or last - first > 1024 then return nil end
+        if first >= 0x10000 then
+            for at = first, last - 16, 16 do
+                local address = a11y.menu_read(at, "u64")
+                if not address then return nil end
+                if address >= 0x10000 then registered[#registered + 1] = address end
+            end
+        elseif first ~= last then return nil end
+        if window >= 0x10000 then registered[#registered + 1] = window end
+        for _, address in ipairs(registered) do
+          if not seen[address] then
+            seen[address] = true
+            for _,related in ipairs(a11y.related_window_tasks(address,base)) do
+                if not seen[related] and #registered<96 then registered[#registered+1]=related end
+            end
+            local impl = a11y.menu_read(address + 0x88, "u64")
+            if not impl then return nil end
+            local flags = a11y.menu_read(impl + 9, "u8")
+            local root = a11y.menu_read(impl + 0x98, "u64")
+            if flags == nil or not root then return nil end
+            local enabled = flags % 2 == 1
+            local entry = {slot=slot, address=address, impl=impl, root=root,
+                priority=priority, enabled=enabled}
+            entry.presentation_root=a11y.menu_read(impl+0x90,"u64")
+            if a11y.is_native_window_task(address,base) then entry.task_parent=a11y.menu_read(address+0x38,"u64") end
+            entry.owned_roots=a11y.window_owned_roots(impl,root,base)
+            if enabled and a11y.menu_read(address,"u64") == base + 0x27c3eb0 then result.keyboard = address end
+            result.windows[#result.windows + 1] = entry
+            if #result.windows > 96 then return nil end
+            result.signature[#result.signature + 1] = tostring(address) .. ":" ..
+                tostring(root) .. ":" .. tostring(enabled) .. ":" .. tostring(priority)
+                .. ":" .. table.concat(entry.owned_roots,",")
+            if enabled then
+                local identity=tostring(address) .. ":" .. tostring(root)
+                if #entry.owned_roots>1 or (root<0x10000 and #entry.owned_roots>0) then
+                    identity=identity .. ":owned=" .. table.concat(entry.owned_roots,",")
+                end
+                result.active[#result.active+1]=identity
+            end
+            for _,root in ipairs(entry.owned_roots) do
+                local cached = a11y.native_tree_cache and a11y.native_tree_cache[root]
+                if not cached or frame - cached.frame >= 6 then
+                    local members,parents,evidence=a11y.menu_tree(root, base)
+                    cached = {frame=frame, members=members, parents=parents,evidence=evidence}
+                end
+                tree_cache[root] = cached
+                if root==entry.root then entry.tree_evidence=cached.evidence end
+                for address in pairs(cached.members) do
+                    -- Shared elements are eligible if ANY owner still accepts
+                    -- input. Unknown branches never acquire invented ownership.
+                    local member = result.members[address] or {active=false,owners={}}
+                    member.owners = member.owners or {}
+                    member.owners[#member.owners+1]={address=entry.address,root=root,enabled=enabled,
+                        parents=cached.parents}
+                    member.active = member.active or enabled
+                    result.members[address] = member
+                end
+                if enabled and root==entry.root then
+                    local selected, detail = a11y.menu_cursor_texts(root, base)
+                    entry.cursor_detail = detail
+                    if selected then
+                        -- The window's typed cursor and its indexed child path
+                        -- prove ownership even if the broad tree hit its limit.
+                        for address in pairs(selected) do
+                            result.selected_members[address]=true
+                            result.cursor_members[address]=true
+                            local member=result.members[address] or {active=false,owners={}}
+                            member.active=true
+                            member.owners=member.owners or {}
+                            member.owners[#member.owners+1]={address=entry.address,root=root,
+                                enabled=true,parents=detail.parents}
+                            result.members[address]=member
+                        end
+                        for address in pairs(cached.members) do result.cursor_members[address]=true end
+                    end
+                end
+            end
+          end
+        end
+    end
+    a11y.bind_presented_window_contexts(result,base)
+    result.command_bar=a11y.read_native_command_bar(base)
+    if result.command_bar then
+        local bar=result.command_bar
+        local cached=a11y.native_tree_cache and a11y.native_tree_cache[bar.root]
+        if not cached or frame-cached.frame>=6 then
+            local texts,parents=a11y.menu_tree(bar.root,base)
+            cached={frame=frame,members=texts,parents=parents}
+        end
+        tree_cache[bar.root]=cached
+        for address in pairs(cached.members) do
+            local member=result.members[address] or {active=false,owners={}}
+            member.active=true
+            member.owners[#member.owners+1]={address=bar.address,root=bar.root,enabled=true,
+                parents=cached.parents,command_bar=true}
+            result.members[address]=member
+        end
+        result.signature[#result.signature+1]="guide:" .. tostring(bar.address) .. ":" .. tostring(bar.root)
+    end
+    result.signature = table.concat(result.signature, "|")
+    result.active_identity = table.concat(result.active, "|")
+    result.active_text_count = 0
+    for _, member in pairs(result.members) do
+        if member.active then result.active_text_count = result.active_text_count + 1 end
+    end
+    a11y.native_tree_cache = tree_cache
+    return result
+end
+
+function a11y.poll_native_windows()
+    if not a11y.native_windows_enabled or a11y.native_windows_frame == frame then return end
+    a11y.native_windows_frame = frame
+    local snapshot = a11y.read_native_windows(tonumber(process_base_u64))
+    local previous = a11y.native_windows
+    a11y.native_windows = snapshot
+    if not snapshot then return end
+    a11y.prune_roster_limits(snapshot)
+    if snapshot.keyboard ~= a11y.keyboard_window then
+        a11y.keyboard_window, a11y.keyboard_text, a11y.keyboard_caret = snapshot.keyboard, nil, nil
+        if not snapshot.keyboard then a11y.keyboard_input_address = nil end
+        if snapshot.keyboard then speak(a11y.ui_language == "pt" and "Teclado aberto." or "Keyboard opened.") end
+    end
+    if not previous or previous.signature ~= snapshot.signature then
+        local lines = {"[FLAccess] native-windows frame=" .. tostring(frame)
+            .. " active-texts=" .. tostring(snapshot.active_text_count)}
+        for _, window in ipairs(snapshot.windows) do
+            lines[#lines + 1] = string.format("slot=%d window=%s root=%s slot-priority=%d input=%s root-type=%s cursor=%s",
+                window.slot, memory.hex(window.address), memory.hex(window.root),
+                window.priority, tostring(window.enabled),
+                memory.hex(a11y.menu_read(window.root,"u64") or 0),
+                memory.hex(a11y.menu_read(window.root+0x190,"u64") or 0))
+        end
+        log(table.concat(lines, " "))
+    end
+    local selected = {}
+    for address in pairs(snapshot.selected_members) do selected[#selected+1] = memory.hex(address) end
+    table.sort(selected)
+    local identity = table.concat(selected, ",")
+    if identity ~= a11y.native_cursor_identity then
+        a11y.native_cursor_identity = identity
+        a11y.native_cursor_log_count = (a11y.native_cursor_log_count or 0) + 1
+        if a11y.native_cursor_log_count <= 300 then
+            log("[FLAccess] native-cursor frame=" .. tostring(frame) .. " text-widgets=" .. identity)
+        end
+    end
+    -- Trace indices and each failed link, including cursors with zero labels.
+    -- Bounded change-only output; no selection or caption is invented.
+    local details = {}
+    for _, window in ipairs(snapshot.windows) do
+        local d = window.enabled and window.cursor_detail
+        if d then
+            details[#details+1] = string.format("window=%s delegate=%s type=%s parent=%s group-index=%s item-index=%s group=%s selected=%s selected-type=%s status=%s",
+                memory.hex(window.address),memory.hex(d.cursor or 0),memory.hex(d.cursor_type or 0),
+                memory.hex(d.parent or 0),tostring(d.group_index),tostring(d.item_index),
+                memory.hex(d.group or 0),memory.hex(d.selected or 0),memory.hex(d.selected_type or 0),d.status)
+        end
+    end
+    local detail_identity = table.concat(details," | ")
+    if detail_identity ~= a11y.native_cursor_detail_identity then
+        a11y.native_cursor_detail_identity = detail_identity
+        a11y.native_cursor_detail_count = (a11y.native_cursor_detail_count or 0)+1
+        if a11y.native_cursor_detail_count <= 500 then
+            log("[FLAccess] native-selection frame=" .. tostring(frame) .. " " .. detail_identity)
+            for _, window in ipairs(snapshot.windows) do
+                local d=window.enabled and window.cursor_detail
+                if d and d.status=="no-text" then
+                    log("[FLAccess] native-selection-gap frame=" .. tostring(frame)
+                        .. " selected={" .. a11y.native_node_summary(d.selected)
+                        .. "} group={" .. a11y.native_node_summary(d.group) .. "}")
+                    local evidence=window.tree_evidence
+                    if evidence then
+                        local parts={}
+                        for _,item in ipairs(evidence.frontier) do
+                            parts[#parts+1]=memory.hex(item.address) .. "/" .. memory.hex(item.rva)
+                        end
+                        log("[FLAccess] native-tree-gap root=" .. memory.hex(window.root)
+                            .. " visited=" .. tostring(evidence.visited) .. " queued=" .. tostring(evidence.queued)
+                            .. " at-capacity=" .. tostring(evidence.at_capacity)
+                            .. " frontier=" .. table.concat(parts,","))
+                    end
+                end
+            end
+        end
+    end
+    if previous and previous.active_identity ~= snapshot.active_identity then
+        a11y.engine_focus=nil
+        a11y.companion_candidate,a11y.companion_spoken=nil,nil
+        if a11y.pending_message_owner and a11y.pending_message_owner~=a11y.native_owner_token() then
+            pending_message_text,pending_message_key,pending_message_due_ms=nil,nil,nil
+            a11y.pending_message_widget_key,a11y.pending_message_owner=nil,nil
+            a11y.modal_message_backlog={}
+        end
+        last_screen_title_key,last_announced_message_key=nil,nil
+        a11y.last_page_announcement=nil
+        a11y.answer_chain=nil
+        if not (a11y.read_context and a11y.read_context.message_key) then
+            a11y.reset_read_context("native-presentation-changed")
+        end
+        modal_focus_hold_until_ms=0
+        a11y.screen_title_hold_until_ms=0
+        a11y.title_pending_first_item=nil
+        a11y.deferred_modal_announcement,a11y.pending_modal_button_text=nil,nil
+        a11y.clear_pending_tooltips()
+        -- A real change of input ownership releases deduplication. Keep new
+        -- text observations: construction can precede manager registration.
+        a11y.reset_focus_reuse_state()
+        -- Preserve recorded edges. Clearing them promotes every retained
+        -- cursorOver=1 from the previous window to a brand-new selection.
+        last_selected_ui_entry = nil
+        a11y.control_focus_owner = nil
+    end
+    local context = a11y.read_context
+    if context and context.message_key and ((context.native_owner
+            and context.native_owner ~= a11y.native_owner_token())
+            or not a11y.native_key_allowed(context.message_key)) then
+        a11y.reset_read_context("native-window-closed")
+        modal_focus_hold_until_ms = 0
+        a11y.deferred_modal_announcement = nil
+        a11y.modal_message_backlog = {}
+        a11y.pending_modal_button_text = nil
+    end
+end
+
+function a11y.native_widget_allowed(address)
+    if a11y.native_windows_enabled then
+        local active = a11y.menu_node_active(tonumber(address), tonumber(process_base_u64))
+        if active == false then return false end
+    end
+    local snapshot = a11y.native_windows
+    local member = snapshot and snapshot.members[tonumber(address)]
+    if member then return member.active end
+    return true
+end
+
+function a11y.native_text_presented(address)
+    if a11y.native_widget_allowed(address) then return true end
+    local member=address and a11y.native_windows and a11y.native_windows.members[tonumber(address)]
+    return member and member.presented==true
+        and a11y.menu_node_active(tonumber(address),tonumber(process_base_u64))==true
+end
+
+function a11y.menu_node_active(address, base)
+    if not address or not base then return nil end
+    local vtable = a11y.menu_read(address, "u64")
+    if not vtable then return nil end
+    if vtable ~= base + 0x27b5260 and vtable ~= base + 0x27c3a38 then return false end
+    local flags = a11y.menu_read(address + 0xc, "u32")
+    if flags == nil then return nil end
+    -- Same predicate as Node::state getter at 0xe4bb70; unlike cursorOver,
+    -- this includes the current propagated state of the node.
+    return flags % 8 == 7 and math.floor(flags / 256) % 2 == 1
+end
+
+function a11y.native_key_allowed(key)
+    local node = key and a11y.ui_model and a11y.ui_model.nodes[key]
+    return not node or a11y.native_widget_allowed(node.address)
+end
+
+function a11y.native_presentation_ready(address)
+    if address and not a11y.native_text_presented(address) then return false end
+    if not a11y.native_windows_enabled then return true end
+    local member=address and a11y.native_windows and a11y.native_windows.members[tonumber(address)]
+    if member and member.presented and not member.active then return true end
+    if member and member.owners and #member.owners>0 then
+        for _,owner in ipairs(member.owners) do
+            if owner.enabled and owner.root and owner.root>=0x10000 then return true end
+        end
+        return false
+    end
+    for _,window in ipairs(a11y.native_windows and a11y.native_windows.windows or {}) do
+        if window.enabled and window.root and window.root>=0x10000 then return true end
+    end
+    return false
+end
+
+-- A native owner/tree, not string loading, establishes these review entries.
+-- Sorting uses observation sequence; no inferred visual coordinates/categories.
+function a11y.observe_control_font(data,offset,total)
+    if total>4194304 or offset<0 then return end
+    if offset==0 then
+        a11y.control_font_scan={a=1,b=0,next=0,total=total}
+        a11y.control_font_family=nil
+    end
+    local scan=a11y.control_font_scan
+    if not scan or scan.next~=offset or scan.total~=total then return end
+    local a,b=scan.a,scan.b
+    for index=1,#data do a=(a+data:byte(index))%65521;b=(b+a)%65521 end
+    scan.a,scan.b,scan.next=a,b,offset+#data
+    if scan.next==total then
+        -- Signatures of the local font assets inspected as actual glyph bitmaps.
+        local known={
+            ["55036:38782804"]="playstation",["760560:3728391537"]="playstation",
+            ["47727:2475288431"]="xbox",["757104:3636751182"]="xbox",
+            ["108565:763610868"]="xbox",["3021552:1135989911"]="xbox",
+        }
+        a11y.control_font_family=known[tostring(total)..":"..tostring(b*65536+a)]
+        log("[FLAccess] control-font=" .. tostring(a11y.control_font_family or "unrecognized"))
+        a11y.control_font_scan=nil
+    end
+end
+
+-- Renderer parser e2b050 dispatches j/k to these exact callbacks. Read their
+-- current mapping and symbol pointer; never call game code or infer letters.
+function a11y.native_control_marker(kind,letter)
+    local base=tonumber(process_base_u64)
+    local index=letter:byte()-0x61
+    local category=kind=="j" and 0 or kind=="k" and 1
+    if not base or not category or index<0 or index>=(category==0 and 15 or 9) then return nil end
+    if a11y.menu_read(base+0x36f9590+category*8,"u64")
+            ~=base+(category==0 and 0xe264b0 or 0xe26960) then return nil end
+    local mapped=a11y.menu_read(base+(category==0 and 0x27ae3b8 or 0x27ae3f8)+index*4,"u32")
+    if not mapped or mapped>33 then return nil end
+    local at=base+0x34c0660+mapped*0x10
+    local pointer=a11y.menu_read(at+8,"u64")
+    if pointer==0 and (mapped==32 or mapped==33) then
+        mapped=a11y.menu_read(base+0x34c08c0+(mapped-32)*4,"u32")
+        if not mapped or mapped>31 then return nil end
+        at=base+0x34c0660+mapped*0x10
+        pointer=a11y.menu_read(at+8,"u64")
+    end
+    if not pointer or pointer<0x10000 then return nil end
+    local symbol=a11y.read_native_c_string(pointer,128)
+    if not symbol or symbol=="" or symbol:find("\17",1,true) then return nil end
+    return symbol
+end
+
+function a11y.control_symbol_text(text)
+    local family=a11y.control_font_family
+    if not (text:find("\17",1,true) or text:find("\238\128",1,true)) then return text end
+    local captions=family=="playstation"
+        and {[0]="Círculo",[1]="Cruz",[2]="Triângulo",[3]="Quadrado",[4]="R1",[5]="R2",[6]="L1",[7]="L2",[8]="Options",[9]="Share",[14]="R3",[15]="L3"}
+        or {[0]="B",[1]="A",[2]="Y",[3]="X",[4]="RB",[5]="RT",[6]="LB",[7]="LT",[8]="Menu",[9]="Exibir",[14]="RS",[15]="LS"}
+    local function caption(index)
+        if not family then return nil end
+        local value=captions[index]
+        if not value then return nil end
+        if a11y.ui_language~="pt" then
+            if value=="Círculo" then value="Circle" elseif value=="Cruz" then value="Cross"
+            elseif value=="Triângulo" then value="Triangle" elseif value=="Quadrado" then value="Square"
+            elseif value=="Exibir" then value="View" end
+        end
+        return (a11y.ui_language=="pt" and "botão " or "button ") .. value
+    end
+    -- Markup follows the current renderer binding, including remapped confirm
+    -- and cancel. Literal digits still are not physical button indices.
+    text=text:gsub("\17([jk])([a-o])",function(kind,letter)
+        local symbol=a11y.native_control_marker(kind,letter)
+        if symbol then
+            if symbol:find("\238\128",1,true) then return symbol end
+            if symbol:match("^[%w%s%-_]+$") then
+                return (a11y.ui_language=="pt" and "tecla " or "key ") .. symbol
+            end
+        end
+        if kind=="k" and letter=="a" and family then return caption(1) end
+        return "\17" .. kind .. letter
+    end)
+    return text:gsub("\238\128[\128-\143]",function(glyph)
+        return caption(glyph:byte(3)-128) or glyph
+    end)
+end
+
+function a11y.output_speech_text(text)
+    for _,role in ipairs({"seletor","selector","campo de texto","text field",
+            "ativar para editar","activate to edit","controle deslizante","slider"}) do
+        text=text:gsub(", " .. role .. ",",","):gsub(", " .. role .. "$","")
+    end
+    for _,suffix in ipairs({"item selecionado","botão selecionado","opção selecionada",
+            "selecionado","selecionada","item","selected item","selected button",
+            "selected option","selected","button selected"}) do text=text:gsub(", " .. suffix .. "$","") end
+    return text
+end
+
+function a11y.unresolved_format(text)
+    return text and text:find("%%[%d%$%.%-%+]*[sdifucxX]")~=nil
+end
+
+function a11y.read_native_c_string(address,limit)
+    if not address or address<0x10000 then return nil end
+    local parts={}
+    for offset=0,(limit or 2048)-1,64 do
+        local size=math.min(64,(limit or 2048)-offset)
+        while size>0 and not readable(address+offset,size) do size=math.floor(size/2) end
+        if size==0 then return nil end
+        local bytes=memory.read(address+offset,size)
+        if not bytes or #bytes~=size then return nil end
+        local zero=bytes:find("\0",1,true)
+        parts[#parts+1]=zero and bytes:sub(1,zero-1) or bytes
+        if zero then return table.concat(parts) end
+        if size<64 then return nil end
+    end
+end
+
+function a11y.read_native_rendered_text(address)
+    local base=tonumber(process_base_u64)
+    if not base or a11y.menu_read(address,"u64")~=base+0x27b5260 then return nil end
+    local renderer=a11y.menu_read(address+0xa8,"u64")
+    local vtable=renderer and a11y.menu_read(renderer,"u64")
+    -- e29e40 copies a C string into renderer+38. Both known renderer
+    -- vtables use this setter; validate its slot before reading the field.
+    local setter=vtable and a11y.menu_read(vtable+0x10,"u64")
+    -- Factory e2edf0 builds a proxy whose e2fa60 setter calls e29e40 on
+    -- the SAME object, retaining the same text at +38. Read both contracts.
+    if setter~=base+0xe29e40 and setter~=base+0xe2fa60 then return nil end
+    local raw=a11y.read_native_c_string(a11y.menu_read(renderer+0x38,"u64"),2048)
+    if raw==nil then return nil end
+    return clean_text(raw),raw,a11y.menu_read(renderer+8,"u32")
+end
+
+function a11y.poll_native_texts(review)
+    local snapshot=a11y.native_windows
+    if not a11y.native_windows_enabled or not snapshot or not snapshot.members then return end
+    local selected,others={},{}
+    for address,member in pairs(snapshot.members) do
+        if member.active or member.presented then
+            others[#others+1]=address
+            if snapshot.selected_members and snapshot.selected_members[address] then selected[#selected+1]=address end
+        end
+    end
+    table.sort(selected);table.sort(others)
+    local work,seen={},{}
+    for index,address in ipairs(selected) do
+        if not review and index>24 then break end
+        work[#work+1],seen[address]=address,true
+    end
+    -- A proven field's value can live inside a delegate outside the cursor's
+    -- indexed label subtree. Refresh it together with its selected label.
+    for index,address in ipairs(selected) do
+        if not review and index>24 then break end
+        local key=memory.hex(address)
+        local row=a11y.control_for_widget(key)
+        local value=row and tonumber(row.value_widget)
+        if value and not seen[value] and snapshot.members[value] and snapshot.members[value].active then
+            work[#work+1],seen[value]=value,true
+        end
+    end
+    local cursor=a11y.native_text_scan_cursor or 0
+    for index=1,(review and #others or math.min(24,#others)) do
+        local address=others[(cursor+index-1)%#others+1]
+        if not seen[address] then work[#work+1]=address;seen[address]=true end
+    end
+    a11y.native_text_scan_cursor=#others>0 and (cursor+24)%#others or 0
+    for _,address in ipairs(work) do
+        if a11y.native_presentation_ready(address) then
+            local text,raw,font=a11y.read_native_rendered_text(address)
+            local key=memory.hex(address)
+            local node=a11y.ui_model and a11y.ui_model.nodes[key]
+            if text~=nil and (not node or node.text~=text or not a11y.ui_node_matches_live(node)) then
+                a11y.on_observed_ui_text(address,text,raw,nil,review)
+                node=a11y.ui_model and a11y.ui_model.nodes[key]
+            end
+            if node and raw then node.raw_text,node.native_font=raw,font end
+        end
+    end
+end
+
+function a11y.presented_nodes()
+    local result={}
+    local snapshot=a11y.native_windows
+    for _,node in pairs(a11y.ui_model and a11y.ui_model.nodes or {}) do
+        local member=snapshot and snapshot.members and snapshot.members[tonumber(node.address)]
+        if member and (member.active or member.presented) and node.text and node.text~="" and not a11y.unresolved_format(node.text)
+                and a11y.native_presentation_ready(node.address)
+                and a11y.ui_node_matches_live(node) then result[#result+1]=node end
+    end
+    table.sort(result,function(a,b)
+        if (a.sequence or 0)~=(b.sequence or 0) then return (a.sequence or 0)<(b.sequence or 0) end
+        return a.key<b.key
+    end)
+    return result
+end
+
+function a11y.present_companion_heading(nodes)
+    local context=a11y.read_context_state()
+    if context.kind=="dialog" or a11y.reading_panel_is_current() or a11y.keyboard_window then return end
+    local snapshot=a11y.native_windows
+    local base=tonumber(process_base_u64)
+    local found
+    for _,window in ipairs(snapshot and snapshot.windows or {}) do
+        local detail=window.cursor_detail
+        if window.enabled and detail and detail.status=="no-text" and base
+                and detail.selected_type==base+0x27cb508 then
+            local label,ambiguous
+            for _,node in ipairs(nodes) do
+                local row=control_rows_by_label_widget[node.key]
+                if node.name=="text_item" and (not row or not row.value or row.value=="") then
+                    local member=snapshot.members[tonumber(node.address)]
+                    for _,owner in ipairs(member and member.owners or {}) do
+                        if owner.enabled and owner.address==window.address then
+                            if label and label~=node then ambiguous=true end
+                            label=node;break
+                        end
+                    end
+                end
+            end
+            if label and not ambiguous then
+                if found and found~=label then return end
+                found=label
+            end
+        end
+    end
+    if not found then a11y.companion_candidate=nil;return end
+    local identity=(a11y.native_owner_token() or "") .. ":" .. found.identity .. ":" .. found.text
+    if a11y.companion_candidate~=identity then
+        a11y.companion_candidate,a11y.companion_candidate_frame=identity,frame
+    elseif frame-(a11y.companion_candidate_frame or frame)>=3 and a11y.companion_spoken~=identity then
+        a11y.companion_spoken=identity
+        a11y.present_bound_heading(found.address,found.text)
+    end
+end
+
+function a11y.poll_presented_texts()
+    if a11y.keyboard_window then return end
+    local owner=a11y.native_owner_token()
+    if a11y.presentation_seen_owner==owner and a11y.presentation_seen
+            and frame-(a11y.presentation_frame or -10000)<6 then return end
+    a11y.presentation_frame=frame
+    local old=a11y.presentation_seen_owner==owner and a11y.presentation_seen or {}
+    local seen,titles,messages={}, {}, {}
+    local nodes=a11y.presented_nodes()
+    for _,node in ipairs(nodes) do
+        a11y.rebind_presented_control(node)
+        a11y.capture_reading_panel(node)
+        local identity=tostring(node.identity or node.key) .. ":" .. node.text
+        seen[node.key]=identity
+        if old[node.key]~=identity then
+            a11y.announce_skip_hint(node.text,node)
+            if is_screen_title(node.text,node.address) then titles[#titles+1]=node
+            elseif node.name=="question" or node.name=="eventMsg"
+                    or a11y.text_asset_role(node.text)=="dialog" then messages[#messages+1]=node end
+        end
+    end
+    a11y.presentation_seen,a11y.presentation_seen_owner=seen,owner
+    if #titles==0 and #messages==0 then a11y.present_companion_heading(nodes) end
+    -- Never choose by table iteration when several independent prompts arrive.
+    if #titles==1 then
+        local node=titles[1]
+        local role=a11y.text_asset_role(node.text)
+        local member=a11y.native_windows and a11y.native_windows.members[tonumber(node.address)]
+        if (not role or role=="label-or-name") and member and member.active
+                and (node.name=="title" or node.name=="text_title")
+                and a11y.read_context_state().kind~="dialog" then
+            -- A single presented native heading needs no catalogue entry.
+            -- Present it without resetting the scene or its working controls.
+            a11y.present_bound_heading(node.address,node.text)
+        else announce_screen_title(node.text,node.key,node.address) end
+    end
+    if #messages==1 then
+        local node=messages[1]
+        if not a11y.capture_question_panel(node) then
+            remember_message_text(node.text,node.key)
+            queue_recent_message()
+        end
+    end
+end
+
+function a11y.native_owner_token()
+    local snapshot = a11y.native_windows
+    if not snapshot or not snapshot.windows then return nil end
+    local owners = {}
+    for _, window in ipairs(snapshot.windows) do
+        if window.enabled then
+            owners[#owners+1]=tostring(window.address) .. ":" .. tostring(window.root or 0)
+        end
+    end
+    table.sort(owners)
+    return table.concat(owners,",")
+end
+
+function a11y.capture_speech_origin(address)
+    if not address then return nil end
+    local origin = {address=tonumber(address),owner=a11y.native_owner_token()}
+    local node = a11y.ui_model and a11y.ui_model.nodes[memory.hex(address)]
+    if node then origin.identity,origin.text=node.identity,node.text end
+    if a11y.native_windows_enabled then origin.native_type=a11y.menu_read(origin.address,"u64") end
+    return origin
+end
+
+function a11y.speech_origin_allowed(origin)
+    if not origin then return true end
+    if origin.owner and a11y.native_owner_token() ~= origin.owner then return false end
+    if origin.native_type and a11y.menu_read(origin.address,"u64") ~= origin.native_type then return false end
+    if origin.identity then
+        local node=a11y.ui_model and a11y.ui_model.nodes[memory.hex(origin.address)]
+        if not node or node.identity ~= origin.identity or node.text ~= origin.text then return false end
+    end
+    return a11y.native_presentation_ready(origin.address)
+end
+
+function a11y.apply_menu_flow(data, name)
+    local metadata = data:match('"data"%s*:%s*{(.-)}')
+    if not metadata or metadata:match('"type"%s*:%s*"(.-)"') ~= "menu" then return false end
+    local home = metadata:match('"mark"%s*:%s*"(.-)"') == "home"
+    if a11y.menu_flow_name ~= name or a11y.dashboard_review ~= home then
+        a11y.menu_flow_name = name
+        a11y.dashboard_review, a11y.dashboard_texts = home, {}
+        log("[FLAccess] menu-flow=" .. tostring(name) .. " review=" .. tostring(home))
+    end
+    return true
+end
+
+function m.data_ready(ctx, filename, data, size, total_size, offset)
+    local path = filename:gsub("\\", "/")
+    local capture=a11y.component_capture
+    if capture and capture.active and offset==0
+            and (path:lower():find("common/menu/",1,true)
+                or path:lower():find("common/script/flow/",1,true)) then
+        local line=string.format("RESOURCE frame=%d name=%q size=%s total=%s\n",frame,path,tostring(size),tostring(total_size))
+        if capture.bytes+#line<=33554432 then
+            local file=io.open(capture.path,"at")
+            if file then file:write(line);file:close();capture.bytes=capture.bytes+#line end
+        end
+    end
+    if path:match("common/menu/font/ext_fnt%.bin$") and size<=4194304 and readable(data,size) then
+        a11y.observe_control_font(memory.read(data,size),offset,total_size)
+    end
+    if path:find("common/script/flow/",1,true) and path:match("%.json$")
+            and offset == 0 and size == total_size and size <= 65536
+            and readable(data, size) then
+        a11y.apply_menu_flow(memory.read(data, size), path)
+    end
+end
+
+function a11y.record_dashboard_text(node)
+    if not a11y.dashboard_review or not node or not node.text or node.text == ""
+            or node.name == "padIcon" or node.name == "title"
+            or node.name == "question" or node.name == "eventMsg"
+            or is_noninteractive_text(node.text) or node.text:find("%%") then return end
+    a11y.dashboard_texts = a11y.dashboard_texts or {}
+    for _, item in ipairs(a11y.dashboard_texts) do
+        if item.address == node.address then
+            item.text,item.identity,item.owner=node.text,node.identity,a11y.native_owner_token()
+            return
+        end
+    end
+    if #a11y.dashboard_texts < 70 then
+        a11y.dashboard_texts[#a11y.dashboard_texts+1] = {address=node.address,text=node.text,
+            identity=node.identity,owner=a11y.native_owner_token()}
+    end
+end
+
+function a11y.utf8_characters(text)
+    local result={}
+    for value in (text or ""):gmatch("[%z\1-\127\194-\244][\128-\191]*") do result[#result+1]=value end
+    return result
+end
+
+function a11y.read_keyboard_text(node)
+    if not a11y.keyboard_window or not node
+            or (node.keyboard_owner~=a11y.keyboard_window and not a11y.native_widget_allowed(node.address))
+            or (node.name~="textWord" and node.name~="inputText" and node.name~="textInput")
+            or node.text==a11y.keyboard_text then return false end
+    local old=a11y.keyboard_text
+    a11y.keyboard_text=node.text
+    if old==nil then return true end
+    local before,after=a11y.utf8_characters(old),a11y.utf8_characters(node.text)
+    local prefix,suffix=0,0
+    while prefix<#before and prefix<#after and before[prefix+1]==after[prefix+1] do prefix=prefix+1 end
+    while suffix<#before-prefix and suffix<#after-prefix
+            and before[#before-suffix]==after[#after-suffix] do suffix=suffix+1 end
+    local removed,inserted={},{}
+    for index=prefix+1,#before-suffix do removed[#removed+1]=before[index] end
+    for index=prefix+1,#after-suffix do inserted[#inserted+1]=after[index] end
+    local spoken=table.concat(removed)
+    if #inserted>0 and a11y.keyboard_echo_insertions then
+        spoken=spoken .. (#spoken>0 and ". " or "") .. table.concat(inserted)
+    end
+    if spoken~="" then
+        a11y.keyboard_edit_sequence=(a11y.keyboard_edit_sequence or 0)+1
+        speak(spoken,true,true,"edit:" .. tostring(a11y.keyboard_edit_sequence))
+    end
+    return true
+end
+
+function a11y.read_native_keyboard_state()
+    local window=a11y.keyboard_window
+    local base=tonumber(process_base_u64)
+    if not window or not base or a11y.menu_read(window,"u64")~=base+0x27c3eb0 then return nil end
+    -- KeyboardPopup owns its editing state at +110. d42b90 copies the full
+    -- MSVC string at state+8; e7b330 uses state+0 as the UTF-8 cursor index.
+    -- The input node at popup+90 can belong to the disabled window underneath.
+    local text=a11y.read_msvc_string(window+0x118)
+    if text==nil then return nil end
+    local caret=a11y.menu_read(window+0x110,"u32")
+    local characters=a11y.utf8_characters(text)
+    if not caret or caret>#characters then caret=nil end
+    return {address=window,keyboard_owner=window,name="inputText",text=text,caret=caret,
+        input=a11y.menu_read(window+0x90,"u64")}
+end
+
+
+function m.on_keyboard_input_set(ctx, event_id, registers)
+    -- Observe the native input node, not the coach field behind the popup.
+    -- The hook runs before the setter: read its stored string on render frames.
+    local address = tonumber(read_u64(registers.rcx))
+    if not address or a11y.menu_read(address,"u64") ~= tonumber(process_base_u64)+0x27c3a38 then return end
+    if address ~= a11y.keyboard_input_address then
+        log("[FLAccess] native-input address=" .. memory.hex(address) .. " source=NodeRectTextInput string-offset=0x118 cursor=unverified")
+    end
+    a11y.keyboard_input_address = address
+end
+
+function a11y.poll_keyboard_input()
+    if not a11y.keyboard_window then return end
+    local native=a11y.read_native_keyboard_state()
+    if native then
+        local previous=a11y.keyboard_text
+        a11y.read_keyboard_text(native)
+        if previous==native.text and native.caret~=nil and a11y.keyboard_caret~=nil
+                and native.caret~=a11y.keyboard_caret then
+            local characters=a11y.utf8_characters(native.text)
+            speak(characters[native.caret+1] or (a11y.ui_language=="pt" and "Fim do texto." or "End of text."),
+                true,true,"caret:" .. tostring(a11y.keyboard_window) .. ":" .. tostring(native.caret))
+        end
+        a11y.keyboard_caret=native.caret
+        return
+    end
+    -- A recognized popup with unavailable state must wait; another input
+    -- widget elsewhere cannot stand in for its edit buffer.
+    if a11y.menu_read(a11y.keyboard_window,"u64")==tonumber(process_base_u64)+0x27c3eb0 then return end
+    -- Compatibility fallback for a verified input without the popup layout.
+    if not a11y.keyboard_input_address then return end
+    local address=a11y.keyboard_input_address
+    if a11y.menu_read(address,"u64")~=tonumber(process_base_u64)+0x27c3a38 then return end
+    local text=a11y.read_msvc_string(address+0x118)
+    if text~=nil then a11y.read_keyboard_text({address=address,name="inputText",text=text}) end
+end
+
+function a11y.present_bound_heading(widget,text)
+    if not a11y.native_presentation_ready(widget) then a11y.defer_bound_guidance(widget,text,"heading");return end
+    a11y.set_read_title(text)
+    speak(text,not a11y.read_context_state().native_reading_panel,nil,nil,widget)
+    a11y.title_pending_first_item=text
+    a11y.title_pending_first_item_until_ms=tonumber(ffi.C.GetTickCount64())+2000
+end
+
+function a11y.defer_bound_guidance(widget,text,kind)
+    if a11y.native_presentation_ready(widget) or a11y.is_control_help(text) then return end
+    local title=is_screen_title(text,widget)
+    local node=a11y.ui_model and a11y.ui_model.nodes[memory.hex(widget)]
+    local panel=node and (node.name=="question" or node.name=="eventMsg")
+    if not kind and not title and not panel and not looks_like_message(text,widget) then return end
+    a11y.pending_surface_texts=a11y.pending_surface_texts or {}
+    local origin=a11y.capture_speech_origin(widget)
+    if origin.owner=="" or not a11y.native_presentation_ready() then origin.owner=nil end
+    local member=a11y.native_windows and a11y.native_windows.members
+        and a11y.native_windows.members[tonumber(widget)]
+    if member and not member.active and member.owners and #member.owners>0 then
+        -- A proven future owner can bind on activation. Unknown ownership
+        -- must not turn an old pending caption into a new-window title.
+        origin.target_windows={}
+        for _,owner in ipairs(member.owners) do origin.target_windows[owner.address]=true end
+        origin.owner=nil
+    end
+    a11y.pending_surface_texts[memory.hex(widget)]={text=text,frame=frame,
+        address=tonumber(widget),kind=kind or (panel and "panel" or title and "title" or "message"),
+        origin=origin}
+end
+
+function a11y.poll_surface_texts()
+    for key, item in pairs(a11y.pending_surface_texts or {}) do
+        local node = a11y.ui_model and a11y.ui_model.nodes[key]
+        local bound=true
+        if item.origin and item.origin.target_windows then
+            bound=false
+            local member=node and a11y.native_windows and a11y.native_windows.members
+                and a11y.native_windows.members[tonumber(node.address)]
+            for _,owner in ipairs(member and member.owners or {}) do
+                if owner.enabled and item.origin.target_windows[owner.address] then bound=true end
+            end
+        end
+        if not node or node.text ~= item.text or frame-item.frame > 600
+                or not a11y.ui_node_matches_live(node)
+                or (item.origin and item.origin.owner
+                    and item.origin.owner ~= a11y.native_owner_token()) then
+            a11y.pending_surface_texts[key]=nil
+        elseif bound and a11y.native_presentation_ready(node.address) then
+            a11y.pending_surface_texts[key]=nil
+            if item.kind == "heading" then a11y.present_bound_heading(node.address,node.text)
+            elseif item.kind == "panel" then a11y.capture_question_panel(node)
+            elseif item.kind == "message" then remember_message_text(node.text,key); queue_recent_message()
+            else announce_screen_title(node.text,key,node.address) end
+        end
+    end
+end
+
+function a11y.ui_owner_link(widget)
+    if not readable(widget + 0x38, 8) then return nil end
+    local bytes = memory.read(widget + 0x38, 8)
+    if not bytes or #bytes ~= 8 then return nil end
+    local pointer = tonumber(read_u64(bytes))
+    if pointer and pointer >= 0x10000 and pointer <= 0x7fffffffffff then return pointer end
+end
+
+-- nil means no structural evidence; false means known different components.
+function a11y.component_peers(left,right)
+    local snapshot=a11y.native_windows
+    local member=snapshot and snapshot.members and snapshot.members[tonumber(left)]
+    local known=false
+    for _,owner in ipairs(member and member.owners or {}) do
+        if owner.enabled and owner.parents then
+            local lp,rp=owner.parents[tonumber(left)],owner.parents[tonumber(right)]
+            if lp and rp then
+                known=true
+                if lp==rp and lp~=owner.root then return true end
+            end
+        end
+    end
+    if known then return false end
+end
+
+function a11y.scoped_ui_name(name,address)
+    local found,known
+    for _,node in pairs(a11y.ui_model and a11y.ui_model.names[name] or {}) do
+        local peer=a11y.component_peers(address,node.address)
+        if peer~=nil then known=true end
+        if peer and a11y.native_widget_allowed(node.address) and a11y.ui_node_matches_live(node) then
+            if found then return nil end
+            found=node
+        end
+    end
+    if found then return found end
+    if known then return nil end
+    return a11y.unique_ui_name(name)
+end
+
+function a11y.command_icon_owners()
+    local owners = {}
+    for _, node in pairs(a11y.ui_model and a11y.ui_model.nodes or {}) do
+        if node.name == "padIcon" and node.owner_link then owners[node.owner_link] = true end
+    end
+    return owners
+end
+
+function a11y.is_command_legend(key, primary_focused, owners)
+    local node = a11y.ui_model and a11y.ui_model.nodes[key]
+    if not node then return false end
+    if node.name == "padIcon" then return true end
+    -- This observed layout family puts command captions and padIcon children
+    -- under the same link. A caption with real primary focus remains eligible.
+    return not primary_focused and node.name == "text" and node.owner_link ~= nil
+        and owners[node.owner_link] == true
+        and a11y.text_asset_role(node.text) == "dialog-button"
+end
+
+function a11y.ui_focus_identity(key, text)
+    local node = a11y.ui_model and a11y.ui_model.nodes[key]
+    -- Text is also needed for virtualized items whose data replaces a widget.
+    return (node and node.identity or key) .. ":" .. text
 end
 
 local function ui_focus_speech(text)
@@ -2875,6 +5751,18 @@ local function ui_focus_speech(text)
         return "Formation " .. text .. ", selected"
     end
     return text .. ", item selecionado"
+end
+
+function a11y.engine_focus_speech(text,node)
+    local spoken=ui_focus_speech(text)
+    if node and node.name and node.name:lower():find("playername",1,true) then
+        local section=a11y.player_component_section(node)
+        local prefixes=a11y.ui_language=="pt"
+            and {starter="Titular. ",reserve="Reserva. ",unselected="Não relacionado. "}
+            or {starter="Starter. ",reserve="Substitute. ",unselected="Not selected. "}
+        if section then spoken=(prefixes[section] or "") .. spoken end
+    end
+    return spoken
 end
 
 a11y.cup_group_non_team_items = {
@@ -2953,58 +5841,163 @@ function a11y.ignore_cup_group_focus(text)
     return a11y.cup_group_table_active and text == "OK"
 end
 
-function a11y.game_plan_player_section(text, heading_widget_key)
-    local target = a11y.normalized_player_name(text)
-    if not target then return nil end
-    local best_section
-    local best_score
-    local best_age
-    for candidate_key, candidate in pairs(ui_focus_widgets) do
-        local candidate_name = a11y.normalized_player_name(candidate.text)
-        if candidate_key ~= heading_widget_key and candidate.address
-                and candidate_name then
-            local score
-            if candidate_name == target then
-                score = 0
-            elseif candidate_name:find(target, 1, true)
-                    or target:find(candidate_name, 1, true) then
-                score = 1
-            end
-            if score and readable(candidate.address + 0x18, 24) then
-                local marker = memory.read(candidate.address + 0x18, 24)
-                local parent_marker
-                if readable(candidate.address + 0x38, 8) then
-                    local parent = read_u64(memory.read(
-                        candidate.address + 0x38, 8))
-                    if parent and parent >= 0x10000
-                            and readable(parent, 0x180) then
-                        parent_marker = memory.read(parent, 0x180)
+-- Classify a list entry from headings in its own native component. Localized
+-- words identify the section, while the tree proves the relationship. A label
+-- elsewhere in the same resource file or a player's position proves nothing.
+function a11y.player_component_section(node)
+    local snapshot=a11y.native_windows
+    local member=snapshot and snapshot.members and snapshot.members[tonumber(node.address)]
+    if not member or not member.active then return nil end
+    local native,_,typed=a11y.native_roster_section(node,member)
+    if typed then return native end
+    local headings={Titulares="starter",Reservas="reserve",["Não relacionados"]="unselected",
+        ["Não relacionado"]="unselected",Starters="starter",Substitutes="reserve",
+        ["Starting lineup"]="starter",["Not selected"]="unselected",["Not in squad"]="unselected"}
+    local result,conflicting
+    for _,owner in ipairs(member.owners or {}) do
+        if owner.enabled and owner.parents then
+            local parents=owner.parents
+            local ancestor=parents[tonumber(node.address)]
+            local visited={}
+            for _=1,8 do
+                if not ancestor or ancestor==owner.root or visited[ancestor] then break end
+                visited[ancestor]=true
+                local section,ambiguous
+                for _,heading in pairs(a11y.ui_model and a11y.ui_model.nodes or {}) do
+                    local value=headings[heading.text]
+                    local at=tonumber(heading.address)
+                    local known=snapshot.members[at]
+                    if value and at~=tonumber(node.address) and known and known.active
+                            and a11y.native_widget_allowed(at) and a11y.ui_node_matches_live(heading) then
+                        local walked={}
+                        for _=1,8 do
+                            at=parents[at]
+                            if not at or walked[at] then break end
+                            walked[at]=true
+                            if at==ancestor then
+                                if section and section~=value then ambiguous=true end
+                                section=value;break
+                            end
+                        end
                     end
                 end
-                -- pitchPlayerName labels are also attached to hidden roster
-                -- cards. Only the parent layout proves that the visible card
-                -- belongs to the pitch; subPlayerName proves the bench.
-                local section = (marker:find("subPlayerName", 1, true)
-                        or (parent_marker and parent_marker:find(
-                            "subPlayerName", 1, true)))
-                        and "reserve"
-                    or (parent_marker
-                        and (parent_marker:find(
-                            "gmlanPlayerNameStrPitch", 1, true)
-                            or parent_marker:find(
-                                "gmlanPlayerPosition", 1, true))
-                        and "starter" or nil)
-                local age = frame - (candidate.last_seen or frame)
-                if section and (not best_score or score < best_score
-                        or (score == best_score and age < best_age)) then
-                    best_section = section
-                    best_score = score
-                    best_age = age
+                if ambiguous then break end
+                if section then
+                    if result and result~=section then conflicting=true end
+                    result=section;break
                 end
+                ancestor=parents[ancestor]
             end
         end
     end
-    return best_section
+    if conflicting then return nil end
+    if not result then a11y.component_evidence(node,"player-section-unresolved") end
+    return result
+end
+
+-- A pitch/card array proves the displayed slot. Player position and names
+-- cannot classify it. Substitute slot indices include the native scroll offset;
+-- the match-rule boundary is recorded from the game's actual return value.
+function a11y.native_roster_section(node,member)
+    local base=tonumber(process_base_u64)
+    if not base then return nil end
+    local result,identity,matched
+    for _,owner in ipairs(member.owners or {}) do
+        local vt=owner.enabled and a11y.menu_read(owner.address,"u64")
+        local pitch=vt==base+0x261eaa0
+        local substitutes=vt==base+0x261f788
+        if (pitch or substitutes) and owner.parents then
+            local ancestors,at={},tonumber(node.address)
+            for _=1,12 do
+                if not at or ancestors[at] then break end
+                ancestors[at]=true
+                if at==owner.root then break end
+                at=owner.parents[at]
+            end
+            local found,ambiguous
+            for index=0,(pitch and 10 or 11) do
+                for _,offset in ipairs({0xb8,0x118}) do
+                    local card=a11y.menu_read(owner.address+offset+index*8,"u64")
+                    if card and ancestors[card] then
+                        if found and found~=index then ambiguous=true end
+                        found=index
+                    end
+                end
+            end
+            if found and not ambiguous then
+                local value,slot,limit= nil,found,nil
+                matched=true
+                local impl=a11y.menu_read(owner.address+0x88,"u64")
+                local root=impl and a11y.menu_read(impl+0x98,"u64")
+                if pitch then value="starter" else
+                    local scroll=a11y.menu_read(owner.address+0x4e8,"u32")
+                    local bound=a11y.roster_limits and a11y.roster_limits[owner.address]
+                    if scroll and scroll<=29 and found+scroll+11<40 and bound
+                            and bound.impl==impl and bound.root==root
+                            and bound.side==a11y.menu_read(owner.address+0x98,"u32")
+                            and bound.limit>=11 and bound.limit<=40 then
+                        value=found+scroll+11<bound.limit and "reserve" or "unselected"
+                        slot,limit=found+scroll+11,bound.limit
+                    end
+                end
+                local current=tostring(owner.address) .. ":" .. tostring(root or owner.root) .. ":" .. tostring(slot)
+                    .. ":" .. tostring(limit) .. ":" .. tostring(value)
+                if identity and identity~=current then return nil,nil,true end
+                identity=current
+                if value and result and result~=value then return nil,nil,true end
+                result=value or result
+            end
+        end
+    end
+    return result,identity,matched
+end
+
+function m.on_roster_rule_boundary(ctx,event_id,registers)
+    local address=tonumber(read_u64(registers.rdi))
+    local limit=tonumber(read_u64(registers.rbx))
+    local base=tonumber(process_base_u64)
+    if not base or not address or not limit or a11y.menu_read(address,"u64")~=base+0x261f788 then return end
+    limit=limit%256
+    local impl=a11y.menu_read(address+0x88,"u64")
+    local root=impl and a11y.menu_read(impl+0x98,"u64")
+    if not root or root<0x10000 then return end
+    local side=a11y.menu_read(address+0x98,"u32")
+    if side~=0 and side~=1 then return end
+    a11y.roster_limits=a11y.roster_limits or {}
+    a11y.roster_limits[address]={impl=impl,root=root,limit=limit,
+        side=side,frame=frame}
+    a11y.component_capture_dirty_frame=frame
+end
+
+function a11y.prune_roster_limits(snapshot)
+    local registered={}
+    for _,window in ipairs(snapshot.windows or {}) do registered[window.address]=window end
+    for address,bound in pairs(a11y.roster_limits or {}) do
+        local window=registered[address]
+        -- Construction can record the rule just before manager registration.
+        -- Keep that short handoff, not a cache belonging to a closed component.
+        if frame-(bound.frame or -10000)>2 then
+            local flags=a11y.menu_read(bound.root+0xc,"u32")
+            if not window or window.impl~=bound.impl or window.root~=bound.root
+                    or not flags or math.floor(flags/4)%2~=1 then a11y.roster_limits[address]=nil end
+        end
+    end
+end
+
+function a11y.game_plan_player_section(text, heading_widget_key)
+    local target=a11y.normalized_player_name(text)
+    if not target then return nil end
+    local section,conflicting
+    for key,node in pairs(a11y.ui_model and a11y.ui_model.nodes or {}) do
+        if key~=heading_widget_key and a11y.normalized_player_name(node.text)==target
+                and a11y.native_widget_allowed(node.address) and a11y.ui_node_matches_live(node) then
+            local value=a11y.player_component_section(node)
+            if value and section and section~=value then conflicting=true end
+            if value then section=value end
+        end
+    end
+    if conflicting then return nil end
+    return section
 end
 
 function a11y.game_plan_lineup_screen_visible()
@@ -3022,18 +6015,22 @@ function a11y.read_visible_game_plan_lineup()
     local players = {}
     local observed_starters = 0
     for _, observed in pairs(a11y.game_plan_observed_lineup) do
-        if observed.section == "starter" then
+        local node=a11y.ui_model and a11y.ui_model.nodes[observed.widget]
+        if observed.section == "starter" and node
+                and a11y.game_plan_player_section(node.text,nil)=="starter" then
             observed_starters = observed_starters + 1
         end
     end
     if observed_starters == 11 then
         for name, observed in pairs(a11y.game_plan_observed_lineup) do
-            players[name] = {
+            local node=a11y.ui_model and a11y.ui_model.nodes[observed.widget]
+            local current=node and a11y.game_plan_player_section(node.text,nil)
+            if current then players[name] = {
                 name = name,
-                section = observed.section,
+                section = current,
                 number = observed.number or 999,
                 widget = observed.widget,
-            }
+            } end
         end
     else
         for widget_key, entry in pairs(ui_focus_widgets) do
@@ -3051,9 +6048,10 @@ function a11y.read_visible_game_plan_lineup()
             end
         end
     end
-    local starters, reserves = {}, {}
+    local starters, reserves, unselected = {}, {}, {}
     for _, player in pairs(players) do
-        local target = player.section == "starter" and starters or reserves
+        local target = player.section == "starter" and starters
+            or player.section == "reserve" and reserves or unselected
         target[#target + 1] = player
     end
     local function order(left, right)
@@ -3062,6 +6060,7 @@ function a11y.read_visible_game_plan_lineup()
     end
     table.sort(starters, order)
     table.sort(reserves, order)
+    table.sort(unselected, order)
     log(string.format(
         "[FLAccess] lineup-read generation=%d starters=%d reserves=%d",
         generation_frame, #starters, #reserves))
@@ -3082,9 +6081,11 @@ function a11y.read_visible_game_plan_lineup()
     if a11y.ui_language == "pt" then
         spoken = "Escalação. Titulares: " .. names(starters)
             .. ". Reservas: " .. names(reserves)
+            .. (#unselected>0 and ". Não relacionados: " .. names(unselected) or "")
     else
         spoken = "Lineup. Starters: " .. names(starters)
             .. ". Reserves: " .. names(reserves)
+            .. (#unselected>0 and ". Not selected: " .. names(unselected) or "")
     end
     speak(spoken)
     local now_ms = tonumber(ffi.C.GetTickCount64())
@@ -3139,10 +6140,10 @@ function a11y.game_plan_focus_speech(text, widget_key)
             local section_speech
             if a11y.ui_language == "pt" then
                 section_speech = section == "starter"
-                    and "Titular. " or "Reserva. "
+                    and "Titular. " or section=="reserve" and "Reserva. " or "Não relacionado. "
             else
                 section_speech = section == "starter"
-                    and "Starter. " or "Substitute. "
+                    and "Starter. " or section=="reserve" and "Substitute. " or "Not selected. "
             end
             announcement = section_speech .. announcement
         else
@@ -3166,7 +6167,36 @@ function a11y.game_plan_focus_speech(text, widget_key)
     return announcement
 end
 
+-- Leaving a component must also cancel work scheduled by that component.
+-- This shared lifecycle is used by the existing exit adapters; no caption
+-- rules or inferred player-section mappings are introduced here.
+function a11y.leave_game_plan()
+    a11y.game_plan_active = false
+    a11y.game_plan_main_surface = false
+    a11y.game_plan_context = nil
+    a11y.game_plan_announced_context = nil
+    a11y.game_plan_last_focus_text = nil
+    a11y.game_plan_last_menu_focus = nil
+    a11y.game_plan_last_player_section = nil
+    a11y.game_plan_basic_prompt_active = false
+    a11y.game_plan_attribute_panel_until_ms = 0
+    a11y.game_plan_attribute_locked_name = nil
+    a11y.game_plan_attribute_due_ms = nil
+    a11y.game_plan_attribute_hold_until_ms = 0
+    a11y.game_plan_active_tactical_label = nil
+    a11y.game_plan_active_tactical_value = nil
+    a11y.game_plan_active_tactical_widget = nil
+    a11y.game_plan_active_tactical_frame = -10000
+    a11y.game_plan_selected_heading_due_frame = nil
+    a11y.game_plan_basic_menu_heading_due_frame = nil
+    a11y.game_plan_lineup_due_ms = nil
+    a11y.game_plan_lineup_input = nil
+    a11y.game_plan_menu_probe_due_frame = nil
+    a11y.game_plan_menu_probe_action = nil
+end
+
 function a11y.process_game_plan_selected_heading(modal_focus_blocked)
+    if a11y.read_context_state().kind == "dialog" then return false end
     local due = a11y.game_plan_selected_heading_due_frame
     if not due or frame < due or modal_focus_blocked
             or a11y.game_plan_main_surface
@@ -3181,6 +6211,8 @@ function a11y.process_game_plan_selected_heading(modal_focus_blocked)
     local announcement = a11y.game_plan_focus_speech(
         text, a11y.game_plan_selected_heading_widget)
     if announcement then
+        a11y.commit_read_selection(announcement,
+            a11y.game_plan_selected_heading_widget or text, "adapter-focus")
         speak(announcement)
         return true
     end
@@ -3188,6 +6220,7 @@ function a11y.process_game_plan_selected_heading(modal_focus_blocked)
 end
 
 function a11y.process_game_plan_basic_menu_heading(modal_focus_blocked)
+    if a11y.read_context_state().kind == "dialog" then return false end
     local due = a11y.game_plan_basic_menu_heading_due_frame
     if not due or frame < due or modal_focus_blocked
             or (a11y.game_plan_context ~= "Menu de configuração básica"
@@ -3200,6 +6233,8 @@ function a11y.process_game_plan_basic_menu_heading(modal_focus_blocked)
     local announcement = a11y.game_plan_focus_speech(
         text, a11y.game_plan_basic_menu_heading_widget)
     if announcement then
+        a11y.commit_read_selection(announcement,
+            a11y.game_plan_basic_menu_heading_widget or text, "adapter-focus")
         speak(announcement)
         return true
     end
@@ -3295,7 +6330,7 @@ function a11y.game_plan_attribute_summary()
             and "Valores individuais disponíveis. "
             or "Força, drible, passe, velocidade, defesa e chute. "
         return prefix .. detail ..
-            "Use I e K ou o analógico direito para cima e para baixo para ler cada item."
+            "Use I e K para texto anterior e próximo, J para o primeiro e L para repetir. Analógico direito disponível neste painel."
     end
     local prefix = player and (player .. " attributes. ")
         or "Attributes panel. "
@@ -3303,7 +6338,7 @@ function a11y.game_plan_attribute_summary()
         and "Individual values are available. "
         or "Strength, dribbling, passing, speed, defending and shooting. "
     return prefix .. detail ..
-        "Use I and K or move the right stick up and down to read each item."
+        "Use I and K for previous and next text, J for first and L to repeat. Right stick is available in this panel."
 end
 
 function a11y.read_game_plan_attribute(direction)
@@ -3338,6 +6373,12 @@ function a11y.read_game_plan_attribute(direction)
 end
 
 function a11y.poll_diagnostic_keyboard()
+    a11y.buffer_keyboard_state = a11y.buffer_keyboard_state or {}
+    for _, vkey in ipairs({0x49, 0x4b, 0x4a, 0x4c}) do
+        local down = user32.GetAsyncKeyState(vkey) < 0
+        if down and not a11y.buffer_keyboard_state[vkey] then a11y.buffer_key(vkey) end
+        a11y.buffer_keyboard_state[vkey] = down
+    end
     local inputs = {
         {0x26, "up"}, {0x28, "down"},
         {0x25, "left"}, {0x27, "right"},
@@ -3355,19 +6396,12 @@ end
 
 function a11y.poll_attribute_input(now_ms)
     a11y.poll_diagnostic_keyboard()
-    local i_down = user32.GetAsyncKeyState(0x49) < 0
-    local k_down = user32.GetAsyncKeyState(0x4b) < 0
     local o_down = user32.GetAsyncKeyState(0x4f) < 0
     local keyboard_y_down = user32.GetAsyncKeyState(0x59) < 0
     local escape_down = user32.GetAsyncKeyState(0x1b) < 0
     if escape_down and not a11y.attribute_escape_down then
         a11y.game_plan_attribute_panel_until_ms = 0
         a11y.game_plan_attribute_locked_name = nil
-    end
-    if i_down and not a11y.attribute_i_down then
-        a11y.read_game_plan_attribute(-1)
-    elseif k_down and not a11y.attribute_k_down then
-        a11y.read_game_plan_attribute(1)
     end
     if o_down and not a11y.lineup_keyboard_o_down
             and a11y.game_plan_lineup_screen_visible() then
@@ -3379,8 +6413,6 @@ function a11y.poll_attribute_input(now_ms)
         a11y.game_plan_attribute_panel_until_ms = 0
         a11y.game_plan_attribute_locked_name = nil
     end
-    a11y.attribute_i_down = i_down
-    a11y.attribute_k_down = k_down
     a11y.lineup_keyboard_o_down = o_down
     a11y.attribute_keyboard_y_down = keyboard_y_down
     a11y.attribute_escape_down = escape_down
@@ -3427,13 +6459,6 @@ function a11y.poll_attribute_input(now_ms)
     local right_x = tonumber(a11y.xinput_state[0].Gamepad.sThumbRX)
     local horizontal = right_x < -16000 and -1
         or (right_x > 16000 and 1 or 0)
-    if horizontal == -1 and a11y.lineup_right_stick_x == 0
-            and a11y.game_plan_lineup_screen_visible() then
-        -- Horizontal right-stick movement has no documented Game Plan menu
-        -- action. Use the left edge as a read-only accessibility command.
-        a11y.game_plan_lineup_due_ms = now_ms + 80
-        a11y.game_plan_lineup_input = "right-stick-left"
-    end
     a11y.lineup_right_stick_x = horizontal
     if (b_down and not a11y.attribute_b_down)
             or (y_down and not a11y.attribute_y_down
@@ -3443,60 +6468,11 @@ function a11y.poll_attribute_input(now_ms)
     end
     local vertical = raw > 16000 and 1 or (raw < -16000 and -1 or 0)
     if vertical ~= 0 and a11y.attribute_right_stick_y == 0 then
-        a11y.read_game_plan_attribute(vertical > 0 and -1 or 1)
+        a11y.review_right_stick(vertical > 0 and -1 or 1)
     end
     a11y.attribute_right_stick_y = vertical
     a11y.attribute_y_down = y_down
     a11y.attribute_b_down = b_down
-end
-
-local side_names = {"Em casa", "Neutro", "Fora"}
-
-local function side_user(text)
-    return text and text:match("^Usuário %d+$") ~= nil
-end
-
-local function speak_side(user, position)
-    speak(user .. ", " .. side_names[position] .. ", selecionado")
-end
-
-local function begin_side_screen(initial_position, widget_key, user)
-    local was_active = side_screen_active
-    side_screen_active = true
-    local mapped_position = side_widget_positions[widget_key]
-    if initial_position then
-        mapped_position = initial_position
-    elseif not mapped_position and side_widget_count < 3 then
-        mapped_position = side_widget_count + 1
-    end
-    if not mapped_position then
-        return
-    end
-    if not side_widget_positions[widget_key] then
-        side_widget_count = math.max(side_widget_count, mapped_position)
-        side_widget_positions[widget_key] = mapped_position
-        log(string.format(
-            "[FLAccess] side-widget widget=%s position=%d",
-            widget_key,
-            mapped_position))
-    end
-    local repeated = was_active and side_position == mapped_position
-        and a11y.side_last_user == user
-    side_position = mapped_position
-    a11y.side_last_user = user
-    if not repeated then
-        speak_side(user, side_position)
-    end
-end
-
-local function end_side_screen()
-    if side_screen_active then
-        side_widget_positions = {}
-        side_widget_count = 0
-    end
-    side_screen_active = false
-    side_position = nil
-    a11y.side_last_user = nil
 end
 
 local function is_focused(text_id)
@@ -3516,9 +6492,12 @@ end
 
 local function register_control_label(label, widget, role, is_control)
     local label_key = memory.hex(widget)
+    local node = a11y.observe_ui_widget(widget, label)
     local previous_row = control_rows_by_label_widget[label_key]
     if previous_row and previous_row.label == label then
-        previous_row.role = role or previous_row.role
+        if not previous_row.native_slider then
+            previous_row.role = role or previous_row.role
+        end
         previous_row.is_control = is_control or previous_row.is_control
         previous_row.created_frame = frame
         controller_rows[label] = previous_row
@@ -3530,6 +6509,9 @@ local function register_control_label(label, widget, role, is_control)
                 == previous_row then
         control_row_by_value_widget[previous_row.value_widget_key] = nil
     end
+    if previous_row and controller_rows[previous_row.label] == previous_row then
+        controller_rows[previous_row.label] = nil
+    end
     local row = {
         label = label,
         label_widget = widget,
@@ -3539,6 +6521,9 @@ local function register_control_label(label, widget, role, is_control)
         created_frame = frame,
         value_variants = {},
         value_variant_count = 0,
+        identity = node.identity,
+        generation = node.generation,
+        structural = node.role == "control-label",
     }
     control_rows_by_label_widget[label_key] = row
     controller_rows[label] = row
@@ -3549,11 +6534,11 @@ end
 function a11y.valid_control_value(widget, value)
     if not value or value == "" or is_modal_button(value)
             or non_control_labels[value] or is_noninteractive_text(value)
-            or looks_like_message(value) then
+            or looks_like_message(value, widget) then
         return false
     end
     local name = a11y.widget_internal_name(widget)
-    if name == "listName" or name == "teamName"
+    if name == "padIcon" or name == "listName" or name == "teamName"
             or name == "playerName" or name == "groupName"
             or name == "title" or (name and name:match("_item$")) then
         return false
@@ -3562,7 +6547,8 @@ function a11y.valid_control_value(widget, value)
 end
 
 local function attach_control_value(row, widget, value)
-    if not row or widget == row.label_widget
+    if not row or row.native_slider or row.external_value
+            or widget == row.label_widget
             or not a11y.valid_control_value(widget, value) then
         return false
     end
@@ -3573,6 +6559,11 @@ local function attach_control_value(row, widget, value)
     if structural_stem and value_name ~= structural_stem .. "_value" then
         -- A rules page redraws competition names alongside its selectors.
         -- Render order alone must not make a club or another field the value.
+        return false
+    end
+    if (structural_stem or (value_name and value_name:match("_value$")))
+            and a11y.structural_control_row(widget) ~= row then
+        -- Duplicate field names must not pair by table iteration order.
         return false
     end
     local value_key = memory.hex(widget)
@@ -3600,6 +6591,7 @@ local function attach_control_value(row, widget, value)
         row.value_variant_count = row.value_variant_count + 1
     end
     row.is_control = row.is_control
+        or row.structural
         or row.native_slider
         or controller_labels[row.label]
         or (not non_control_labels[row.label]
@@ -3608,17 +6600,251 @@ local function attach_control_value(row, widget, value)
     return true
 end
 
+function a11y.rebind_presented_control(node)
+    if node.role=="control-value" or node.name=="text" or node.name=="jump" or node.name=="textWord" then
+        local row=a11y.structural_control_row(node.address)
+        if row then attach_control_value(row,node.address,node.text) end
+    end
+end
+
+-- A selector's delegated text belongs to its enclosing native choice. This
+-- schema uses setName outside the selector and one current text inside it.
+-- Native ancestry AND selector RTTI must agree; captions/render order do not
+-- establish the relation. Multiple labels/values remain unresolved.
+function a11y.native_field_label(widget)
+    local snapshot=a11y.native_windows
+    local member=snapshot and snapshot.members and snapshot.members[tonumber(widget)]
+    local model=a11y.ui_model
+    local target=model and model.nodes[memory.hex(widget)]
+    if not member or not member.active or not target
+            or (target.name~="text" and target.name~="jump" and target.name~="textWord") then return nil end
+    local base=tonumber(process_base_u64)
+    if not base then return nil end
+    local found
+    for _,owner in ipairs(member.owners or {}) do
+        if owner.enabled and owner.parents then
+            local parents=owner.parents
+            local at,selector,choice=tonumber(widget),nil,nil
+            local direct_jump=target.name=="jump" and parents[at]
+                and a11y.menu_read(parents[at],"u64")==base+0x27cb508
+            if direct_jump then selector=at end
+            local visited={}
+            for _=1,12 do
+                if not at or at==owner.root or visited[at] then break end
+                visited[at]=true
+                local kind=a11y.menu_read(at,"u64")
+                if kind==base+0x27b84d0 or kind==base+0x27be998 or kind==base+0x27bb538
+                        or kind==base+0x27c3a38 then selector=at end
+                if selector and kind==base+0x27cb508 then choice=at;break end
+                at=parents[at]
+            end
+            if selector and choice then
+                local label,value,ambiguous
+                for _,node in pairs(model.nodes) do
+                    if node.text and node.text~="" and a11y.native_presentation_ready(node.address)
+                            and a11y.ui_node_matches_live(node) then
+                        local cursor,inside,seen=tonumber(node.address),false,{}
+                        for _=1,12 do
+                            if not cursor or seen[cursor] then break end
+                            seen[cursor]=true
+                            if cursor==selector then inside=true end
+                            if cursor==choice then
+                                if (inside or (direct_jump and parents[tonumber(node.address)]==choice and node.name=="jump"))
+                                        and (node.name=="text" or node.name=="jump" or node.name=="textWord")
+                                        and a11y.valid_control_value(node.address,node.text) then
+                                    if value and value~=node then ambiguous=true end
+                                    value=node
+                                elseif not inside and (node.name=="setName"
+                                        or (node.name=="text" and parents[tonumber(node.address)]==choice)) then
+                                    if label and label~=node then ambiguous=true end
+                                    label=node
+                                end
+                                break
+                            end
+                            cursor=parents[cursor]
+                        end
+                    end
+                end
+                if not ambiguous and label and value and value.key==target.key then
+                    if found and found.key~=label.key then return nil end
+                    found=label
+                end
+            end
+        end
+    end
+    return found
+end
+
 function a11y.structural_control_row(widget)
     local name = a11y.widget_internal_name(widget)
     local stem = name and name:match("^(.-)_value$")
-    if not stem then return nil end
+    if not stem then
+        local label=a11y.native_field_label(widget)
+        if label then
+            local row=control_rows_by_label_widget[label.key]
+            if not row then row=register_control_label(label.text,label.address,nil,true) end
+            row.is_control=true
+            row.native_field=true
+            return row
+        end
+        return nil
+    end
+    local value_key = memory.hex(widget)
+    local model = a11y.ui_model
+    if model and model.nodes[value_key] then
+        local value_node = model.nodes[value_key]
+        local label_node = a11y.scoped_ui_name(stem .. "_item",widget)
+        if not value_node or not label_node then return nil end
+        local scoped_value=a11y.scoped_ui_name(name,label_node.address)
+        if not scoped_value or scoped_value.key~=value_key then return nil end
+        return control_rows_by_label_widget[label_node.key]
+    end
+    local found
     for _, row in pairs(control_rows_by_label_widget) do
         if a11y.widget_internal_name(row.label_widget)
                 == stem .. "_item" then
-            return row
+            if found then return nil end
+            found = row
         end
     end
-    return nil
+    return found
+end
+
+function a11y.capture_structural_control(widget, text)
+    local node = a11y.observe_ui_widget(widget, text)
+    if node.role == "control-value" then
+        local row = a11y.structural_control_row(widget)
+        if row then attach_control_value(row, widget, text) end
+        return nil
+    end
+    local stem = node.name and node.name:match("^(.-)_item$")
+    if not stem or not text or text == "" or looks_like_message(text, widget)
+            or is_noninteractive_text(text) or is_modal_button(text) then
+        return nil
+    end
+    local row = register_control_label(text, widget,
+        a11y.ui_language == "pt" and "seletor" or "selector", true)
+    local value_node = a11y.scoped_ui_name(stem .. "_value",widget)
+    if value_node and attach_control_value(row, value_node.address, value_node.text) then
+        pending_control_row = nil
+    end
+    return row
+end
+
+function a11y.native_control_help(text)
+    local model,snapshot=a11y.ui_model,a11y.native_windows
+    if not model or not snapshot then return nil end
+    local base=tonumber(process_base_u64)
+    if not base then return nil end
+    for _,node in pairs(model.nodes) do
+        local member=snapshot.members[tonumber(node.address)]
+        if node.text==text and member and member.active
+                and node.name~="question" and node.name~="eventMsg"
+                and not (snapshot.selected_members and snapshot.selected_members[tonumber(node.address)])
+                and a11y.native_presentation_ready(node.address) and a11y.ui_node_matches_live(node) then
+            local help_owner={}
+            for _,entry in ipairs(member.owners or {}) do
+                local at=tonumber(node.address)
+                local visited={}
+                for _=1,8 do
+                    if not at or visited[at] or not entry.enabled then break end
+                    visited[at]=true
+                    -- RTTI-proven NodeRectHelpBox, including its delegated text.
+                    if a11y.menu_read(at,"u64")==base+0x27c17a0 then help_owner[entry.address]=true;break end
+                    at=entry.parents and entry.parents[at]
+                end
+            end
+            for key,row in pairs(control_rows_by_label_widget) do
+                local field=row.native_field and snapshot.members[tonumber(row.label_widget)]
+                if field and field.active then
+                    for _,left in ipairs(member.owners or {}) do
+                        for _,right in ipairs(field.owners or {}) do
+                            if left.enabled and right.enabled and left.address==right.address and help_owner[left.address] then return node end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+function a11y.is_control_help(text)
+    if a11y.native_control_help(text) then return true end
+    -- The lexicon calls ordinary option explanations "instruction" too.
+    -- Classify them as help only in an observed control surface. Tutorials
+    -- and confirmation paragraphs retain their modal path.
+    local role = a11y.text_asset_role(text)
+    if role ~= "tooltip-or-description" and (role ~= "instruction"
+            or not (text:match("^Escolha ") or text:match("^Choose "))) then
+        return false
+    end
+    for key, row in pairs(control_rows_by_label_widget) do
+        if row.is_control and a11y.ui_model.nodes[key] then return true end
+    end
+    return false
+end
+
+function a11y.invalidate_structural_pair(stem)
+    local model = a11y.ui_model
+    for key in pairs(model and model.names[stem .. "_item"] or {}) do
+        local row = control_rows_by_label_widget[key]
+        -- Repeated internal names are normal in separate native components.
+        -- Invalidate only a binding whose own structural proof was lost.
+        if row and row.value_widget
+                and a11y.structural_control_row(row.value_widget) ~= row then
+            if row.value_widget_key and control_row_by_value_widget[row.value_widget_key] == row then
+                control_row_by_value_widget[row.value_widget_key] = nil
+            end
+            row.value, row.value_widget, row.value_widget_key = nil, nil, nil
+        end
+    end
+end
+
+function a11y.begin_ui_surface(title)
+    local model = a11y.ui_model
+    if model and model.surface == title then return false end
+    -- Setters can deliver new fields before their title in the same frame.
+    -- Keep that observation batch, invalidate earlier batches, and never mark
+    -- a captured node as visible merely because its text setter ran.
+    local batch = {}
+    for _, node in pairs(model and model.nodes or {}) do
+        if node.last_seen == frame then
+            batch[#batch + 1] = {address=node.address, text=node.text,
+                row=control_rows_by_label_widget[node.key]}
+        end
+    end
+    a11y.reset_control_tracking_state()
+    a11y.ui_model.surface = title
+    for key, entry in pairs(ui_focus_widgets) do
+        if entry.last_seen < frame then
+            ui_focus_widgets[key] = nil
+            ui_focus_state[key], ui_focus_activated[key] = nil, nil
+            ui_focus_widget_count = ui_focus_widget_count - 1
+        end
+    end
+    a11y.reset_focus_reuse_state()
+    last_selected_ui_entry = nil
+    for _, entry in ipairs(batch) do
+        a11y.observe_ui_widget(entry.address, entry.text)
+    end
+    for _, entry in ipairs(batch) do
+        if entry.row then
+            local row = entry.row
+            local node = a11y.ui_model.nodes[memory.hex(entry.address)]
+            row.identity, row.generation = node.identity, node.generation
+            control_rows_by_label_widget[node.key] = row
+            controller_rows[row.label] = row
+            if row.value_widget_key and a11y.ui_model.nodes[row.value_widget_key] then
+                control_row_by_value_widget[row.value_widget_key] = row
+            elseif not row.native_slider and not row.external_value then
+                row.value, row.value_widget, row.value_widget_key = nil, nil, nil
+            end
+        end
+    end
+    for _, entry in ipairs(batch) do
+        a11y.capture_structural_control(entry.address, entry.text)
+    end
+    return true
 end
 
 local function formatted_slider_value(row, value)
@@ -3757,10 +6983,14 @@ function m.on_slider_set(ctx, event_id, registers)
         end
         local full_value = formatted_slider_value(row.control, value)
         row.control.value = full_value
+        if a11y.read_context_state().kind == "dialog" then return end
         local focused = active_control_row == row.control
             or (row.id and is_focused(row.id))
             or is_widget_focused(row.control.label_widget)
         if focused then
+            a11y.commit_read_selection(control_speech(row.control),
+                row.control.identity or row.control.label_widget_key or key,
+                "control", row.control.label)
             if active_control_row == row.control then
                 -- Preserve the range for the complete focus announcement, but
                 -- lateral changes should say only the newly selected value.
@@ -3874,42 +7104,15 @@ function m.on_game_text_language_nav(ctx, event_id, registers)
 end
 
 function m.on_ui_text_set(ctx, event_id, registers)
-    local widget = read_u64(registers.rcx)
-    local string_object = read_u64(registers.rdx)
-    local text = a11y.read_msvc_string(string_object)
-    if not text or text == "" or widget < 0x10000 then
-        return
-    end
+    local widget=tonumber(read_u64(registers.rcx))
+    local raw=a11y.read_msvc_string(read_u64(registers.rdx),true)
+    if raw~=nil then a11y.on_observed_ui_text(widget,clean_text(raw),raw,registers) end
+end
 
-    local widget_key = memory.hex(widget)
-    a11y.ui_string_object_by_widget[widget_key] = string_object
-    if a11y.diagnostic_mode then
-        local saved_rsp = read_u64(registers.rsp)
-        if saved_rsp and readable(saved_rsp + 64, 8) then
-            local return_address = read_u64(memory.read(saved_rsp + 64, 8))
-            local caller_number = tonumber(return_address)
-            local base_number = tonumber(process_base_u64)
-            if caller_number and base_number and caller_number >= base_number
-                    and caller_number < base_number + 0x40000000 then
-                a11y.ui_text_caller_by_widget[widget_key] =
-                    caller_number - base_number
-            else
-                a11y.ui_text_caller_by_widget[widget_key] = nil
-            end
-        end
-    end
-    local previous = ui_text_by_widget[widget_key]
-    ui_text_by_widget[widget_key] = text
-    if previous ~= text then
-        a11y.announce_skip_hint(text)
-    end
-    if not a11y.cup_group_table_active
-            and a11y.is_cup_group_header(widget, text) then
-        -- Captured headers arrive before the trailing grid OK and before the
-        -- explanatory paragraph. Identify the table while that OK is still
-        -- a background cell, not after it has already reached speech.
-        a11y.activate_cup_group_table(false)
-    end
+-- Existing caption-based adapters remain isolated from native component
+-- discovery. Do not extend these cases to cover new screens; obtain native
+-- owner/selection evidence in the common reader instead.
+function a11y.observe_compatibility_context(widget_key, text)
     local normal_game_plan_marker = text == "Escalação/Editar posição"
         or text == "Team Sheet/Edit Position"
     if normal_game_plan_marker and not a11y.game_plan_active
@@ -4119,19 +7322,7 @@ function m.on_ui_text_set(ctx, event_id, registers)
             a11y.pre_match_last_action = nil
         end
         a11y.pre_match_active = true
-        a11y.game_plan_active = false
-        a11y.game_plan_main_surface = false
-        a11y.game_plan_attribute_panel_until_ms = 0
-        a11y.game_plan_attribute_locked_name = nil
-        a11y.game_plan_context = nil
-        a11y.game_plan_announced_context = nil
-        a11y.game_plan_last_focus_text = nil
-        a11y.game_plan_attribute_due_ms = nil
-        a11y.game_plan_attribute_hold_until_ms = 0
-        a11y.game_plan_last_player_section = nil
-        a11y.game_plan_basic_prompt_active = false
-        a11y.game_plan_active_tactical_label = nil
-        a11y.game_plan_active_tactical_value = nil
+        a11y.leave_game_plan()
         a11y.stadium_active = false
         a11y.cup_group_table_active = false
     elseif text == "Altura da grama" or text == "Grass Length" then
@@ -4141,21 +7332,82 @@ function m.on_ui_text_set(ctx, event_id, registers)
         end
         a11y.stadium_last_marker_frame = frame
         a11y.stadium_active = true
-        a11y.game_plan_active = false
-        a11y.game_plan_main_surface = false
-        a11y.game_plan_attribute_panel_until_ms = 0
-        a11y.game_plan_attribute_locked_name = nil
-        a11y.game_plan_context = nil
-        a11y.game_plan_announced_context = nil
-        a11y.game_plan_last_focus_text = nil
-        a11y.game_plan_attribute_due_ms = nil
-        a11y.game_plan_attribute_hold_until_ms = 0
-        a11y.game_plan_last_player_section = nil
-        a11y.game_plan_basic_prompt_active = false
-        a11y.game_plan_active_tactical_label = nil
-        a11y.game_plan_active_tactical_value = nil
+        a11y.leave_game_plan()
         a11y.pre_match_active = false
     end
+    return tactical_heading, game_plan_player_heading
+end
+
+function a11y.on_observed_ui_text(widget,text,raw,registers,review)
+    if not text or not widget or widget < 0x10000 then
+        return
+    end
+    if text == "" then
+        local empty_key = memory.hex(widget)
+        for index = #(a11y.dashboard_texts or {}), 1, -1 do
+            if a11y.dashboard_texts[index].address == widget then
+                table.remove(a11y.dashboard_texts, index)
+            end
+        end
+        a11y.forget_ui_widget(empty_key)
+        ui_text_by_widget[empty_key] = nil
+        if last_selected_ui_entry and last_selected_ui_entry.address == widget then
+            a11y.reset_focus_reuse_state()
+        end
+        return
+    end
+    if text == "No String" or text == "/" then
+        -- Construction placeholders are neither a surface change nor focus.
+        -- Clearing all ownership here used to erase freshly mapped sliders.
+        a11y.forget_ui_widget(memory.hex(widget))
+        ui_text_by_widget[memory.hex(widget)] = nil
+        return
+    end
+
+    local widget_key = memory.hex(widget)
+    local observed_node = a11y.observe_ui_widget(widget, text)
+    observed_node.raw_text=raw or text
+    if a11y.unresolved_format(text) then return end
+    a11y.poll_native_windows()
+    a11y.record_dashboard_text(observed_node)
+    if review then
+        a11y.capture_structural_control(widget,text)
+        return
+    end
+    -- Input feedback is owned by the actual native input node. A retained
+    -- textWord from the background is not an edit event.
+    if observed_node.name == "padIcon" then return end
+    local structural_prompt = a11y.capture_question_panel(observed_node)
+    if not structural_prompt and a11y.capture_reading_panel(observed_node) then return end
+    if a11y.diagnostic_mode and registers then
+        local saved_rsp = read_u64(registers.rsp)
+        if saved_rsp and readable(saved_rsp + 64, 8) then
+            local return_address = read_u64(memory.read(saved_rsp + 64, 8))
+            local caller_number = tonumber(return_address)
+            local base_number = tonumber(process_base_u64)
+            if caller_number and base_number and caller_number >= base_number
+                    and caller_number < base_number + 0x40000000 then
+                a11y.ui_text_caller_by_widget[widget_key] =
+                    caller_number - base_number
+            else
+                a11y.ui_text_caller_by_widget[widget_key] = nil
+            end
+        end
+    end
+    local previous = ui_text_by_widget[widget_key]
+    ui_text_by_widget[widget_key] = text
+    if previous ~= text then
+        a11y.announce_skip_hint(text, observed_node)
+    end
+    if not a11y.cup_group_table_active
+            and a11y.is_cup_group_header(widget, text) then
+        -- Captured headers arrive before the trailing grid OK and before the
+        -- explanatory paragraph. Identify the table while that OK is still
+        -- a background cell, not after it has already reached speech.
+        a11y.activate_cup_group_table(false)
+    end
+    local tactical_heading, game_plan_player_heading =
+        a11y.observe_compatibility_context(widget_key, text)
     local now_ms = tonumber(ffi.C.GetTickCount64())
     if a11y.game_plan_active
             and (text == "Altura (cm)" or text == "Height (cm)") then
@@ -4191,12 +7443,20 @@ function m.on_ui_text_set(ctx, event_id, registers)
     local tooltip_control_label = control_label_from_tooltip(text)
     -- A pause between text writes is not a new focus. The same Informações
     -- widget can redraw after a pause while the selection never moved.
-    if previous ~= text then
+    if previous ~= text and not a11y.native_presentation_ready(widget) then
+        local title = is_screen_title(text,widget)
+        local role = a11y.text_asset_role(text)
+        if title or ((a11y.is_instruction_message(text) or looks_like_message(text,widget))
+                and not a11y.is_control_help(text)) then
+            a11y.defer_bound_guidance(widget,text)
+        end
+    end
+    if previous ~= text and a11y.native_presentation_ready(widget) then
         announce_screen_title(text, widget_key, widget)
         local tactical_tooltip = a11y.game_plan_active
             and a11y.game_plan_active_tactical_label
             and frame - a11y.game_plan_active_tactical_frame <= 90
-            and looks_like_message(text)
+            and looks_like_message(text, widget)
             and not a11y.is_instruction_message(text)
             and not tactical_heading
         if tactical_tooltip then
@@ -4208,15 +7468,20 @@ function m.on_ui_text_set(ctx, event_id, registers)
                     a11y.game_plan_active_tactical_label
                 controller_tooltip_due_ms = now_ms + 350
             end
-        elseif tooltip_control_label then
+        elseif tooltip_control_label or a11y.is_control_help(text) then
             focused_control_hint = tooltip_control_label
             focused_control_hint_ms = now_ms
+            latest_generic_tooltip = text
+            latest_generic_tooltip_widget = widget
+            latest_generic_tooltip_ms = now_ms
+            a11y.set_read_help(text, tooltip_control_label)
             if a11y.read_tooltips then
                 pending_controller_tooltip = text
                 pending_controller_tooltip_label = tooltip_control_label
+                    or active_controller_label
                 controller_tooltip_due_ms = now_ms + 2000
             end
-        elseif not game_plan_player_heading and not tactical_heading then
+        elseif not game_plan_player_heading and not tactical_heading and not structural_prompt then
             remember_message_text(text, widget_key)
         end
         if not queue_startup_text(text, now_ms)
@@ -4240,23 +7505,24 @@ function m.on_ui_text_set(ctx, event_id, registers)
             queue_recent_message()
         end
     end
-    if text == "No String" or text == "/" then
-        -- These values are emitted while the game constructs a different
-        -- screen. Clear both focus widgets and their semantic ownership: UI
-        -- addresses are aggressively recycled between unrelated menus.
-        reset_navigation_generation()
-    end
     if text == "Sim" or text == "Não" then
         register_dialog_option(text, widget, widget_key)
     end
-    last_ui_text_ms = now_ms
-    if #text >= 2 and #text <= 50
+    local structural_node = a11y.ui_model and a11y.ui_model.nodes[widget_key]
+    if #text >= 2 and (#text <= 50 or (#text <= 160
+            and structural_node and structural_node.role == "control-label")
+            or (a11y.read_context_state().kind == "dialog" and #text <= 512
+                and text ~= a11y.read_context.question
+                and widget_key ~= a11y.read_context.message_key
+                and (a11y.is_structural_answer(text,widget_key) or
+                    (a11y.text_asset_role(text) ~= "dialog" and a11y.text_asset_role(text) ~= "instruction"))))
             and not text:find("%%") and not text:match("^%d+$")
             and text ~= "-" and text:match("[%w]")
             and not is_noninteractive_text(text)
+            and a11y.widget_internal_name(widget) ~= "title"
+            and a11y.widget_internal_name(widget) ~= "text_title"
             and widget_key ~= main_menu_title_widget_key
             and text ~= main_menu_tooltip
-            and not is_selector_label(text)
             and text ~= pending_controller_tooltip then
         local previous_focus = ui_focus_widgets[widget_key]
         if a11y.focus_widget_reused(previous_focus, text) then
@@ -4273,8 +7539,7 @@ function m.on_ui_text_set(ctx, event_id, registers)
                     end
                 end
                 if oldest_key then
-                    ui_focus_widgets[oldest_key] = nil
-                    ui_focus_widget_count = ui_focus_widget_count - 1
+                    a11y.forget_ui_widget(oldest_key)
                 end
             end
             ui_focus_widget_count = ui_focus_widget_count + 1
@@ -4283,6 +7548,7 @@ function m.on_ui_text_set(ctx, event_id, registers)
             address = widget,
             text = text,
             last_seen = frame,
+            identity = a11y.observe_ui_widget(widget, text).identity,
         }
     end
 
@@ -4303,6 +7569,8 @@ function m.on_ui_text_set(ctx, event_id, registers)
         label_row = nil
     end
 
+    -- A field pair needs no localization ID, known caption, or screen name.
+    label_row = a11y.capture_structural_control(widget, text) or label_row
     local value_row
     local structural_row = a11y.structural_control_row(widget)
     if structural_row and attach_control_value(
@@ -4361,11 +7629,75 @@ function m.on_ui_text_set(ctx, event_id, registers)
 
 end
 
+function a11y.empty_selection_caption(text)
+    local value=(text or ""):gsub("%s","")
+    return value=="" or value=="-" or value=="–" or value=="—"
+end
+
+function a11y.observe_native_list_selection(text,identity,widget)
+    if a11y.empty_selection_caption(text) or not widget or widget<0x10000 then return end
+    local previous=a11y.native_list_selection
+    local name,link=a11y.widget_internal_name(widget),a11y.ui_owner_link(widget)
+    if previous and previous.identity==identity and previous.text==text and previous.widget==widget
+            and previous.name==name and previous.link==link then
+        previous.observed=frame
+        return
+    end
+    a11y.native_list_selection={text=text,identity=identity,widget=widget,observed=frame,
+        name=name,link=link}
+end
+
+function a11y.native_list_delivery_allowed(origin)
+    local item=a11y.native_list_selection
+    return item and item.identity==origin.identity and item.text==origin.text
+        and item.widget==origin.widget and a11y.native_owner_token()==origin.owner
+end
+
+function a11y.process_native_list_focus(modal_blocked)
+    local item=a11y.native_list_selection
+    if not item or (not item.committed and frame-(item.observed or -10000)>120) or modal_blocked or a11y.keyboard_window
+            or a11y.read_context_state().kind=="dialog" then return false end
+    local snapshot=a11y.native_windows
+    local member=snapshot and snapshot.members and snapshot.members[item.widget]
+    if not member or not member.active or not a11y.native_presentation_ready(item.widget) then return false end
+    if snapshot.cursor_members and snapshot.cursor_members[item.widget]
+            and not snapshot.selected_members[item.widget] then return false end
+    if (item.name and a11y.widget_internal_name(item.widget)~=item.name)
+            or (item.link and a11y.ui_owner_link(item.widget)~=item.link) then
+        a11y.native_list_selection=nil;return false
+    end
+    -- Callbacks capture data before setters finish. Verify the actual rendered
+    -- caption in the frame, then let this native component own its selection.
+    local text=a11y.read_native_rendered_text(item.widget)
+    if text~=item.text then
+        if frame-item.observed>120 then a11y.native_list_selection=nil;return false end
+        return true -- wait; a cached old caption cannot take over
+    end
+    local owner=a11y.native_owner_token()
+    if not owner then return false end
+    local identity=owner .. ":" .. item.identity .. ":" .. text
+    if tonumber(ffi.C.GetTickCount64())<(a11y.screen_title_hold_until_ms or 0) then return true end
+    local node=a11y.ui_model and a11y.ui_model.nodes[memory.hex(item.widget)]
+    if not node or node.text~=text then a11y.on_observed_ui_text(item.widget,text,text,nil,true) end
+    local before=a11y.native_speech_last
+    a11y.deliver_selection_result(a11y.selection_result({text=text,widget=item.widget,
+        identity=identity,source="native-list"}),{interrupt=true})
+    if a11y.native_speech_last>before then
+        item.committed=identity
+        for index=before+1,a11y.native_speech_last do
+            a11y.native_speech_queue[index].native_list={identity=item.identity,text=text,widget=item.widget,owner=owner}
+        end
+        log(string.format("[FLAccess] native-list-commit text=%q widget=%s",text,memory.hex(item.widget)))
+    end
+    return true
+end
+
 -- The league/team carousel renders nine records around its selection. At this
 -- call site r13 is the visible-cell index (0..8) and r15 is the corresponding
 -- data record. Cell 4 is the real selected record, independent of scroll
 -- direction and of the widget addresses recycled by the UI.
 function m.on_list_item_render(ctx, event_id, registers)
+    if a11y.read_context_state().kind == "dialog" then return end
     local visible_index = tonumber(read_u64(registers.r13))
     if visible_index ~= 4 then
         return
@@ -4403,17 +7735,8 @@ function m.on_list_item_render(ctx, event_id, registers)
         return
     end
 
-    if text ~= last_native_list_text then
-        last_native_list_text = text
-        last_native_list_frame = frame
-        log(string.format(
-            "[FLAccess] native-list-focus text=%q record=%s",
-            text,
-            memory.hex(record)))
-        local preserve_title = tonumber(ffi.C.GetTickCount64()) <
-            a11y.screen_title_hold_until_ms
-        speak(ui_focus_speech(text), not preserve_title)
-    end
+    -- r12 is the exact text node assigned immediately before c97408.
+    a11y.observe_native_list_selection(text,"list:" .. memory.hex(record),tonumber(read_u64(registers.r12)))
 end
 
 -- Club selection uses a separate nine-cell renderer. r14 is its visible-cell
@@ -4421,6 +7744,7 @@ end
 -- alternate/modded club-name branches build the displayed MSVC string in the
 -- same stack slot immediately before assigning it to the UI widget.
 function m.on_team_item_text(ctx, event_id, registers)
+    if a11y.read_context_state().kind == "dialog" then return end
     local visible_index = tonumber(read_u64(registers.r14))
     if visible_index ~= 4 then
         return
@@ -4438,16 +7762,8 @@ function m.on_team_item_text(ctx, event_id, registers)
         return
     end
 
-    if text ~= last_native_list_text then
-        last_native_list_text = text
-        last_native_list_frame = frame
-        log(string.format(
-            "[FLAccess] native-team-focus text=%q",
-            text))
-        local preserve_title = tonumber(ffi.C.GetTickCount64()) <
-            a11y.screen_title_hold_until_ms
-        speak(ui_focus_speech(text), not preserve_title)
-    end
+    -- Both string branches pass this rdi node to e48bf0 after the hook.
+    a11y.observe_native_list_selection(text,"team:" .. text,tonumber(read_u64(registers.rdi)))
 end
 
 function m.on_player_record_copy(ctx, event_id, registers)
@@ -4481,12 +7797,10 @@ function m.on_resolved_text(ctx, event_id, registers)
     local caller_rva = tonumber(return_address - process_base_u64)
     local text_id = tonumber(ffi.cast("uint32_t", read_u64(registers.rdi)))
     local resolved_text = clean_text(text)
+    if resolved_text == "No String" or resolved_text == "/" then return end
     a11y.detect_ui_language(resolved_text)
-    a11y.announce_skip_hint(resolved_text)
-    -- Some presentation pages resolve their paragraph without passing it
-    -- through the ordinary UI-widget text setter. The lexicon role is more
-    -- reliable than a screen-specific phrase or a minimum character count.
-    a11y.capture_resolved_dialog(resolved_text, text_id, caller_rva)
+    -- Localization resolves words for hidden and future screens as well.
+    -- Resolution alone must not open a dialog or announce a skip command.
     if caller_rva == 0xb22537 and resolved_text ~= "" then
         language_options[resolved_text] = true
     end
@@ -4514,7 +7828,6 @@ function m.on_resolved_text(ctx, event_id, registers)
         local label = resolved_text
         local row = controller_rows[label] or {}
         controller_rows[label] = row
-        pending_controller_label = label
     end
     local controller_label = controller_tooltip_labels[text_id]
     if text_id == 13238441 then
@@ -4543,6 +7856,7 @@ function m.on_resolved_text(ctx, event_id, registers)
         local spoken = clean_text(text)
         if widget >= 0x10000 and spoken ~= "" then
             local widget_key = memory.hex(widget)
+            a11y.observe_ui_widget(widget,spoken)
             local previous_widget_text = standard_text_by_widget[widget_key]
             standard_text_by_widget[widget_key] = spoken
             local now_ms = tonumber(ffi.C.GetTickCount64())
@@ -4553,7 +7867,8 @@ function m.on_resolved_text(ctx, event_id, registers)
                 and #spoken >= 35
                 and not a11y.is_instruction_message(spoken)
                 and not is_noninteractive_text(spoken)
-            local is_active_tooltip = is_game_plan_tactical_tooltip
+            local is_active_tooltip = a11y.is_control_help(spoken)
+                or is_game_plan_tactical_tooltip
                 or (not a11y.is_instruction_message(spoken)
                     and active_control_row
                     and active_control_row.label_widget
@@ -4562,7 +7877,11 @@ function m.on_resolved_text(ctx, event_id, registers)
                     and #spoken >= 35
                     and not is_noninteractive_text(spoken))
             if previous_widget_text ~= spoken then
-                announce_screen_title(spoken, widget_key)
+                -- This localization call has a verified widget argument.
+                -- Defer bound messages written before their window activates,
+                -- just as the direct UI setter does.
+                a11y.defer_bound_guidance(widget,spoken)
+                announce_screen_title(spoken, widget_key, widget)
                 -- Help for the focused control is a tooltip, not a modal
                 -- message. Keep it out of the message queue so disabling
                 -- tooltip reading suppresses every route to speech.
@@ -4592,18 +7911,20 @@ function m.on_resolved_text(ctx, event_id, registers)
                 pending_controller_tooltip_label =
                     is_game_plan_tactical_tooltip
                         and a11y.game_plan_active_tactical_label
-                        or active_control_row.label
+                        or (active_control_row and active_control_row.label)
+                a11y.set_read_help(spoken, pending_controller_tooltip_label)
                 active_controller_label = pending_controller_tooltip_label
                 controller_tooltip_due_ms =
                     now_ms + (is_game_plan_tactical_tooltip and 350 or 2000)
             end
             if #spoken <= 60 and not audio_ids[text_id]
+                    and not (a11y.widget_internal_name(widget) or ""):match("_value$")
                     and not non_control_labels[spoken]
                     and (controller_labels[spoken]
                         or not spoken:match("[%.%!%?]$"))
                     and not is_noninteractive_text(spoken)
                     and not is_splash_text(spoken)
-                    and not looks_like_message(spoken)
+                    and not looks_like_message(spoken, widget)
                     and not is_active_tooltip then
                 local candidate_row = register_control_label(
                     spoken,
@@ -4611,7 +7932,6 @@ function m.on_resolved_text(ctx, event_id, registers)
                     selector_role(spoken),
                     controller_labels[spoken] or false)
                 bind_delayed_speed_slider(candidate_row)
-                pending_controller_label = candidate_row.label
             end
             if featured_initial_ids[text_id] then
                 main_menu_title_widget_key = widget_key
@@ -4623,21 +7943,22 @@ function m.on_resolved_text(ctx, event_id, registers)
                 local is_initial_featured = featured_initial_ids[text_id]
                     and previous_widget_text == nil
                 reset_navigation_generation()
+                a11y.observe_ui_widget(widget,spoken)
                 startup_complete = true
                 startup_completed_frame = frame
                 main_menu_focus_guard_until = frame + 4
                 current_main_menu_title = spoken
+                a11y.set_read_title(spoken)
                 -- Speak now for navigation and retain a short fallback for the
                 -- first main-menu frame, which can arrive just before Windows
                 -- reports the game as foreground. Duplicate suppression keeps
                 -- this from speaking twice during ordinary navigation.
-                local title_needs_retry = not is_initial_featured
-                    and not a11y.game_is_foreground()
+                local title_needs_retry = not a11y.game_is_foreground()
                 dynamic_text_candidate = title_needs_retry
                     and spoken .. ", item" or nil
-                dynamic_text_due_ms = is_initial_featured
-                    and nil or (title_needs_retry
-                        and tonumber(ffi.C.GetTickCount64()) + 250 or nil)
+                a11y.dynamic_text_origin=title_needs_retry and a11y.capture_speech_origin(widget) or nil
+                dynamic_text_due_ms = title_needs_retry
+                    and tonumber(ffi.C.GetTickCount64()) + 250 or nil
                 main_menu_tooltip = nil
                 main_menu_tooltip_due_ms = nil
                 log(string.format(
@@ -4645,9 +7966,7 @@ function m.on_resolved_text(ctx, event_id, registers)
                     widget_key,
                     previous_widget_text or "",
                     spoken))
-                if not is_initial_featured and not title_needs_retry then
-                    speak(spoken .. ", item")
-                end
+                if not title_needs_retry then a11y.present_bound_heading(widget,spoken) end
             elseif main_menu_title_widget_key
                     and text_id >= 13107000 and text_id <= 13108000 then
                 if a11y.read_tooltips then
@@ -4704,6 +8023,7 @@ end
 local function scan_dialog_focus()
     local yes = dialog_options["Sim"]
     local no = dialog_options["Não"]
+    if not a11y.dialog_option_allowed(yes) or not a11y.dialog_option_allowed(no) then return nil,nil end
     if not yes or not no or yes.key == no.key
             or math.abs(yes.last_seen - no.last_seen) > 3
             or frame - math.max(yes.last_seen, no.last_seen) > 900 then
@@ -4740,10 +8060,17 @@ local function scan_dialog_focus()
     return nil, nil
 end
 
+function a11y.dialog_option_allowed(option)
+    return option and (not option.native_owner or option.native_owner==""
+        or option.native_owner==a11y.native_owner_token())
+        and a11y.native_presentation_ready(option.address)
+end
+
 local function dialog_is_active()
     local yes = dialog_options["Sim"]
     local no = dialog_options["Não"]
     return yes and no and yes.key ~= no.key
+        and a11y.dialog_option_allowed(yes) and a11y.dialog_option_allowed(no)
         and math.abs(yes.last_seen - no.last_seen) <= 3
         and frame - math.max(yes.last_seen, no.last_seen) <= 900
 end
@@ -4802,6 +8129,8 @@ local function process_dialog_focus(modal_focus_blocked, queue_after_message)
             dialog_selected))
         local should_queue = queue_after_message
             and not a11y.dialog_button_queued_for_message
+        a11y.commit_read_selection(dialog_selected .. ", botão selecionado",
+            candidate, "dialog-answer")
         speak(dialog_selected .. ", botão selecionado", not should_queue)
         if should_queue then
             a11y.dialog_button_queued_for_message = true
@@ -4810,6 +8139,11 @@ local function process_dialog_focus(modal_focus_blocked, queue_after_message)
 end
 
 local function process_delayed_speech(now_ms, modal_focus_blocked)
+    if a11y.read_context_state().kind == "dialog" then
+        a11y.clear_pending_tooltips()
+        dynamic_text_candidate, dynamic_text_due_ms = nil, nil
+        return
+    end
     if a11y.read_tooltips and not modal_focus_blocked and controller_tooltip_due_ms
             and now_ms >= controller_tooltip_due_ms then
         local tooltip_key = (pending_controller_tooltip_label or "") .. "\0" ..
@@ -4825,9 +8159,11 @@ local function process_delayed_speech(now_ms, modal_focus_blocked)
     end
     if not modal_focus_blocked and dynamic_text_due_ms
             and now_ms >= dynamic_text_due_ms then
-        if dynamic_text_candidate and dynamic_text_candidate ~= "" then
-            speak(dynamic_text_candidate, false)
+        if dynamic_text_candidate and dynamic_text_candidate ~= ""
+                and (not a11y.dynamic_text_origin or a11y.speech_origin_allowed(a11y.dynamic_text_origin)) then
+            speak(dynamic_text_candidate, false,nil,nil,a11y.dynamic_text_origin and a11y.dynamic_text_origin.address)
         end
+        a11y.dynamic_text_origin=nil
         dynamic_text_candidate = nil
         dynamic_text_due_ms = nil
     end
@@ -5155,7 +8491,12 @@ function a11y.observe_diagnostic_focus(candidate_key, selected_key, selected_ent
 end
 
 local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
+    if a11y.keyboard_window then return false end
+    if a11y.native_windows_enabled and not a11y.native_presentation_ready() then return false end
+    if a11y.process_engine_focus(modal_focus_blocked) then return true end
     if ui_focus_widget_count <= 0 then
+        a11y.reset_focus_reuse_state()
+        last_selected_ui_entry = nil
         return false
     end
     if frame < main_menu_focus_guard_until then
@@ -5164,16 +8505,18 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
     local counts = {}
     local selected = {}
     local selected_seen = {}
+    local primary_candidates = {}
     for index = 1, #ui_focus_offsets do
         counts[index] = 0
         selected_seen[index] = -1
     end
+    local command_owners = a11y.command_icon_owners()
     local game_plan_menu_bank_active = false
     local game_plan_menu_best_key
     local game_plan_menu_best_index
     local game_plan_menu_best_activation = -1
     for widget_key, entry in pairs(ui_focus_widgets) do
-        if not is_noninteractive_text(entry.text)
+        if a11y.native_widget_allowed(entry.address) and not is_noninteractive_text(entry.text)
                 and not (entry.text == "OK" and a11y.game_plan_active
                     and (a11y.game_plan_context ==
                             "Configurações táticas básicas"
@@ -5189,11 +8532,29 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
                 local relative = offset - 0xf0
                 local value = memory.unpack(
                     "u32", bytes:sub(relative + 1, relative + 4))
+                local native = a11y.native_windows
+                if index == 1 and native and native.cursor_members
+                        and native.cursor_members[tonumber(entry.address)] then
+                    value = native.selected_members[tonumber(entry.address)] and 1 or 0
+                end
                 if value == 1 and state[index] ~= 1 then
                     activated[index] = frame
                 end
                 state[index] = value
-                if value == 1 then
+                local primary_flag = memory.unpack("u32", bytes:sub(0x15, 0x18)) == 1
+                if native and native.cursor_members and native.cursor_members[tonumber(entry.address)] then
+                    primary_flag = native.selected_members[tonumber(entry.address)] or false
+                end
+                if value == 1 and not a11y.is_command_legend(widget_key, primary_flag, command_owners) then
+                    if index == 1 then
+                        if a11y.ui_model then
+                            a11y.ui_model.last_primary_edge = math.max(a11y.ui_model.last_primary_edge or -1,
+                                activated[index] or -1)
+                        end
+                        primary_candidates[#primary_candidates + 1] = {
+                            key=widget_key, edge=activated[index] or -1,
+                        }
+                    end
                     if a11y.game_plan_main_surface
                             and a11y.game_plan_menu_items[entry.text]
                             and (activated[index] or -1)
@@ -5233,6 +8594,7 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
     -- Prefer the freshest 0x100 row only while both banks belong to the same
     -- update cycle. Never lock a widget: recycled addresses caused stale
     -- leagues, players and pre-match items to leak into later screens.
+    if not dialog_active and a11y.process_read_dialog_focus(primary_candidates) then return true end
     local dense_virtual_list = counts[1] >= 3 and counts[5] >= 3
     local game_plan_roster_offset_index = 10 -- 0xfc
     local primary_entry = selected[1] and ui_focus_widgets[selected[1]] or nil
@@ -5397,10 +8759,56 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
         end
     end
     if selected_offset_index then
+        local selection_reason = "legacy-adapter"
+        if selected_offset_index == 1 and not a11y.game_plan_active
+                and not a11y.pre_match_active and not a11y.cup_group_table_active
+                and not modal_focus_blocked and not dialog_active then
+            local resolved, reason = a11y.resolve_primary_focus(primary_candidates)
+            selection_reason = reason
+            if not resolved then
+                if a11y.diagnostic_mode
+                        and frame - a11y.diagnostic_last_snapshot_frame >= 60 then
+                    a11y.safe_record_focus("unresolved-structural",
+                        selected[1], ui_focus_widgets[selected[1]],
+                        0x104, counts, selected, selected_seen, dense_virtual_list)
+                end
+                last_selected_ui_entry = nil
+                a11y.reset_focus_reuse_state()
+                return false
+            end
+            selected[1] = resolved.key
+        end
+        if a11y.ui_model then a11y.ui_model.focus_reason = selection_reason end
         selected_key = selected[selected_offset_index]
         selected_offset = ui_focus_offsets[selected_offset_index]
     end
     local selected_entry = selected_key and ui_focus_widgets[selected_key] or nil
+    if selected_entry and selected_offset ~= 0x104
+            and not a11y.game_plan_active and not a11y.pre_match_active
+            and not a11y.stadium_active and not a11y.cup_group_table_active
+            and not is_modal_button(selected_entry.text)
+            and not (control_rows_by_label_widget[selected_key]
+                and control_rows_by_label_widget[selected_key].is_control)
+            and not (control_row_by_value_widget[selected_key]
+                and control_row_by_value_widget[selected_key].is_control) then
+        -- Other state banks also belong to noninteractive overlays (the
+        -- captured music artist was at 0x114/0x100). Only mapped controls or
+        -- a verified adapter can grant those banks focus authority.
+        a11y.reset_focus_reuse_state()
+        last_selected_ui_entry = nil
+        return false
+    end
+    if selected_entry and selected_offset ~= 0x104
+            and not a11y.game_plan_active and not a11y.pre_match_active
+            and not a11y.stadium_active and not a11y.cup_group_table_active
+            and not dialog_active and not modal_focus_blocked
+            and not a11y.secondary_focus_is_current(selected_key, selected_offset_index) then
+        if a11y.ui_model then a11y.ui_model.focus_reason = "stale-secondary-focus" end
+        a11y.reset_focus_reuse_state()
+        last_selected_ui_entry = nil
+        return false
+    end
+    a11y.track_control_focus(selected_key)
     last_selected_ui_entry = selected_entry
     local preserved_pre_match_row = selected_key
         and control_rows_by_label_widget[selected_key] or nil
@@ -5437,14 +8845,10 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
         and preserved_pre_match_row.label
         or inferred_pre_match_text
         or (selected_entry and selected_entry.text or nil)
-    if a11y.transition_old_focus_texts then
-        if now_ms >= a11y.transition_guard_until_ms
-                or (selected_focus_text and not
-                    a11y.transition_old_focus_texts[selected_focus_text]) then
-            a11y.transition_old_focus_texts = nil
-        else
-            return false
-        end
+    local primary_edge = selected_key and ui_focus_activated[selected_key]
+        and ui_focus_activated[selected_key][1] or -1
+    if a11y.transition_focus_blocked(selected_key, selected_entry, selected_offset, primary_edge, now_ms) then
+        return false
     end
     local selected_formation_inside = selected_focus_text
         and selected_focus_text:match("%((.-)%)") or nil
@@ -5495,19 +8899,17 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
         -- created later. Give that text hook time to claim speech priority.
         return false
     end
-    local candidate_key = selected_entry and (
-        (dense_virtual_list and "virtual-list:" or selected_key .. ":") ..
-        selected_focus_text) or nil
+    local candidate_key = selected_entry and
+        a11y.ui_focus_identity(selected_key, selected_focus_text) or nil
+    if not candidate_key and not modal_focus_blocked and not dialog_active then
+        if a11y.ui_model then a11y.ui_model.focus_reason = "no-selection" end
+        a11y.reset_focus_reuse_state()
+    end
     if pending_message_text ~= nil then
         -- The game's focus widget may be ready before its dialog text hook.
         -- Let the paragraph enter Prism first, then queue its button.
-        if selected_focus_text and is_modal_button(selected_focus_text)
-                and selected_focus_text ~= "Sim"
-                and selected_focus_text ~= "Não" then
-            a11y.pending_modal_button_text = selected_focus_text
-        else
-            a11y.pending_modal_button_text = nil
-        end
+        a11y.capture_pending_modal_button(selected_key, selected_entry, selected_offset,
+            selected_key and ui_focus_activated[selected_key] and ui_focus_activated[selected_key][1])
         ui_focus_candidate_key = candidate_key
         ui_focus_candidate_since = frame
         return selected_entry ~= nil
@@ -5521,6 +8923,9 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
             modal_focus_blocked,
             selected_entry,
             selected_activity)
+    -- Let fresh destination focus expire a closed dialog, but leave an
+    -- active dialog exclusively to its own reader (including Sim/Não).
+    if dialog_active then return selected_entry ~= nil end
     local fast_known_focus = selected_key
         and (control_rows_by_label_widget[selected_key]
             or control_row_by_value_widget[selected_key]
@@ -5580,11 +8985,12 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
         last_ui_focus_announcement = candidate_key
         ui_focus_candidate_key = candidate_key
         ui_focus_candidate_since = frame
+        a11y.commit_read_selection(ui_focus_speech(selected_focus_text), candidate_key, "adapter-focus")
         if a11y.pre_match_notice_text then
             speak(a11y.pre_match_notice_text)
-            speak(ui_focus_speech(selected_focus_text), false)
+            a11y.offer_adapter_selection(ui_focus_speech(selected_focus_text),candidate_key,selected_entry.address,false)
         else
-            speak(ui_focus_speech(selected_focus_text))
+            a11y.offer_adapter_selection(ui_focus_speech(selected_focus_text),candidate_key,selected_entry.address)
         end
         return true
     end
@@ -5599,7 +9005,8 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
             last_ui_focus_announcement = candidate_key
             ui_focus_candidate_key = candidate_key
             ui_focus_candidate_since = frame
-            speak(ui_focus_speech(selected_focus_text), false)
+            a11y.commit_read_selection(ui_focus_speech(selected_focus_text), candidate_key, "adapter-focus")
+            a11y.offer_adapter_selection(ui_focus_speech(selected_focus_text),candidate_key,selected_entry.address,false)
             return true
         else
             ui_focus_candidate_key = candidate_key
@@ -5636,7 +9043,10 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
             ui_focus_preferred_offset_index = selected_offset_index
             local announcement = a11y.game_plan_focus_speech(
                 selected_focus_text, selected_key)
-            if announcement then speak(announcement) end
+            if announcement then
+                a11y.commit_read_selection(announcement, candidate_key, "adapter-focus")
+                a11y.offer_adapter_selection(announcement,candidate_key,selected_entry.address)
+            end
         elseif pre_match_action and startup_focus_allowed
                 and (not dialog_active or selected_is_modal_button)
                 and candidate_key ~= last_ui_focus_announcement then
@@ -5646,7 +9056,8 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
             last_ui_focus_announcement = candidate_key
             ui_focus_preferred_offset_index = selected_offset_index
             a11y.pre_match_last_action = selected_focus_text
-            speak(ui_focus_speech(selected_focus_text))
+            a11y.commit_read_selection(ui_focus_speech(selected_focus_text), candidate_key, "adapter-focus")
+            a11y.offer_adapter_selection(ui_focus_speech(selected_focus_text),candidate_key,selected_entry.address)
         end
     elseif candidate_key
             and frame - ui_focus_candidate_since >= focus_debounce_frames
@@ -5666,11 +9077,15 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
             main_menu_tooltip_due_ms = nil
         end
         log(string.format(
-            "[FLAccess] ui-focus offset=0x%x widget=%s text=%q",
+            "[FLAccess] ui-focus offset=0x%x widget=%s text=%q reason=%s identity=%s",
             selected_offset,
             selected_key,
-            selected_entry.text))
+            selected_entry.text,
+            a11y.ui_model and a11y.ui_model.focus_reason or "legacy-adapter",
+            candidate_key))
         ui_focus_preferred_offset_index = selected_offset_index
+        a11y.commit_read_selection(ui_focus_speech(selected_focus_text), candidate_key,
+            selected_offset == 0x104 and "primary-focus" or "adapter-focus")
         local selected_control = control_rows_by_label_widget[selected_key]
             or (controller_labels[selected_entry.text]
                 and controller_rows[selected_entry.text])
@@ -5728,7 +9143,7 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
                 selected_focus_text,
                 selected_key)
             if announcement then
-                speak(announcement)
+                a11y.offer_adapter_selection(announcement,candidate_key,selected_entry.address)
             end
             handled_control = true
         elseif a11y.game_plan_formation_active then
@@ -5744,7 +9159,7 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
                 selected_focus_text,
                 selected_key)
             if announcement then
-                speak(announcement)
+                a11y.offer_adapter_selection(announcement,candidate_key,selected_entry.address)
             end
             handled_control = true
         elseif stadium_control then
@@ -5807,19 +9222,6 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
             end
         end
         if not handled_control then
-            if side_user(selected_entry.text) then
-                local user = selected_entry.text
-                -- The visible side labels retain stale state bits. The three
-                -- focused Usuário widgets, discovered in order, are reliable.
-                begin_side_screen(nil, selected_key, user)
-            elseif side_screen_active
-                    and (selected_entry.text == "Modificar ajustes pessoais"
-                        or selected_entry.text == "Informações") then
-                log(string.format(
-                    "[FLAccess] side-auxiliary-suppressed text=%q",
-                    selected_entry.text))
-            else
-                end_side_screen()
                 if pre_match_action then
                     a11y.pre_match_last_action = selected_focus_text
                 end
@@ -5829,55 +9231,13 @@ local function scan_current_ui_focus(modal_focus_blocked, dialog_active)
                         selected_focus_text,
                         selected_key)
                 if announcement then
-                    speak(announcement)
+                    a11y.commit_read_selection(announcement, candidate_key, "adapter-focus")
+                    a11y.offer_adapter_selection(announcement,candidate_key,selected_entry.address)
                 end
-                -- Navigation while a dialog is speaking is deferred by
-                -- speak(); it must not shorten the paragraph's reading time.
-            end
+                -- Modal scheduling belongs to the common speech boundary.
         end
     end
     return selected_entry ~= nil
-end
-
-local function scan_legacy_widget_focus(modal_focus_blocked, dialog_active)
-    if modal_focus_blocked or dialog_active or not startup_complete
-            or frame - startup_completed_frame < 12 or frame % 3 ~= 0 then
-        return
-    end
-    local focused_id
-    local focused_seen = -1
-    for text_id, entry in pairs(widgets) do
-        if is_focused(text_id) and (entry.last_seen or 0) > focused_seen then
-            focused_id = text_id
-            focused_seen = entry.last_seen or 0
-        end
-    end
-    if focused_id ~= focus_candidate_id then
-        focus_candidate_id = focused_id
-        focus_candidate_since = frame
-    elseif focused_id and frame - focus_candidate_since >= 12 then
-        local entry = widgets[focused_id]
-        local focus_key = entry and
-            (tostring(focused_id) .. ":" .. memory.hex(entry.address)) or nil
-        if focus_key and focus_key ~= last_announced_focus_key then
-            last_announced_focus_key = focus_key
-            last_focused_id = focused_id
-            local control = entry and control_rows_by_label_widget[
-                memory.hex(entry.address)] or nil
-            if control and control.label == entry.text and control.is_control then
-                active_controller_label = control.label
-                announce_control(control)
-            elseif entry and not controller_labels[entry.text]
-                    and memory.hex(entry.address) ~= main_menu_title_widget_key then
-                active_controller_label = nil
-                active_control_row = nil
-                pending_controller_tooltip = nil
-                pending_controller_tooltip_label = nil
-                controller_tooltip_due_ms = nil
-                speak(spoken_row(focused_id))
-            end
-        end
-    end
 end
 
 function m.display_frame(ctx)
@@ -5891,11 +9251,16 @@ function m.display_frame(ctx)
     if not game_is_foreground() then
         game_was_foreground = false
         a11y.nvda_stop_requested = false
-        a11y.native_speech_queue = {}
-        a11y.native_speech_first = 1
-        a11y.native_speech_last = 0
+        a11y.clear_speech_queue()
         return
     end
+    a11y.poll_native_windows()
+    a11y.poll_native_texts()
+    a11y.poll_keyboard_input()
+    a11y.poll_presented_texts()
+    a11y.poll_surface_texts()
+    a11y.poll_skip_hint()
+    a11y.poll_component_capture()
     if prism_started then
         a11y.stop_nvda_if_requested()
         a11y.flush_native_speech(tonumber(ffi.C.GetTickCount64()))
@@ -5905,8 +9270,6 @@ function m.display_frame(ctx)
         foreground_resume_frame = frame + 4
         ui_focus_candidate_key = nil
         last_ui_focus_announcement = nil
-        focus_candidate_id = nil
-        last_announced_focus_key = nil
         return
     end
     if frame < foreground_resume_frame then
@@ -5917,6 +9280,7 @@ function m.display_frame(ctx)
     end
     local now_ms = tonumber(ffi.C.GetTickCount64())
     a11y.poll_attribute_input(now_ms)
+    a11y.poll_focus_trace()
     a11y.record_game_plan_menu_probe()
     if a11y.game_plan_lineup_due_ms
             and now_ms >= a11y.game_plan_lineup_due_ms then
@@ -5928,11 +9292,20 @@ function m.display_frame(ctx)
         end
     end
     local startup_busy = process_startup_speech(now_ms)
+    if pending_message_text and not a11y.native_key_allowed(a11y.pending_message_widget_key) then
+        pending_message_text, pending_message_key, pending_message_due_ms = nil, nil, nil
+        a11y.pending_message_widget_key = nil
+    end
     if not startup_busy and pending_message_due_ms
             and now_ms >= pending_message_due_ms then
         if pending_message_text and pending_message_text ~= ""
                 and pending_message_key ~= last_announced_message_key then
-            speak(pending_message_text, nil, true)
+            local context = a11y.read_context_state()
+            local spoken_prompt = context.structural_question and context.question == pending_message_text
+                and ((a11y.ui_language == "pt" and "Pergunta: " or "Question: ") .. pending_message_text)
+                or pending_message_text
+            local prompt_node=a11y.ui_model and a11y.ui_model.nodes[a11y.pending_message_widget_key]
+            speak(spoken_prompt, nil, true, nil, prompt_node and prompt_node.address)
             a11y.dialog_button_queued_for_message = false
             modal_message_spoken_frame = frame
             last_announced_message_key = pending_message_key
@@ -5955,9 +9328,7 @@ function m.display_frame(ctx)
                                 == a11y.pending_modal_button_text then
                     a11y.deferred_modal_announcement = nil
                 end
-                local button = a11y.pending_modal_button_text == "OK"
-                    and (a11y.ui_language == "pt" and "Avançar" or "Next")
-                    or a11y.pending_modal_button_text
+                local button = a11y.pending_modal_button_text
                 speak(button ..
                     ", botão selecionado", false, true)
                 a11y.dialog_button_queued_for_message = true
@@ -6045,9 +9416,7 @@ function m.display_frame(ctx)
     -- cancel an obsolete tooltip before it reaches the screen reader.
     process_delayed_speech(now_ms, modal_focus_blocked)
     if not modal_focus_blocked and a11y.deferred_modal_announcement then
-        local announcement = a11y.deferred_modal_announcement
-        a11y.deferred_modal_announcement = nil
-        speak(announcement, false)
+        a11y.drain_deferred_speech()
     end
     -- Hooks and focus scanning enqueue only. Flush again after processing so
     -- confirmed navigation reaches Prism in this render frame rather than the
@@ -6071,7 +9440,7 @@ function a11y.overlay_text()
         diagnostic = "---> " .. diagnostic .. " <---"
     end
     return table.concat({
-        string.format(s.title, VERSION),
+        string.format(s.title, a11y.runtime_version),
         s.menu_reading,
         s.speech_output,
         tooltip,
@@ -6116,7 +9485,7 @@ function m.show(ctx)
     local s = a11y.strings()
     speak(string.format(
         s.opened,
-        VERSION,
+        a11y.runtime_version,
         a11y.selected_option_text()))
 end
 
@@ -6126,23 +9495,22 @@ function m.hide(ctx)
 end
 
 function m.global_key_down(ctx, vkey)
-    if vkey == 0x49 then -- I: previous attribute
-        a11y.read_game_plan_attribute(-1)
-    elseif vkey == 0x4b then -- K: next attribute
-        a11y.read_game_plan_attribute(1)
-    end
+    if a11y.buffer_key(vkey) then return end
+
 end
 
 function m.global_gamepad_input(ctx, inputs)
     local vertical = inputs and inputs.RSy
     if vertical == 1 then
-        a11y.read_game_plan_attribute(-1)
+        a11y.review_right_stick(-1)
     elseif vertical == -1 then
-        a11y.read_game_plan_attribute(1)
+        a11y.review_right_stick(1)
     end
 end
 
 function m.key_down(ctx, vkey)
+    if a11y.keyboard_window then return end
+    if a11y.buffer_key(vkey) then return end
     local s = a11y.strings()
     if vkey == 0x20 then
         overlay_visible = false
@@ -6171,8 +9539,7 @@ function m.key_down(ctx, vkey)
     end
 
     if a11y.selected_option == 2 then
-        local enabled = vkey == a11y.restore_key
-            and false or not a11y.diagnostic_mode
+        local enabled = vkey ~= a11y.restore_key and not a11y.diagnostic_mode
         if not a11y.set_diagnostic(enabled, "Sider panel") then
             speak(s.diagnostic_failed)
             return
@@ -6327,6 +9694,7 @@ function m.on_sider_overlay_content(ctx, module_name, text, visible)
 end
 
 function a11y.reset_widget_tracking_state()
+    a11y.reset_ui_model()
     widgets = {}
     widget_count = 0
     slider_rows = {}
@@ -6337,7 +9705,6 @@ function a11y.reset_widget_tracking_state()
     ui_focus_widget_count = 0
     ui_focus_state = {}
     ui_focus_activated = {}
-    last_ui_text_ms = 0
     ui_focus_candidate_key = nil
     ui_focus_candidate_since = 0
     last_ui_focus_announcement = nil
@@ -6369,14 +9736,13 @@ function a11y.reset_menu_tracking_state()
     football_life_tooltip_description = nil
 end
 
-function a11y.reset_control_tracking_state()
+function a11y.clear_control_tracking_state()
     controller_rows = {}
     control_rows_by_label_widget = {}
     control_row_by_value_widget = {}
     pending_control_row = nil
     active_control_row = nil
     active_control_focused_ms = 0
-    pending_controller_label = nil
     active_controller_label = nil
     last_controller_announcement = nil
     last_announced_control_row = nil
@@ -6391,41 +9757,21 @@ function a11y.reset_control_tracking_state()
     language_control_by_controller = {}
 end
 
-function a11y.reset_selection_tracking_state()
-    last_audio_id = nil
-    last_focused_id = nil
-    focus_candidate_id = nil
-    last_announced_focus_key = nil
+function a11y.reset_control_tracking_state()
+    a11y.reset_ui_model()
+    a11y.clear_control_tracking_state()
 end
 
-function m.context_reset(ctx)
-    -- A screen transition invalidates announcements captured on the old
-    -- screen, including commands still waiting for the render-thread flush.
-    a11y.native_speech_queue = {}
-    a11y.native_speech_first = 1
-    a11y.native_speech_last = 0
-    a11y.deferred_modal_announcement = nil
-    last_spoken_text = nil
-    last_spoken_ms = 0
-    a11y.reset_widget_tracking_state()
-    a11y.reset_dialog_and_message_state()
-    a11y.reset_menu_tracking_state()
-    a11y.reset_control_tracking_state()
-    a11y.reset_selection_tracking_state()
-    a11y.pre_match_active = false
-    a11y.game_plan_active = false
-    a11y.game_plan_main_surface = false
+function a11y.reset_selection_tracking_state()
+    last_audio_id = nil
+    a11y.last_page_announcement=nil
+    a11y.roster_limits=nil
+end
+
+function a11y.reset_game_plan_tracking_state()
+    a11y.leave_game_plan()
     a11y.game_plan_entry_requested = false
-    a11y.game_plan_menu_probe_due_frame = nil
-    a11y.game_plan_menu_probe_action = nil
-    a11y.game_plan_context = nil
-    a11y.game_plan_announced_context = nil
-    a11y.game_plan_last_focus_text = nil
-    a11y.game_plan_last_menu_focus = nil
-    a11y.game_plan_attribute_due_ms = nil
-    a11y.game_plan_attribute_hold_until_ms = 0
     a11y.game_plan_attribute_last_marker_frame = -10000
-    a11y.game_plan_attribute_panel_until_ms = 0
     a11y.game_plan_attribute_index = 0
     a11y.game_plan_attribute_items = {}
     a11y.game_plan_attribute_text_events = {}
@@ -6433,7 +9779,6 @@ function m.context_reset(ctx)
     a11y.game_plan_player_name = nil
     a11y.game_plan_player_attributes = {}
     a11y.game_plan_player_cache = {}
-    a11y.game_plan_attribute_locked_name = nil
     a11y.game_plan_attribute_opened_ms = 0
     a11y.game_plan_last_focus_widget = nil
     a11y.game_plan_last_focus_frame = -10000
@@ -6441,9 +9786,6 @@ function m.context_reset(ctx)
     a11y.game_plan_title_widgets = {}
     a11y.game_plan_basic_menu_heading_widget = nil
     a11y.game_plan_basic_menu_heading_text = nil
-    a11y.game_plan_basic_menu_heading_due_frame = nil
-    a11y.game_plan_lineup_due_ms = nil
-    a11y.game_plan_lineup_input = nil
     a11y.game_plan_lineup_generation_frame = -10000
     a11y.game_plan_observed_lineup = {}
     a11y.lineup_keyboard_o_down = false
@@ -6451,19 +9793,43 @@ function m.context_reset(ctx)
     a11y.game_plan_selected_heading = nil
     a11y.game_plan_selected_heading_widget = nil
     a11y.game_plan_selected_heading_frame = -10000
-    a11y.game_plan_selected_heading_due_frame = nil
     a11y.game_plan_last_announced_heading = nil
-    a11y.game_plan_last_player_section = nil
-    a11y.game_plan_basic_prompt_active = false
-    a11y.game_plan_active_tactical_label = nil
-    a11y.game_plan_active_tactical_value = nil
-    a11y.game_plan_active_tactical_widget = nil
-    a11y.game_plan_active_tactical_frame = -10000
     a11y.game_plan_tactical_navigation_frame = -10000
     a11y.navigation_frame = -10000
     a11y.navigation_action = nil
     a11y.game_plan_formation_active = false
-    a11y.ui_string_object_by_widget = {}
+end
+
+function m.context_reset(ctx)
+    a11y.engine_focus=nil
+    a11y.companion_candidate,a11y.companion_spoken=nil,nil
+    a11y.native_list_selection=nil
+    -- Sider also resets its team context while constructing an edit menu.
+    -- Keep only deferred guidance now proven active, not queued old controls.
+    local active_guidance = {}
+    for key, item in pairs(a11y.pending_surface_texts or {}) do
+        if item.address and frame-item.frame <= 600
+                and a11y.native_widget_allowed(item.address) then active_guidance[key]=item end
+    end
+    a11y.screen_title_hold_until_ms = 0
+    a11y.dashboard_review, a11y.dashboard_texts, a11y.menu_flow_name = false, {}, nil
+    a11y.keyboard_window, a11y.keyboard_text, a11y.pending_skip_hint, a11y.keyboard_caret = nil, nil, nil, nil
+    a11y.presentation_seen,a11y.presentation_seen_owner,a11y.presentation_frame = nil,nil,nil
+    a11y.native_text_scan_cursor=nil
+    a11y.keyboard_input_address, a11y.pending_surface_texts = nil, {}
+    -- A screen transition invalidates announcements captured on the old
+    -- screen, including commands still waiting for the render-thread flush.
+    a11y.clear_speech_queue()
+    a11y.deferred_modal_announcement = nil
+    last_spoken_text = nil
+    last_spoken_ms = 0
+    a11y.reset_widget_tracking_state()
+    a11y.reset_dialog_and_message_state()
+    a11y.reset_menu_tracking_state()
+    a11y.clear_control_tracking_state()
+    a11y.reset_selection_tracking_state()
+    a11y.pre_match_active = false
+    a11y.reset_game_plan_tracking_state()
     a11y.stadium_active = false
     a11y.stadium_last_marker_frame = -10000
     reset_stadium_screen()
@@ -6477,8 +9843,9 @@ function m.context_reset(ctx)
     a11y.cup_group_last_announced = nil
     a11y.cup_group_last_navigation_frame = -10000
     a11y.screen_title_hold_until_ms = 0
-    reset_side_state()
     last_widget_frame = frame
+    a11y.pending_surface_texts = active_guidance
+    for _, item in pairs(active_guidance) do a11y.observe_ui_widget(item.address,item.text) end
     log("[FLAccess] context-reset")
 end
 
@@ -6573,6 +9940,12 @@ local function install_slider_probes(ctx)
 end
 
 local function install_selector_probes(ctx)
+    install_event_probe(ctx,0xe48af0,
+        "\x48\x89\x5c\x24\x08\x48\x89\x74\x24\x10\x57\x48\x83\xec\x20",
+        "custom:flaccess_ui_focus_event","ui-focus-event-probe")
+    install_event_probe(ctx, 0xe7a990,
+        "\x48\x8b\xc4\x55\x57\x41\x56\x48\x8d\x68\xd8\x48\x81\xec\x10\x01\x00\x00",
+        "custom:flaccess_keyboard_input_set", "keyboard-input-probe")
     install_event_probe(
         ctx, UI_TEXT_SET_RVA, UI_TEXT_SET_PROLOGUE,
         "custom:flaccess_ui_text_set", "ui-text-set-probe")
@@ -6600,6 +9973,11 @@ local function install_list_probe(ctx)
 end
 
 function a11y.install_player_record_probes(ctx)
+    -- At this instruction EBX is the returned match-rule squad boundary.
+    -- The complete 14-byte span is LEA/MOV/NOP, without RIP-relative operands.
+    install_event_probe(ctx,0x8f8392,
+        "\x48\x8d\x4c\x24\x30\xba\x0d\x00\x00\x00\x0f\x1f\x40\x00",
+        "custom:flaccess_roster_rule_boundary","roster-rule-boundary-probe")
     install_event_probe(
         ctx, 0xc6d770,
         "\x0f\x10\x02\x0f\x11\x01\x0f\x10\x4a\x10\x0f\x11\x49\x10",
@@ -6618,6 +9996,17 @@ function m.init(ctx)
     process_base = memory.get_process_info().base
     process_base_u64 = ffi.cast("uint64_t", process_base)
     a11y.sider_dir = ctx.sider_dir
+    log("[FLAccess] runtime=" .. a11y.runtime_version .. " module=" .. ctx.sider_dir .. "\\modules\\FLAccess.lua")
+    -- Fail open on another executable version. This is a read-only signature
+    -- check of the singleton getter; no instruction is patched here.
+    a11y.native_windows_enabled = memory.read(process_base + 0xe7157f, 7)
+        == "\x48\x8b\x05\x8a\x86\x88\x02"
+    a11y.native_windows, a11y.native_windows_frame = nil, nil
+    a11y.native_tree_cache, a11y.native_cursor_identity, a11y.native_cursor_log_count = nil,nil,0
+    a11y.native_cursor_detail_identity,a11y.native_cursor_detail_count = nil,0
+    a11y.presentation_seen,a11y.presentation_seen_owner,a11y.presentation_frame = nil,nil,nil
+    a11y.native_text_scan_cursor=nil
+    log("[FLAccess] native-window-reader=" .. tostring(a11y.native_windows_enabled))
     local xinput_file = io.open(ctx.sider_dir .. "\\..\\xinput1_3.dll", "rb")
     if xinput_file then
         xinput_file:close()
@@ -6631,10 +10020,13 @@ function m.init(ctx)
         a11y.save_config()
     end
     a11y.load_text_assets()
+    a11y.start_armed_component_capture()
     ctx.register("custom:flaccess_resolved_text", m.on_resolved_text)
     ctx.register("custom:flaccess_slider_init", m.on_slider_init)
     ctx.register("custom:flaccess_slider_set", m.on_slider_set)
     ctx.register("custom:flaccess_ui_text_set", m.on_ui_text_set)
+    ctx.register("custom:flaccess_ui_focus_event",m.on_ui_focus_event)
+    ctx.register("custom:flaccess_keyboard_input_set", m.on_keyboard_input_set)
     ctx.register("custom:flaccess_list_item_render", m.on_list_item_render)
     ctx.register("custom:flaccess_team_item_text", m.on_team_item_text)
     ctx.register("custom:flaccess_game_text_language_set", m.on_game_text_language_set)
@@ -6642,7 +10034,9 @@ function m.init(ctx)
     ctx.register("custom:flaccess_game_text_language_nav", m.on_game_text_language_nav)
     ctx.register("custom:flaccess_player_record_copy", m.on_player_record_copy)
     ctx.register("custom:flaccess_player_record_lookup", m.on_player_record_lookup)
+    ctx.register("custom:flaccess_roster_rule_boundary",m.on_roster_rule_boundary)
     ctx.register("display_frame", m.display_frame)
+    ctx.register("livecpk_data_ready", m.data_ready)
     ctx.register("context_reset", m.context_reset)
     ctx.register("overlay_on", m.overlay_on)
     ctx.register("overlay_content", m.on_sider_overlay_content)

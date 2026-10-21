@@ -29,3 +29,10 @@ Thumbs.db
 textAssets/catalog.sqlite
 textAssets/catalog.sqlite-shm
 textAssets/catalog.sqlite-wal
+
+# Local test dependencies and evidence
+reference/
+.test-temp/
+.sider-compat-test/
+tests/voice-evidence/
+tests/capture-*
