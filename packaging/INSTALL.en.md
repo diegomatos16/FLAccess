@@ -12,11 +12,13 @@ NVDA or another supported screen reader is recommended; Prism can fall back to S
 1. Close the game and Sider; back up the files you will replace.
 2. Extract `FLAccess-0.1.7-sider.zip` and merge its `modules` folder into
    `SiderAddons/modules`.
-3. Add `lua.module = "FLAccess.lua"` once under `[sider]` in `sider.ini`.
-4. Start through Sider. Do not replace your entire configuration.
+3. Copy the included `sider.dll` into `SiderAddons`, replacing only the compatible
+   Sider 7.3.3 core. Do not use this DLL with another Sider version.
+4. Add `lua.module = "FLAccess.lua"` once under `[sider]` in `sider.ini`.
+5. Start through Sider. Do not replace your entire configuration.
 
 Includes Lua, Prism with its licenses and PT/EN text indices. Python is not
-required to use the mod. No `sider.dll` is distributed. Reading other Sider
-modules' textual overlays requires the modified core's `overlay_content` event;
-see `sider-core` for source and redistribution restrictions. Game-menu reading
-uses its own hooks. Existing compatible custom cores can be retained.
+required to use the mod. Includes the locally tested modified Sider 7.3.3 DLL,
+with the `overlay_content` event for reading other modules' textual overlays and
+the stack-alignment fix. See `sider-core` for source and binary identification.
+Game-menu reading uses its own hooks.

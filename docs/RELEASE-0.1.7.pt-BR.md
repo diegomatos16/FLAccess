@@ -24,10 +24,12 @@ de Pular, introdução/home da Master Liga, situação do elenco e lado do usuá
 ## Pacote
 
 O ZIP contém Lua, índices PT/EN, Prism e suas licenças, instruções e documentação.
-Não contém executável do jogo, saves, logs, backups, experimentos de gameplay
-nem o `sider.dll` modificado, cuja redistribuição exige autorização do mantenedor.
-O evento para ler painéis de outros módulos requer esse núcleo compatível.
-O código correspondente permanece disponível em `sider-core`.
+Inclui também o `sider.dll` modificado 7.3.3, conforme solicitação posterior do
+responsável pelo projeto. É o mesmo binário da instalação local e dos testes
+anteriores, com `overlay_content` e a correção de alinhamento de pilha. Usar
+somente no núcleo compatível 7.3.3. O código está em `sider-core`.
+Não contém executável do jogo, saves, logs, backups nem experimentos de gameplay.
+O pacote foi atualizado sem mudar a versão 0.1.7; confira o SHA256 atualizado.
 
 Os testes publicados usam LuaJIT e, para verificações nativas, os arquivos da
 instalação local pertencente ao testador. A suíte original espera o layout

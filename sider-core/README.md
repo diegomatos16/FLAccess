@@ -18,6 +18,10 @@ without the unrelated 7.3.4 goal event. It fixes the 0xc0000005 access violation
 observed in the locally built 7.3.3 DLL while keeping the 7.3.3 ABI and exports.
 Upstream fix: https://github.com/pes-modding/sider7/releases/tag/v7.3.4
 
-The upstream repository does not state a redistribution license. The compiled
-DLL is therefore intended for local testing and must not be published without
-permission from the Sider maintainer.
+The 0.1.7 installer includes the locally tested modified DLL at the FLAccess
+project owner's explicit request. It targets Sider 7.3.3 only. The upstream
+repository does not state a redistribution license; this inclusion does not
+assert that upstream granted a new license.
+
+Binary SHA256:
+`57005a0e5977e699c8053293163599508616fd78e044b0f4ccd8ca8e2ccab116`.

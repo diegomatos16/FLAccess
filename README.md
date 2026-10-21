@@ -13,5 +13,5 @@ Supports screen readers such as NVDA, with SAPI fallback.
 - [Changelog](CHANGELOG.md)
 
 This is experimental menu accessibility, not complete gameplay access. Known
-reports remain open. The release excludes the modified Sider DLL; see the
+reports remain open. The installer includes the compatible modified Sider DLL; see the
 installation instructions and `sider-core/README.md`.

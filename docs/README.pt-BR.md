@@ -13,21 +13,22 @@ o Prism pode usar SAPI.
 1. Feche o jogo e o Sider e faça backup dos arquivos que vai substituir.
 2. Extraia o pacote `FLAccess-0.1.7-sider.zip`.
 3. Copie a pasta `modules` do pacote para `SiderAddons/modules`, mesclando as pastas.
-4. No bloco `[sider]` do `sider.ini`, acrescente uma única linha:
+4. Copie o `sider.dll` do pacote para `SiderAddons`, substituindo somente o núcleo
+   compatível 7.3.3. Não use esse DLL em outra versão do Sider.
+5. No bloco `[sider]` do `sider.ini`, acrescente uma única linha:
 
 ```ini
 lua.module = "FLAccess.lua"
 ```
 
-5. Inicie pelo Sider. Não substitua o `sider.ini` inteiro.
+6. Inicie pelo Sider. Não substitua o `sider.ini` inteiro.
 
 O pacote inclui o módulo Lua, o Prism com suas licenças e índices de texto PT/EN.
 Não é necessário Python nem um programa auxiliar para usar o mod.
-Não inclui `sider.dll`. A leitura dos painéis textuais dos outros módulos do
-Sider exige o núcleo modificado que fornece `overlay_content`; o código dessa
-alteração está em `sider-core`. Sua redistribuição compilada depende de
-autorização do mantenedor. A leitura dos menus do jogo usa os próprios hooks.
-Quem já usa o núcleo compatível pode mantê-lo.
+Inclui o `sider.dll` modificado 7.3.3 já usado nos testes locais, com o evento
+`overlay_content` para ler os painéis textuais dos outros módulos do Sider e a
+correção de alinhamento de pilha. O código correspondente está em `sider-core`.
+A leitura dos menus do jogo usa os próprios hooks.
 
 ## Uso
 

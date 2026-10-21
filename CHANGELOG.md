@@ -8,8 +8,8 @@
   stale values, recycled objects and previous-context output.
 - Include regression tests and implementation reports. Internal tests passed;
   final live-game validation is incomplete and known reports remain open.
-- Public package includes Lua, PT/EN indices and Prism licenses. Modified Sider
-  DLL is excluded pending upstream redistribution permission.
+- Public package includes Lua, PT/EN indices, Prism licenses and the compatible
+  modified Sider 7.3.3 DLL (installer updated at the project owner's request).
 - See docs/RELEASE-0.1.7.pt-BR.md for evidence and unresolved reports.
 
 
