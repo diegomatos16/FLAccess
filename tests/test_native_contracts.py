@@ -1,10 +1,9 @@
 """Read-only contracts against this installed executable, not simulated UI proof."""
 from pathlib import Path
-import os
 import struct
 import unittest
 
-EXE = Path(os.environ.get("FLACCESS_GAME_EXE", Path(__file__).resolve().parents[2] / "FL_2026.exe"))
+EXE = Path(__file__).resolve().parents[2] / "FL_2026.exe"
 
 
 @unittest.skipUnless(EXE.exists(), "local executable unavailable")
@@ -157,6 +156,69 @@ class NativeContracts(unittest.TestCase):
         self.assertEqual(data[5:8],bytes.fromhex('0fb6d8'))  # EBX=AL
         self.assertEqual(self.read_rva(0x8F7F90,12).hex(),'8b81e804000083c00b03c2c3')
         self.assertEqual(self.read_rva(0x914810,8).hex(),'488b8cf3b8000000')
+
+    def test_roster_model_getters_bind_slots_records_and_player_ids(self):
+        getter = self.read_rva(0x8E1AF0, 8)
+        self.assertEqual(getter[:3], bytes.fromhex('488b05'))
+        self.assertEqual(0x8E1AF7 + struct.unpack_from('<i', getter, 3)[0], 0x36F38A0)
+        for table in (0x261EAA0, 0x261F788):
+            self.assertEqual(struct.unpack('<Q', self.read_rva(table+0x328,8))[0], 0x140914280)
+            self.assertEqual(struct.unpack('<Q', self.read_rva(table+0x338,8))[0], 0x140A42FA0)
+        body=self.read_rva(0x914280,0x65)
+        self.assertIn(bytes.fromhex('8bbc81a0020000'),body)  # card index -> record index
+        self.assertIn(bytes.fromhex('4869d340030000'),body)  # side * 340
+        self.assertIn(bytes.fromhex('488d88a8040000'),body)  # model base +4a8
+        self.assertEqual(self.read_rva(0x8E1E14,9).hex(),'420f1084c1b8000000')
+        self.assertEqual(self.read_rva(0x8E1E47,4).hex(),'488b402c')
+        # Rendering reads the high dword of this exact +2c pair as player id.
+        self.assertEqual(self.read_rva(0x915E43,3).hex(),'8b5004')
+        self.assertEqual(self.read_rva(0x8E1C38,8).hex(),'0fb68408e4010000')
+
+    def test_shared_caption_consumer_and_related_player_controller_contracts(self):
+        lea=self.read_rva(0x8F0385,7)
+        self.assertEqual(lea[:3],bytes.fromhex('488d15'))
+        target=0x8F038C+struct.unpack_from('<i',lea,3)[0]
+        self.assertEqual(self.read_rva(target,5),b'text\0')
+        self.assertEqual(self.read_rva(0x8F03EF,3).hex(),'488bce')
+        # Both selection components use the same inherited controller methods.
+        for table in (0x2622C98,0x2623198,0x2623678):
+            self.assertEqual(struct.unpack('<Q',self.read_rva(table+0x100,8))[0],0x140917A40)
+            self.assertEqual(struct.unpack('<Q',self.read_rva(table+0x1A0,8))[0],0x140917EE0)
+        self.assertEqual(struct.unpack('<Q',self.read_rva(0x261E0C8+0x110,8))[0],0x1408F59F0)
+        self.assertEqual(self.read_rva(0x8F59AB,7).hex(),'448b8398000000')
+        self.assertEqual(self.read_rva(0x917F07,8).hex(),'c74424301b300801')
+
+    def test_player_panel_descriptor_selects_variant_slot_and_side(self):
+        for index, name in enumerate((b'playerInfo_0\0', b'playerInfo_1\0')):
+            pointer=struct.unpack('<Q',self.read_rva(0x34A2048+index*8,8))[0]-0x140000000
+            self.assertEqual(self.read_rva(pointer,len(name)),name)
+        self.assertEqual(self.read_rva(0x8E1E90,31).hex(),
+                         '418bc04c8d0480428b84818c000000420f1044817c0f1102894210488bc2c3')
+        self.assertIn(bytes.fromhex('4869c9a8000000'),self.read_rva(0x910410,0x80))
+        self.assertEqual(self.read_rva(0x21F8690,5).hex(),'488b4108c3')
+
+    def test_player_position_properties_are_packed_independently_from_formation(self):
+        targets=struct.unpack('<14I',self.read_rva(0x14C6CDC,56))
+        self.assertEqual(self.read_rva(targets[0],12).hex(),'8b4104c1e81c418900b001c3')
+        for position, target in enumerate(targets[1:]):
+            if position<3:
+                prefix=bytes.fromhex('8b411cc1e8')+bytes([25+position*2])+bytes.fromhex('83e003')
+            elif position==3:
+                prefix=bytes.fromhex('8b412083e003')
+            elif position==11:
+                prefix=bytes.fromhex('0fb7412283e003')  # low bits of +22 = +20 >>16
+            else:
+                prefix=bytes.fromhex('8b4120c1e8')+bytes([(position-3)*2])+bytes.fromhex('83e003')
+            self.assertEqual(self.read_rva(target,len(prefix)),prefix)
+
+    def test_formation_role_getter_uses_slot_and_current_phase(self):
+        data=self.read_rva(0x14C61D0,68)
+        for instruction in ('0fb6440842','0fb6440821','0fb60408','b80d000000c3'):
+            self.assertIn(bytes.fromhex(instruction),data)
+        data=self.read_rva(0x8E1550,74)
+        for instruction in ('4869c8a8000000','468b8c11340b0000','4869c848020000'):
+            self.assertIn(bytes.fromhex(instruction),data)
+        self.assertEqual(self.read_rva(0x14C0D50,5).hex(),'0fb64133c3')
 
     def test_window_task_layout_is_identified_by_two_lifecycle_methods(self):
         for table in (0x2673558,0x2715608,0x261F788,0x27D65C8):

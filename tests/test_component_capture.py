@@ -64,11 +64,16 @@ PAGE window=100 index=1 caption=200 text="Guia"
 COMMAND bar=300 index=0 icon=400 caption=500 raw="\\017jb" text="Pular"
 ROSTER window=100 side=0 scroll=7 boundary=nil
 SLOT window=100 index=0 card=600
+PLAYER_PANEL widget=700 window=100 slot=18 side=0 player_id=1234 section="" identity="real-id"
+CAPTION_SELECTION widget=700 identity="window:cursor:panel"
 END sampled=0 total=0
 ''')
-        self.assertEqual(report['component_link_counts'], {'PAGE': 1, 'COMMAND': 1, 'ROSTER': 1, 'SLOT': 1})
+        self.assertEqual(report['component_link_counts'], {'PAGE': 1, 'COMMAND': 1, 'ROSTER': 1, 'SLOT': 1, 'PLAYER_PANEL': 1, 'CAPTION_SELECTION': 1})
         self.assertEqual(report['component_links'][1]['raw'], '\x11jb')
         self.assertEqual(report['component_links'][2]['boundary'], 'nil')
+        self.assertEqual(report['component_links'][4]['section'], '')
+        self.assertEqual(report['component_links'][4]['player_id'], '1234')
+        self.assertEqual(report['component_links'][5]['identity'], 'window:cursor:panel')
         self.assertTrue(all(item['sequence'] == '4' for item in report['component_links']))
         self.assertFalse(report['component_links_truncated'])
 

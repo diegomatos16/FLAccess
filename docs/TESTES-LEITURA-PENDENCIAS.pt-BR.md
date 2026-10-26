@@ -1,5 +1,117 @@
 # Testes de leitura e pendências
 
+## Publicação 0.1.8 — 26/10/2026
+
+Usuário autorizou publicar a base atual como 0.1.8, preservando 0.1.7.
+Somente identificação alterada em relação à dev 25; lógica preservada.
+321 Lua por cópia/40 Python (incluindo dois testes de empacotamento), sandbox
+Sider/15 assinaturas passaram. DLL Sider testada e Prism incluídos no repositório
++ instalador; política permanente em docs/PUBLICACAO.pt-BR.md. Não publicar
+somente Lua. Preservar aprovações reais dev 24; revisão/situação da dev 25
+sem confirmação audível, item 16 aberto. Ver docs/RELEASE-0.1.8.pt-BR.md.
+
+## Entrega dev 25 — revisão do jogador, 25/10/2026
+
+Usuário escolheu secundárias completas e parciais com distinção. Implementado:
+primeiro K número/nome; depois principal, secundárias existentes e função no
+campo ou Não está no campo. I volta; analógico direito baixo/cima equivalente.
+Titular/reserva/não relacionado somente na navegação automática entre jogadores.
+Leitor do painel usa descritor nativo slot/lado/ID; elimina dependência do cache
+que estava vazio na captura real dev 24. Limite padrão de relacionados lido
+do jogo; regras de competição não resolvidas exigem retorno do hook e seguem
+desconhecidas sem essa prova. Item 16 permanece aberto, sem audição da dev 25.
+
+321 Lua por cópia/38 Python/sandbox/15 assinaturas passaram; fonte/Sider iguais.
+Casos internos incluem campos distintos, secundárias completas/parciais,
+controle, troca/reentrada, nome igual com ID diferente e descarte de fala antiga.
+Não são prova de funcionamento audível. Opções do plano de jogo e nomes em
+Editar posição seguem aprovados pelo usuário na dev 24; demais aprovações
+preservadas. Relatório REVISAO-JOGADOR-DEV25-2026-10-25.pt-BR.md. Captura
+real dev 24 preservada; nova sessão armada com PLAYER_DATA. Este estado
+substitui o alinhamento anterior registrado abaixo.
+
+## Decisão sobre a fala da situação do elenco — 25/10/2026
+
+Usuário esclareceu: titular, reserva e não relacionado são falados somente
+durante a navegação entre jogadores, acompanhando a identificação do jogador.
+Não incluir essa situação como etapa nem repeti-la na revisão por I/K ou pelo
+analógico direito. Revisão continua destinada a número/nome, posição principal,
+secundárias existentes e posição atual no campo ou Não está no campo.
+Essa última frase descreve a presença no campo e permanece na revisão; não é
+substituída por reserva/não relacionado. Decisão registrada; código ainda dev 24.
+
+## Confirmação audível dev 24 e revisão do jogador em alinhamento — 25/10/2026
+
+Usuário confirmou funcionando as duas correções: leitura das opções na primeira
+tela do plano de jogo e nomes dos jogadores ao entrar em Editar posição.
+Essas duas regressões estão aprovadas por audição real. Situação titular,
+reserva ou não relacionado continua ausente segundo o usuário; item 16 aberto.
+Preservar as demais aprovações e pendências.
+
+Novo comportamento solicitado para esclarecer antes de implementar: revisar
+informações do jogador em foco, uma informação por vez, com K avançando e I
+voltando; analógico direito para baixo/cima deve equivaler a K/I nesse contexto.
+Exemplo informado: primeiro K repete número e nome (3 Bolívar); próximo lê
+posição principal; depois posição no campo. Incluir posições secundárias se
+existirem. Quem não estiver no campo deve receber a frase Não está no campo.
+Posição principal e posição atual no campo são dados distintos; não inferir
+uma da outra. Dados ausentes não autorizam inventar posição ou situação.
+
+Situação titular/reserva/não relacionado foi posteriormente definida: somente
+na navegação entre jogadores, fora da sequência de revisão. Ordem exata das
+secundárias ainda não recebeu alinhamento específico. Nenhuma alteração de código
+ou nova build nesta atualização; instalada permanece dev 24.
+
+## Estado atual — plano de jogo e nomes / dev 24 instalada, 25/10/2026
+
+Usuário relata opções silenciosas na entrada do plano de jogo e nenhum nome
+em Editar posição. Confirmou navegação pelo controle. Dev 24 instalada: cursor
+sem texto pode usar legenda única do próprio grupo; família nativa SelectBase
+vincula o nome no painel ParameterPlayerInfo por lado/Task pai/cursor real.
+Nomes independem de cache de atributos ou prova de situação. Demais campos do
+painel não disputam seleção; identidade e entrega revalidam cursor/vínculo.
+Sem condições por nome de tela, novo hook ou restauração de ordem presumida.
+
+313 Lua por cópia/35 Python/sandbox/15 assinaturas passaram, 175 locais.
+Fonte/Sider iguais, SHA256
+61EF527EBC25F9178619C60321F6A0B8DDA8770A48687EEB1303A4BF4707AF0B.
+Log tests/dev24-cursor-caption-suite.log; relatório
+ docs/PLANO-ELENCO-DEV24-2026-10-25.pt-BR.md.
+Sem audição dev 24: os dois relatos continuam abertos; situação do item 16
+não recebeu aprovação nova. Demais aprovações/pendências preservadas.
+
+Captura dev 23 encontrada cobria apenas título; preservada em
+ tests/capture-dev23-components.log. Trace de 23/10 e sider de 25/10 preservados
+separadamente; não combinar endereços entre sessões. Padrão confrontado com
+captura dev 21 existente e contratos do executável, sem usar código histórico.
+Captura rearmada com CAPTION_SELECTION para vínculo específico. Não pedir nova
+passagem ampla nem apresentar testes simulados como prova de audição no jogo.
+
+## Estado atual — elencos / dev 23 instalada, 22/10/2026
+
+Usuário pediu suporte aos elencos e relatou situação titular/reserva/não
+relacionado ausente. Captura real encontrada build 21 de 20/10, preservada em
+tests/capture-dev21-components.log e sider correspondente; não era mais build 18.
+Dev 22 preparada nesta rodada: raiz de apresentação para limite, travessia de
+árvore sem duplicatas/até 2048, linha composta de jogador e revisão I/K/J/L
+indexada, nomes iguais separados e validação de fala antiga. Sucedida pela dev 23.
+
+Dev 23 instalada: painel de informação separado liga ID validado do jogador ao
+slot/modelo atual, mesmo lado e Task pai; exige acordo com cartão apresentado
+e ordem do elenco. Situação usa slot e limite real da regra; desconhecido não
+vira palpite. Decisão comum/adaptadores descartam vínculo antigo e permitem
+anunciar mesmo jogador após mudar situação. Sem novos hooks nem condições por
+nome de tela. Relatório docs/ELENCOS-DEV23-2026-10-22.pt-BR.md.
+
+309 Lua por cópia/34 Python/sandbox 120 frames/15 assinaturas passaram, 175
+locais; fonte/Sider iguais, SHA256
+DBFAD153A2821A00B4FA59354F961A3F848F322D6FA078BA6C62D9169F1F8795.
+Log tests/dev23-rosters-suite.log. Sem confirmação audível dev 22/23: item 16
+continua aberto; demais aprovações e matriz preservadas. Testes simulados do
+modelo e contratos do executável não comprovam descoberta/audição no jogo.
+Captura de uma sessão rearmada com SLOT/ID e PLAYER_PANEL para vínculo específico;
+ler logs no próximo uso, sem pedir outra passagem ampla. Trabalho desta rodada local.
+
 ## Publicação 0.1.7 — 21/10/2026
 
 Base dev 21 publicada por autorização do usuário. Nenhuma pendência adicional

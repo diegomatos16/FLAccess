@@ -25,3 +25,5 @@ assert that upstream granted a new license.
 
 Binary SHA256:
 `57005a0e5977e699c8053293163599508616fd78e044b0f4ccd8ca8e2ccab116`.
+
+The tested binary is versioned here as `sider.dll`. Every future publication must include this compatible core and `modules/FLAccess-Prism/prism.dll` in both the repository and installer. Build with `python tools/build_release.py`; missing DLLs stop packaging.

@@ -2524,9 +2524,9 @@ check("production localization callback cannot announce an unbound future paragr
 end)
 
 check("base release version and local development build remain separate",function()
-    assert(upvalue(a11y.start_diagnostic,"VERSION")=="0.1.7")
-    assert(a11y.build==21 and a11y.runtime_version=="0.1.7")
-    assert(a11y.overlay_text():find("0.1.7",1,true))
+    assert(upvalue(a11y.start_diagnostic,"VERSION")=="0.1.8")
+    assert(a11y.build==25 and a11y.runtime_version=="0.1.8")
+    assert(a11y.overlay_text():find("0.1.8",1,true))
 end)
 
 local function holder_map(values, node, secondary, head, record, child)
@@ -4998,6 +4998,597 @@ for _,packet in ipairs(observed_fields.rows) do
         end)
     end)
 end
+
+check("large shared trees visit each object once and reach late roster captions",function()
+    with_native_windows(function(values,base)
+        local root=0x300000
+        values[root+0x170],values[root+0x178]=0x600000,0x600000+40*8
+        for group=0,19 do
+            local at=0x2000000+group*0x10000
+            values[0x600000+group*16],values[0x600008+group*16]=at,at
+            values[at]=base+0x27b8d60
+            values[at+0x170],values[at+0x178]=at+0x1000,at+0x1000+45*8
+            for index=0,44 do
+                local child=at+0x2000+index*0x100
+                values[at+0x1000+index*8]=child;values[child]=base+0x27b5260
+            end
+        end
+        local members,parents,evidence=a11y.menu_tree(root,base)
+        local last=0x2000000+19*0x10000+0x2000+44*0x100
+        assert(members[last] and parents[last]==0x2000000+19*0x10000)
+        assert(evidence.visited==921 and evidence.queued==921 and not evidence.at_capacity)
+    end)
+end)
+
+check("tree capacity remains bounded and reports omitted distinct nodes",function()
+    with_native_windows(function(values,base)
+        values[0x300170],values[0x300178]=0x600000,0x600000+32*8
+        for group=0,31 do
+            local at=0x2000000+group*0x10000
+            values[0x600000+group*8]=at;values[at]=base+0x27b8d60
+            values[at+0x170],values[at+0x178]=at+0x1000,at+0x1000+100*8
+            for index=0,99 do
+                local child=at+0x2000+index*0x100
+                values[at+0x1000+index*8]=child;values[child]=base+0x27b5260
+            end
+        end
+        local _,_,evidence=a11y.menu_tree(0x300000,base)
+        assert(evidence.visited==2048 and evidence.at_capacity)
+    end)
+end)
+
+check("rule boundary survives a presentation-only roster and expires on root replacement",function()
+    with_roster_slots(function(memory,values,snapshot,owner,base)
+        local old_frame=upvalue(module.display_frame,"frame")
+        local unpack_memory=host.memory.unpack
+        host.memory.unpack=function(kind,bytes)
+            if kind=="u64" then return ffi.cast("const uint64_t*",bytes)[0] end
+            return unpack_memory(kind,bytes)
+        end
+        local function packed(value) return ffi.string(ffi.new("uint64_t[1]",value),8) end
+        memory[owner.address]=base+0x261f788
+        memory[0x300098],memory[0x300090]=0,owner.root
+        memory[owner.root],memory[owner.root+0xc]=base+0x27bae88,263
+        snapshot.windows[1].root=0;snapshot.windows[1].impl=0x300000
+        set_upvalue(module.display_frame,"frame",100)
+        module.on_roster_rule_boundary({},0,{rdi=packed(owner.address),rbx=packed(18)})
+        assert(a11y.roster_limits[owner.address].root==owner.root)
+        set_upvalue(module.display_frame,"frame",104)
+        a11y.prune_roster_limits(snapshot)
+        local node=a11y.ui_model.nodes[host.memory.hex(0x110000)]
+        assert(a11y.player_component_section(node)=="reserve")
+        memory[owner.address+0x4e8]=7
+        assert(a11y.player_component_section(node)=="unselected")
+        memory[0x300090]=owner.root+0x1000;memory[owner.root+0x1000]=base+0x27bae88
+        a11y.prune_roster_limits(snapshot)
+        assert(not a11y.roster_limits[owner.address] and not a11y.player_component_section(node))
+        host.memory.unpack=unpack_memory;set_upvalue(module.display_frame,"frame",old_frame)
+    end)
+end)
+
+check("observed player row composes name rating and caption without ambiguous focus",function()
+    -- Captions and sibling relation from dev 21 SNAP 902; simulated delivery.
+    with_rendered_panel({[0x110000]={name="playerName",text="João Paulo",parent=0x210000},
+        [0x120000]={name="allOver",text="75",parent=0x210000},
+        [0x130000]={name="noSetting",text="Desativar",parent=0x210000}},function(values,snapshot)
+        snapshot.selected_members={[0x110000]=true,[0x120000]=true,[0x130000]=true}
+        snapshot.cursor_members=snapshot.selected_members
+        with_focus_memory({},function(tick)
+            tick(120);tick(123)
+            assert(#speech_texts()==1 and speech_texts()[1]:find("João Paulo, 75, Desativar",1,true), table.concat(speech_texts()," | ") .. " reason=" .. tostring(a11y.ui_model.focus_reason))
+            values[0x120000]="76" -- renderer updates before next observation
+            with_render_harness(function(output)
+                a11y.flush_native_speech(100000);assert(#output==0,"stale rating cannot escape queue")
+                a11y.poll_native_texts(true);tick(130);tick(133);a11y.flush_native_speech(100000)
+                assert(#output==1 and output[1][1]:find("João Paulo, 76, Desativar",1,true))
+            end)
+        end)
+    end)
+end)
+
+check("player row composition rejects namesakes and captions belonging to another row",function()
+    with_rendered_panel({[0x110000]={name="playerName",text="Nome igual",parent=0x210000},
+        [0x120000]={name="playerName",text="Nome igual",parent=0x210000},
+        [0x130000]={name="allOver",text="75",parent=0x210000}},function()
+        assert(#a11y.player_row_details(a11y.ui_model.nodes[host.memory.hex(0x110000)])==0)
+    end)
+    with_rendered_panel({[0x110000]={name="playerName",text="Jogador",parent=0x210000},
+        [0x120000]={name="noSetting",text="Desativar",parent=0x220000}},function(snapshot)
+        snapshot.selected_members={[0x110000]=true,[0x120000]=true}
+        with_focus_memory({},function(tick) tick(120);tick(123);assert(#speech_texts()==0) end)
+    end)
+end)
+
+local function with_player_list(fn)
+    with_rendered_panel({[0x110000]={name="playerName",text="Mesmo nome",parent=0x210000},
+        [0x120000]={name="playerName",text="Mesmo nome",parent=0x220000},
+        [0x130000]={name="playerName",text="Painel lateral",parent=0x230000},
+        [0x140000]={name="playerName",text="-",parent=0x240000}},function(values,snapshot,parents,owner)
+        local memory={[0x300170]=0x400000,[0x300178]=0x400018,
+            [0x400000]=0x220000,[0x400008]=0x210000,[0x400010]=0x240000}
+        parents[0x210000],parents[0x220000],parents[0x240000]=0x300000,0x300000,0x300000
+        snapshot.windows[1].cursor_detail={group=0x300000,selected=0x220000,item_index=0,status="resolved"}
+        snapshot.selected_members={[0x120000]=true}
+        snapshot.cursor_members={[0x110000]=true,[0x120000]=true}
+        a11y.menu_read=function(at) return memory[at] end
+        fn(values,snapshot,memory)
+    end)
+end
+
+check("player review keeps native row order duplicate names and excludes side panels",function()
+    with_player_list(function(values,snapshot)
+        local entries,review=a11y.buffer_entries()
+        assert(#entries==2 and entries[1]:find("Mesmo nome",1,true) and entries[1]==entries[2])
+        assert(review.nodes[1].address==0x120000 and review.nodes[2].address==0x110000)
+        values[0x120000]="Nome após rolagem"
+        entries=a11y.buffer_entries()
+        assert(entries[1]:find("Nome após rolagem",1,true))
+        snapshot.members[0x110000].active=false
+        entries=a11y.buffer_entries();assert(#entries==1)
+    end)
+end)
+
+check("I K J L review moves repeats and rejects stale rendered players before Prism",function()
+    with_player_list(function(values,snapshot)
+        local foreground=upvalue(a11y.read_buffer,"game_is_foreground")
+        set_upvalue(a11y.read_buffer,"game_is_foreground",function() return true end)
+        with_render_harness(function(output)
+            a11y.read_buffer("first");a11y.flush_native_speech(100000)
+            a11y.read_buffer("next");a11y.flush_native_speech(100000)
+            a11y.read_buffer("previous");a11y.flush_native_speech(100000)
+            a11y.read_buffer("repeat");a11y.flush_native_speech(100000)
+            assert(#output==4 and a11y.read_context.cursor==1)
+            a11y.read_buffer("next")
+            values[0x110000]="Jogador atualizado"
+            a11y.flush_native_speech(100000);assert(#output==4)
+            a11y.read_buffer("repeat");a11y.flush_native_speech(100000)
+            assert(#output==5 and output[5][1]=="Jogador atualizado")
+            a11y.read_buffer("first");snapshot.windows[1].enabled=false
+            a11y.flush_native_speech(100000);assert(#output==5)
+        end)
+        set_upvalue(a11y.read_buffer,"game_is_foreground",foreground)
+    end)
+end)
+
+check("club review retains distinct players with identical names and invalidates old club speech",function()
+    with_rendered_panel({[0x110000]={name="teamName",text="Clube atual",parent=0x210000},
+        [0x120000]={name="playerName",text="Mesmo nome",parent=0x220000},
+        [0x130000]={name="playerName",text="Mesmo nome",parent=0x230000}},function(values)
+        a11y.native_list_selection={widget=0x110000,text="Clube atual",identity="record:1"}
+        a11y.native_list_selection.committed=a11y.native_owner_token() .. ":record:1:Clube atual"
+        local entries,review=a11y.buffer_entries()
+        assert(#entries==3 and review.nodes[2].address~=review.nodes[3].address)
+        local foreground=upvalue(a11y.read_buffer,"game_is_foreground")
+        set_upvalue(a11y.read_buffer,"game_is_foreground",function() return true end)
+        with_render_harness(function(output)
+            a11y.read_buffer("next")
+            values[0x110000]="Novo clube"
+            a11y.flush_native_speech(100000);assert(#output==0)
+        end)
+        set_upvalue(a11y.read_buffer,"game_is_foreground",foreground)
+    end)
+end)
+
+check("player review cancels on native cursor movement and cannot enter a dialog",function()
+    with_player_list(function(values,snapshot)
+        local foreground=upvalue(a11y.read_buffer,"game_is_foreground")
+        set_upvalue(a11y.read_buffer,"game_is_foreground",function() return true end)
+        with_render_harness(function(output)
+            a11y.read_buffer("next")
+            snapshot.windows[1].cursor_detail.selected=0x210000
+            a11y.flush_native_speech(100000);assert(#output==0)
+            a11y.read_buffer("first");a11y.flush_native_speech(100000)
+            assert(#output==1 and a11y.read_context.cursor==1)
+            a11y.read_context.kind="dialog"
+            assert(not a11y.player_list_review_entries(a11y.presented_nodes()))
+            a11y.reset_read_context("return-from-dialog")
+            a11y.read_buffer("first");a11y.flush_native_speech(100000)
+            assert(#output==2,"reentry must permit the same player again")
+        end)
+        set_upvalue(a11y.read_buffer,"game_is_foreground",foreground)
+    end)
+end)
+
+local function with_information_panel_roster(fn)
+    with_rendered_panel({[0x110000]={name="playerName",text="24  Nome real",parent=0x210000}},function(values,snapshot,parents,panel_owner)
+        local old_base=upvalue(module.init,"process_base_u64")
+        local base,data,pitch,impl,root,card,object=0x140000000,0x2000000,0xb00000,0xc00000,0xd00000,0xe00000,0xf00000
+        set_upvalue(module.init,"process_base_u64",ffi.cast("uint64_t",base))
+        local memory={[base+0x36f38a0]=data,[data]=base+0x2618830,
+            [panel_owner.address]=base+0x261e0c8,[panel_owner.address+0x98]=0,
+            [pitch]=base+0x261eaa0,[pitch+0x98]=0,[pitch+0x88]=impl,
+            [impl+0x90]=root,[impl+0x98]=0,[root]=base+0x27bae88,[root+0xc]=263,
+            [pitch+0xb8]=card,[card+0xc]=263,[pitch+0x2a0]=3,[pitch+0x4e8]=0,
+            [data+0x1f8]=3,[data+0x568+3*16]=object,[object+0x30]=1234,
+            [0x110000]=base+0x27b5260,[0x11000c]=263}
+        snapshot.windows[1].task_parent=0xa00000
+        snapshot.windows[2]={address=pitch,impl=impl,root=0,presentation_root=root,enabled=true,task_parent=0xa00000}
+        snapshot.selected_members={[0x110000]=true};snapshot.cursor_members={[0x110000]=true}
+        a11y.game_plan_player_cache={["Nome real"]={name="Nome real",player_id=1234}}
+        a11y.menu_read=function(at) return memory[at] end
+        fn(memory,values,snapshot,a11y.ui_model.nodes[host.memory.hex(0x110000)],base,data,pitch,root)
+        set_upvalue(module.init,"process_base_u64",old_base)
+    end)
+end
+
+check("separate information panel resolves the native player's actual pitch slot",function()
+    with_information_panel_roster(function(memory,values,snapshot,node,base,data,pitch,root)
+        local context=assert(a11y.native_player_roster_context(node))
+        assert(context.section=="starter" and context.slot==0 and context.player_id==1234)
+        assert(a11y.player_component_section(node)=="starter")
+        assert(a11y.game_plan_player_section(node.text,node.key)=="starter")
+        assert(a11y.engine_focus_speech(node.text,node):find("Titular. 24  Nome real",1,true))
+        memory[pitch]=base+0x261f788;memory[data+0x1f8+11]=3
+        a11y.roster_limits={[pitch]={root=root,impl=0xc00000,side=0,limit=18}}
+        assert(a11y.native_player_roster_context(node).section=="reserve")
+        memory[pitch+0x4e8]=7;memory[data+0x1f8+18]=3
+        assert(a11y.native_player_roster_context(node).section=="unselected")
+        a11y.roster_limits=nil
+        assert(a11y.native_player_roster_context(node).section==nil,"unknown rule cannot invent a substitute status")
+    end)
+end)
+
+check("information panel rejects stale slot order wrong team hidden cards and unrelated windows",function()
+    with_information_panel_roster(function(memory,values,snapshot,node,base,data,pitch,root)
+        memory[data+0x1f8]=4
+        assert(not a11y.native_player_roster_context(node),"swap is not committed to both model and presentation yet")
+        memory[data+0x1f8]=3;memory[0xf00030]=5678
+        assert(not a11y.native_player_roster_context(node),"same name cannot lend a different player's slot")
+        memory[0xf00030]=1234;memory[pitch+0x98]=1
+        assert(not a11y.native_player_roster_context(node))
+        memory[pitch+0x98]=0;snapshot.windows[2].task_parent=0x990000
+        assert(not a11y.native_player_roster_context(node))
+        snapshot.windows[2].task_parent=0xa00000;memory[0xe0000c]=259
+        assert(not a11y.native_player_roster_context(node))
+        memory[0xe0000c]=263;memory[root+0xc]=259
+        assert(not a11y.native_player_roster_context(node))
+    end)
+end)
+
+check("information panel refuses duplicated player ids and ambiguous cached prefixes",function()
+    with_information_panel_roster(function(memory,values,snapshot,node,base,data,pitch)
+        memory[pitch+0xc0]=0xe01000;memory[0xe0100c]=263;memory[pitch+0x2a4]=3;memory[data+0x1f9]=3
+        assert(not a11y.native_player_roster_context(node))
+        memory[pitch+0xc0]=0
+        a11y.game_plan_player_cache["Nome"]={name="Nome",player_id=5678}
+        assert(not a11y.native_player_roster_context(node))
+    end)
+end)
+
+check("information panel status revalidates slot changes before Prism and retries without a text setter",function()
+    with_information_panel_roster(function(memory,values,snapshot,node,base,data,pitch,root)
+        memory[pitch]=base+0x261f788;memory[data+0x1f8+11]=3
+        a11y.roster_limits={[pitch]={root=root,impl=0xc00000,side=0,limit=18}}
+        with_focus_memory({},function(tick)
+            tick(120);tick(123)
+            memory[pitch+0x4e8]=7;memory[data+0x1f8+18]=3
+            with_render_harness(function(output)
+                a11y.flush_native_speech(100000);assert(#output==0,"queued substitute announcement is now obsolete")
+                tick(130);tick(133);a11y.flush_native_speech(100000)
+                assert(#output==1 and output[1][1]:find("Não relacionado.",1,true))
+                memory[pitch+0x4e8]=0
+                tick(140);tick(143);a11y.flush_native_speech(100000)
+                assert(#output==2 and output[2][1]:find("Reserva.",1,true))
+            end)
+        end)
+    end)
+end)
+
+check("compatibility focus retries the same player when actual squad status changes",function()
+    with_information_panel_roster(function(memory,values,snapshot,node,base,data,pitch,root)
+        a11y.game_plan_active=true;a11y.game_plan_context="Escalação/Editar posição"
+        local first=assert(a11y.game_plan_focus_speech(node.text,node.key))
+        assert(first:find("Titular.",1,true))
+        assert(not a11y.game_plan_focus_speech(node.text,node.key))
+        assert(a11y.offer_adapter_selection(first,"same-player",node.address))
+        memory[pitch]=base+0x261f788;memory[data+0x1f8+11]=3
+        a11y.roster_limits={[pitch]={root=root,impl=0xc00000,side=0,limit=18}}
+        local next_speech=assert(a11y.game_plan_focus_speech(node.text,node.key))
+        assert(next_speech:find("Reserva.",1,true))
+        with_render_harness(function(output)
+            a11y.flush_native_speech(100000);assert(#output==0)
+            assert(a11y.offer_adapter_selection(next_speech,"same-player",node.address))
+            a11y.flush_native_speech(100000)
+            assert(#output==1 and output[1][1]:find("Reserva.",1,true))
+            assert(not output[1][1]:find("Reserva. Reserva.",1,true))
+        end)
+    end)
+end)
+
+local function with_shared_cursor_caption(fn)
+    with_rendered_panel({[0x110000]={name="text",text="Comando atual",parent=0x500000}},function(values,snapshot,parents,owner)
+        local base=0x140000000
+        local old_base=upvalue(module.init,"process_base_u64")
+        set_upvalue(module.init,"process_base_u64",ffi.cast("uint64_t",base))
+        local cursor,group=0x400000,0x500000
+        local memory={[owner.root]=base+0x27bae88,[owner.root+0x190]=cursor,
+            [cursor]=base+0x27c1ac0,[cursor+0x88]=owner.root,[cursor+0x90]=0,[cursor+0x94]=1,
+            [owner.root+0x170]=0x600000,[owner.root+0x178]=0x600008,[0x600000]=group,
+            [group]=base+0x27b8d60,[group+0x170]=0x610000,[group+0x178]=0x610018,
+            [0x610000]=0x110000,[0x610008]=0x700000,[0x610010]=0x710000,
+            [0x110000]=base+0x27b5260,[0x11000c]=263,
+            [0x700000]=base+0x27b9038,[0x710000]=base+0x27b9038}
+        a11y.menu_read=function(at) return memory[at] end
+        local function refresh()
+            local members,detail=a11y.menu_cursor_texts(owner.root,base)
+            snapshot.windows[1].cursor_detail=detail
+            snapshot.selected_members=members or {};snapshot.cursor_members={[0x110000]=true}
+            return members,detail
+        end
+        refresh()
+        fn(memory,values,snapshot,refresh,cursor,group,base)
+        set_upvalue(module.init,"process_base_u64",old_base)
+    end)
+end
+
+check("icon cursor reads its live shared caption outside the selected subtree",function()
+    with_shared_cursor_caption(function(memory,values,snapshot,refresh,cursor)
+        local members,d=refresh()
+        assert(members[0x110000] and d.status=="shared-caption" and d.selected==0x700000)
+        with_focus_memory({},function(tick)
+            tick(120);tick(123)
+            assert(#speech_texts()==1 and speech_texts()[1]:find("Comando atual",1,true))
+            memory[cursor+0x94]=2;refresh()
+            tick(130);tick(133)
+            assert(#speech_texts()==2,"same caption on a different selected icon must still be a move")
+        end)
+    end)
+end)
+
+check("shared caption rejects ambiguous group text hidden labels and stale queued commands",function()
+    with_shared_cursor_caption(function(memory,values,snapshot,refresh,cursor,group,base)
+        memory[0x11000c]=259
+        assert(not refresh())
+        memory[0x11000c]=263
+        memory[group+0x178]=0x610020;memory[0x610018]=0x120000
+        memory[0x120000]=base+0x27b5260;memory[0x12000c]=263;values[0x120000]="Outro texto"
+        assert(not refresh(),"a group with two separate labels does not prove its caption")
+        memory[group+0x178]=0x610018;refresh()
+        with_focus_memory({},function(tick)
+            tick(120);tick(123)
+            memory[cursor+0x94]=2 -- cursor moved before the next snapshot/text setter
+            with_render_harness(function(output)
+                a11y.flush_native_speech(100000);assert(#output==0)
+                values[0x110000]="Novo comando";refresh()
+                a11y.poll_native_texts();tick(130);tick(133);a11y.flush_native_speech(100000)
+                assert(#output==1 and output[1][1]=="Novo comando")
+            end)
+        end)
+    end)
+end)
+
+local function with_controlled_player_panel(fn)
+    with_rendered_panel({[0x110000]={name="playerName",text="24  Anthoni Spier",parent=0x210000},
+        [0x120000]={name="text",text="Detalhe de fundo",parent=0x220000}},function(values,snapshot,parents,owner)
+        local base=0x140000000
+        local old_base=upvalue(module.init,"process_base_u64")
+        set_upvalue(module.init,"process_base_u64",ffi.cast("uint64_t",base))
+        local input=0xb00000
+        local memory={[owner.address]=base+0x261e0c8,[owner.address+0x98]=0,
+            [input]=base+0x2622c98,[input+0x98]=0,
+            [base+0x2622c98+0x100]=base+0x917a40,[base+0x2622c98+0x1a0]=base+0x917ee0,
+            [0x110000]=base+0x27b5260,[0x11000c]=263,[0x120000]=base+0x27b5260,[0x12000c]=263}
+        snapshot.windows[1].task_parent=0xa00000
+        snapshot.windows[2]={address=input,root=0xc00000,enabled=true,task_parent=0xa00000,
+            cursor_detail={group=0xd00000,selected=0xe00000,item_index=0,status="no-text"}}
+        a11y.menu_read=function(at) return memory[at] end
+        a11y.game_plan_player_cache={} -- names must not depend on decoded attributes/status
+        local function refresh() a11y.bind_controlled_player_captions(snapshot,base) end
+        refresh()
+        fn(memory,values,snapshot,refresh,base,input)
+        set_upvalue(module.init,"process_base_u64",old_base)
+    end)
+end
+
+check("native image selection reads the unique related player panel without a focus callback or cached player id",function()
+    with_controlled_player_panel(function(memory,values,snapshot,refresh)
+        assert(snapshot.selected_members[0x110000])
+        with_focus_memory({},function(tick)
+            a11y.record_engine_focus(0x120000,true)
+            tick(120);tick(123)
+            assert(#speech_texts()==1 and speech_texts()[1]:find("Anthoni Spier",1,true))
+            values[0x110000]="9  Matheus Bahia"
+            a11y.poll_native_texts(true);refresh()
+            snapshot.windows[2].cursor_detail.selected=0xe01000;refresh()
+            with_render_harness(function(output)
+                a11y.flush_native_speech(100000);assert(#output==0,"old player's name cannot survive navigation")
+                tick(130);tick(133);a11y.flush_native_speech(100000)
+                assert(#output==1 and output[1][1]:find("Matheus Bahia",1,true))
+                snapshot.windows[2].enabled=false;refresh()
+                a11y.reset_read_context("leave")
+                snapshot.windows[2].enabled=true;refresh()
+                a11y.engine_focus=nil;tick(140);tick(143);a11y.flush_native_speech(100000)
+                assert(#output==2,"reentry announces the same player")
+            end)
+        end)
+    end)
+end)
+
+check("controlled panel rejects another side unrelated Task unknown controller and hidden player",function()
+    with_controlled_player_panel(function(memory,values,snapshot,refresh,base,input)
+        local node=a11y.ui_model.nodes[host.memory.hex(0x110000)]
+        memory[input+0x98]=1
+        assert(not a11y.controlled_player_caption(node,snapshot,base))
+        memory[input+0x98]=0;snapshot.windows[2].task_parent=0x990000
+        assert(not a11y.controlled_player_caption(node,snapshot,base))
+        snapshot.windows[2].task_parent=0xa00000;memory[base+0x2622c98+0x100]=0
+        assert(not a11y.controlled_player_caption(node,snapshot,base))
+        memory[base+0x2622c98+0x100]=base+0x917a40;memory[0x11000c]=259
+        assert(not a11y.controlled_player_caption(node,snapshot,base))
+    end)
+end)
+
+local function with_native_player_details(fn)
+    with_controlled_player_panel(function(memory,values,snapshot,refresh,base,input)
+        local strings,old_string,old_name={},a11y.read_native_c_string,a11y.widget_internal_name
+        local data,object=0x2000000,0xf00000
+        memory[base+0x36f38a0]=data;memory[data]=base+0x2618830;memory[data+8]=2
+        memory[base+0x34a2048],memory[base+0x34a2050]=0x3000000,0x3000100
+        strings[0x3000000],strings[0x3000100]="playerInfo_0","playerInfo_1"
+        memory[data+0xba4],memory[data+0xba8]=0,0
+        memory[data+0x1f8]=3;memory[data+0x568+3*16]=object
+        memory[object+0x30]=1234;strings[object+0x38]="Anthoni Spier"
+        memory[object+4]=0x10000000 -- primary CB
+        memory[object+0x1c]=2*2^27+1*2^29 -- CB complete, LB partial
+        memory[object+0x20]=2 -- RB complete
+        memory[data+0xb34],memory[data+0xb38],memory[data+0xb4]=0,0,0
+        memory[data+0x18]=3 -- actual field role RB, different from primary CB
+        a11y.read_native_c_string=function(at) return strings[at] end
+        a11y.widget_internal_name=function(at) return at==0x210000 and "playerInfo_0" or old_name(at) end
+        refresh()
+        fn(memory,values,snapshot,refresh,base,data,object,input,strings)
+        a11y.read_native_c_string,a11y.widget_internal_name=old_string,old_name
+    end)
+end
+
+check("native player review separates name main secondary and actual field position",function()
+    with_native_player_details(function(memory,values,snapshot,refresh,base,data,object)
+        local node=assert(a11y.focused_player_node())
+        local record=assert(a11y.current_player_record(node))
+        assert(record.player_id==1234 and record.primary==1 and record.field_position==3)
+        local packet=assert(a11y.player_detail_packet())
+        assert(#packet.fields==4 and packet.fields[1].text=="24  Anthoni Spier")
+        assert(packet.fields[2].text=="Posição principal: Zagueiro central")
+        assert(packet.fields[3].text:find("Lateral esquerdo (adaptação parcial)",1,true))
+        assert(packet.fields[3].text:find("Lateral direito",1,true))
+        assert(not packet.fields[3].text:find("Zagueiro central",1,true))
+        assert(packet.fields[4].text=="Posição no campo: Lateral direito")
+        memory[data+0xba4]=11;memory[data+0x1f8+11]=3;refresh()
+        packet=a11y.player_detail_packet()
+        assert(packet.fields[4].text=="Não está no campo.")
+    end)
+end)
+
+check("K starts on name I reverses and changing native player resets the detail sequence",function()
+    with_native_player_details(function(memory,values,snapshot,refresh,base,data,object,input,strings)
+        with_render_harness(function(output)
+            a11y.read_buffer("next");a11y.flush_native_speech(100000)
+            a11y.read_buffer("next");a11y.flush_native_speech(100000)
+            a11y.read_buffer("next");a11y.flush_native_speech(100000)
+            a11y.read_buffer("next");a11y.flush_native_speech(100000)
+            a11y.read_buffer("previous");a11y.flush_native_speech(100000)
+            assert(#output==5 and output[1][1]=="24  Anthoni Spier")
+            assert(output[2][1]:find("Posição principal:",1,true))
+            assert(output[3][1]:find("Posições secundárias:",1,true))
+            assert(output[4][1]:find("Posição no campo:",1,true) and output[5][1]==output[3][1])
+            values[0x110000]="41  Victor Gabriel";strings[object+0x38]="Victor Gabriel";memory[object+0x30]=5678
+            a11y.poll_native_texts(true);snapshot.windows[2].cursor_detail.selected=0xe01000;refresh()
+            a11y.read_buffer("next");a11y.flush_native_speech(100000)
+            assert(output[#output][1]=="41  Victor Gabriel" and a11y.player_detail_review.index==1)
+            for _,entry in ipairs(output) do
+                assert(not entry[1]:find("Titular",1,true) and not entry[1]:find("Reserva",1,true)
+                    and not entry[1]:find("Não relacionado",1,true))
+            end
+        end)
+    end)
+end)
+
+check("empty secondary positions are omitted and field roles follow native formation changes",function()
+    with_native_player_details(function(memory,values,snapshot,refresh,base,data,object)
+        memory[object+0x1c],memory[object+0x20]=2*2^27,0
+        local packet=a11y.player_detail_packet()
+        assert(#packet.fields==3 and packet.fields[3].key=="field")
+        memory[data+0xb34]=1;memory[data+0xa0+0xb4]=1;memory[data+0xb38]=2
+        memory[data+0x18+0xa0+2*0x21]=8
+        assert(a11y.current_player_record(packet.node).field_position==8)
+        memory[data+0xb38]=3
+        assert(a11y.player_detail_packet().fields[3].text=="Posição no campo indisponível.")
+        memory[data+0xba4]=0xff
+        packet=a11y.player_detail_packet()
+        assert(packet.fields[2].text=="Posição principal indisponível.")
+        assert(packet.fields[3].text~="Não está no campo.","unknown slot is not a bench slot")
+    end)
+end)
+
+check("review rejects queued field values and names from an obsolete native player record",function()
+    with_native_player_details(function(memory,values,snapshot,refresh,base,data,object)
+        with_render_harness(function(output)
+            a11y.read_buffer("next");a11y.read_buffer("next")
+            memory[object+4]=3*0x10000000
+            a11y.flush_native_speech(100000)
+            for _,entry in ipairs(output) do assert(not entry[1]:find("Zagueiro central",1,true)) end
+            output[1]=nil
+            a11y.read_buffer("repeat");a11y.flush_native_speech(100000)
+            assert(output[1][1]=="Posição principal: Lateral direito")
+            a11y.read_buffer("next")
+            values[0x110000]="Outro jogador"
+            a11y.flush_native_speech(100000)
+            assert(#output==1)
+            a11y.read_context.kind="dialog"
+            assert(not a11y.read_player_details("next"))
+        end)
+    end)
+end)
+
+check("right stick down and up equal K and I and held input does not duplicate review",function()
+    with_native_player_details(function()
+        with_render_harness(function(output)
+            module.global_gamepad_input({},{RSy=-1});a11y.flush_native_speech(100000)
+            module.global_gamepad_input({},{RSy=-1});a11y.flush_native_speech(100000)
+            assert(#output==1 and output[1][1]=="24  Anthoni Spier")
+            module.global_gamepad_input({},{RSy=0})
+            module.global_gamepad_input({},{RSy=-1});a11y.flush_native_speech(100000)
+            assert(#output==2 and output[2][1]:find("Posição principal:",1,true))
+            module.global_gamepad_input({},{RSy=0})
+            module.global_gamepad_input({},{RSy=1});a11y.flush_native_speech(100000)
+            assert(#output==3 and output[3][1]=="24  Anthoni Spier")
+        end)
+    end)
+end)
+
+check("native panel supplies navigation status without the old player cache",function()
+    with_native_player_details(function(memory,values,snapshot,refresh,base,data,object)
+        local pitch,impl,root,card=0x4100000,0x4200000,0x4300000,0x4400000
+        memory[pitch]=base+0x261eaa0;memory[pitch+0x98]=0;memory[pitch+0x88]=impl
+        memory[impl+0x90]=root;memory[impl+0x98]=0
+        memory[root]=base+0x27bae88;memory[root+0xc]=263
+        memory[pitch+0xb8]=card;memory[card+0xc]=263;memory[pitch+0x2a0]=3;memory[pitch+0x4e8]=0
+        snapshot.windows[3]={address=pitch,impl=impl,root=0,presentation_root=root,enabled=true,task_parent=0xa00000}
+        local node=assert(a11y.focused_player_node())
+        assert(next(a11y.game_plan_player_cache)==nil)
+        assert(a11y.native_player_roster_context(node).section=="starter")
+        assert(a11y.engine_focus_speech(node.text,node):find("Titular. 24  Anthoni Spier",1,true))
+        memory[pitch]=base+0x261f788;memory[data+0xba4]=11;memory[data+0x1f8+11]=3
+        memory[data+8]=4 -- native fixed rule branch, not a guessed bench length
+        assert(a11y.native_player_roster_context(node).section=="reserve")
+        assert(a11y.engine_focus_speech(node.text,node):find("Reserva.",1,true))
+        memory[pitch+0x4e8]=12;memory[data+0xba4]=23;memory[data+0x1f8+23]=3
+        assert(a11y.native_player_roster_context(node).section=="unselected")
+        assert(a11y.engine_focus_speech(node.text,node):find("Não relacionado.",1,true))
+        assert(a11y.player_detail_packet().fields[4].text=="Não está no campo.")
+        memory[data+8]=0;a11y.roster_limits=nil
+        assert(a11y.native_player_roster_context(node).section==nil)
+    end)
+end)
+
+check("review drops a replaced native player even when its displayed name is identical",function()
+    with_native_player_details(function(memory,values,snapshot,refresh,base,data,object)
+        with_render_harness(function(output)
+            a11y.read_buffer("next")
+            memory[object+0x30]=5678
+            a11y.flush_native_speech(100000);assert(#output==0)
+            a11y.read_buffer("next");a11y.flush_native_speech(100000)
+            assert(#output==1 and output[1][1]=="24  Anthoni Spier" and a11y.player_detail_review.index==1)
+        end)
+    end)
+end)
+
+check("live rule lookup validates the native default configuration instead of a fixed bench size",function()
+    with_native_player_details(function(memory,values,snapshot,refresh,base,data)
+        memory[base+0x3704e38]=0x3100000;memory[0x31000f0]=0
+        memory[base+0x34fc9c0]=0;memory[base+0x3705e10]=0x3200000
+        memory[0x3200050]=0x3300000;memory[0x3300000+0x35993]=18
+        assert(a11y.live_roster_limit(data)==18)
+        memory[0x3300000+0x35993]=23
+        assert(a11y.live_roster_limit(data)==23)
+        memory[base+0x34fc9c0]=7
+        assert(not a11y.live_roster_limit(data),"database rules need their own proven lookup")
+        memory[data+8]=0
+        assert(not a11y.live_roster_limit(data),"native zero does not invent a boundary")
+        memory[data+8]=4
+        assert(a11y.live_roster_limit(data)==23)
+    end)
+end)
 
 print("FLACCESS_OFFLINE_TESTS_OK checks=" .. checks ..
     " pt=" .. a11y.text_asset_counts.pt ..

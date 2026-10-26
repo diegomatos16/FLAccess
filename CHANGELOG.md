@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.8 - 2026-10-26
+
+- Corrigidos bugs na leitura de alguns menus e implementado suporte inicial
+  à leitura de jogadores no plano de jogo.
+- Revisão do jogador com I/K e analógico direito: nome, posição principal,
+  secundárias completas/parciais e posição no campo.
+- Incluídas as DLLs compatíveis do Sider e Prism no repositório e no instalador;
+  empacotamento passa a exigir ambas em todas as publicações.
+- Base dev 25 preservada; confirmações audíveis e pendências registradas nas
+  notas da versão. Testes internos não encerram relatos reais.
+
 ## 0.1.7 - 2026-10-21
 
 - Consolidate native component ownership, shared focus/name/value/context

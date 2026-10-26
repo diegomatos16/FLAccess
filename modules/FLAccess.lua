@@ -1,6 +1,6 @@
 local m = {}
 
-local VERSION = "0.1.7"
+local VERSION = "0.1.8"
 local DEBUG_TRACE = false
 local RESOLVED_TEXT_RVA = 0x1496a3c
 local SLIDER_INIT_RVA = 0xe59f80
@@ -13,9 +13,10 @@ local GAME_TEXT_LANGUAGE_SET_RVA = 0xb22a50
 local COMMENTARY_LANGUAGE_SET_RVA = 0xb229f0
 local GAME_TEXT_LANGUAGE_NAV_RVA = 0xb22871
 local a11y = {
-    build = 21,
+    build = 25,
     runtime_version = VERSION,
     keyboard_echo_insertions = false,
+    player_secondary_partial = true,
     previous_option_key = 0x36, -- 6
     next_option_key = 0x37, -- 7
     restore_key = 0x38, -- 8
@@ -2451,6 +2452,8 @@ function a11y.speech_entry_allowed(entry)
         and (not entry.reading_selection or a11y.reading_selection_delivery_allowed(entry.reading_selection))
         and (not entry.page_context or a11y.page_delivery_allowed(entry.page_context))
         and (not entry.selection_result or a11y.selection_result_allowed(entry.selection_result))
+        and (not entry.roster_review or a11y.roster_review_allowed(entry.roster_review))
+        and (not entry.player_details or a11y.player_details_allowed(entry.player_details))
 end
 
 function a11y.flush_native_speech(now_ms)
@@ -3472,7 +3475,13 @@ function a11y.selection_result(request)
         origin=address and a11y.capture_speech_origin(address),
         value_origin=row and row.value_widget and a11y.capture_speech_origin(row.value_widget),
         missing={}}
+    result.roster=a11y.native_player_roster_context(node)
+    result.caption_binding=address and a11y.native_caption_selection_identity(address)
     if row and value==nil then result.missing[#result.missing+1]="value" end
+    result.player_parts={}
+    for _,part in ipairs(a11y.player_row_details(node)) do
+        result.player_parts[#result.player_parts+1]=a11y.capture_speech_origin(part.address)
+    end
     result.signature=a11y.selection_result_signature(result)
     return result
 end
@@ -3481,6 +3490,8 @@ function a11y.selection_result_signature(result)
     return tostring(result.owner) .. ":" .. tostring(result.generation) .. ":"
         .. result.identity .. ":" .. result.text .. ":" .. (result.page and result.page.identity or "")
         .. ":" .. (result.assignment and result.assignment.identity or "")
+        .. ":" .. (result.roster and result.roster.identity or "")
+        .. ":" .. (result.caption_binding or "")
 end
 
 function a11y.selection_result_allowed(result)
@@ -3490,6 +3501,10 @@ function a11y.selection_result_allowed(result)
     if context.selection_result and context.selection_result.signature~=result.signature then return false end
     if result.origin and not a11y.speech_origin_allowed(result.origin) then return false end
     if result.value_origin and not a11y.speech_origin_allowed(result.value_origin) then return false end
+    for _,origin in ipairs(result.player_parts or {}) do
+        if not a11y.speech_origin_allowed(origin)
+                or a11y.read_native_rendered_text(origin.address)~=origin.text then return false end
+    end
     for _,origin in ipairs({result.origin or false,result.value_origin or false}) do
         if origin and origin.text then
             local current=a11y.read_native_rendered_text(origin.address)
@@ -3501,6 +3516,9 @@ function a11y.selection_result_allowed(result)
     if (result.page and result.page.identity or nil)~=(current_page and current_page.identity or nil) then return false end
     local assignment=a11y.native_assignment_context(result.widget)
     if (result.assignment and result.assignment.identity or nil)~=(assignment and assignment.identity or nil) then return false end
+    local roster=a11y.native_player_roster_context(result.node)
+    if (result.roster and result.roster.identity or nil)~=(roster and roster.identity or nil) then return false end
+    if result.caption_binding~=(result.widget and a11y.native_caption_selection_identity(result.widget)) then return false end
     if result.node and result.key and result.source=="engine-focus"
             and a11y.engine_selection_identity(result.key,result.node)~=result.identity then return false end
     return true
@@ -3748,6 +3766,8 @@ function a11y.entity_review_entries(nodes)
             or a11y.read_native_rendered_text(item.widget)~=item.text then return nil end
     local selected=snapshot and snapshot.members and snapshot.members[item.widget]
     if not selected or not selected.active then return nil end
+    local anchor=a11y.ui_model.nodes[memory.hex(item.widget)]
+    local review={nodes={anchor},anchor=anchor,identity=item.committed,list_identity=item.committed}
     local windows={}
     for _,entry in ipairs(selected.owners or {}) do if entry.enabled then windows[entry.address]=true end end
     local players,roots={},{}
@@ -3763,31 +3783,129 @@ function a11y.entity_review_entries(nodes)
             if root then roots[root]=true;players[#players+1]=node end
         end
     end
-    if #players==0 then return {item.text} end
+    if #players==0 then return {item.text},review end
     local root
-    for value in pairs(roots) do if root then return {item.text} end;root=value end
+    for value in pairs(roots) do if root then return {item.text},review end;root=value end
     local heading
     for _,node in ipairs(nodes) do
         if (node.name=="text_title" or node.name=="title" or node.name=="listHeader" or node.name=="header")
                 and belongs(node,root) then
-            if heading and heading~=node.text then heading=false;break end
-            heading=node.text
+            if heading and heading.text~=node.text then heading=false;break end
+            heading=node
         end
     end
     local result,seen={item.text},{[item.text]=true}
-    if heading and not seen[heading] then result[#result+1],seen[heading]=heading,true end
-    for _,node in ipairs(players) do
-        if not seen[node.text] then result[#result+1],seen[node.text]=node.text,true end
+    if heading and not seen[heading.text] then
+        result[#result+1],seen[heading.text]=heading.text,true
+        review.nodes[#result]=heading
     end
-    return result
+    for _,node in ipairs(players) do
+        if not a11y.empty_selection_caption(node.text) then
+            result[#result+1]=node.text
+            review.nodes[#result]=node
+        end
+    end
+    return result,review
+end
+
+-- Review a player list through the same indexed rows as its native cursor.
+-- Repeated names stay separate; a detail panel or a second team cannot join it.
+function a11y.player_list_review_entries(nodes)
+    local snapshot=a11y.native_windows
+    if not snapshot or a11y.keyboard_window or a11y.read_context_state().kind=="dialog" then return nil end
+    local found
+    for _,window in ipairs(snapshot.windows or {}) do
+        local d=window.cursor_detail
+        if window.enabled and d and d.group and d.selected then
+            local rows,anchor={},nil
+            for index=0,255 do
+                local row=a11y.menu_child(d.group,index)
+                if not row or row<0x10000 then break end
+                rows[row]=index
+            end
+            local entries={}
+            for _,node in ipairs(nodes) do
+                if node.name=="playerName" and not a11y.empty_selection_caption(node.text) then
+                    local member=snapshot.members[tonumber(node.address)]
+                    local index,ambiguous
+                    for _,owner in ipairs(member and member.owners or {}) do
+                        if owner.enabled and owner.address==window.address and owner.root==window.root then
+                            local at,seen=tonumber(node.address),{}
+                            for _=1,12 do
+                                at=owner.parents and owner.parents[at]
+                                if not at or seen[at] then break end
+                                seen[at]=true
+                                if rows[at]~=nil then
+                                    if index and index~=rows[at] then ambiguous=true end
+                                    index=rows[at]
+                                    if at==d.selected then anchor=node end
+                                    break
+                                end
+                            end
+                        end
+                    end
+                    if index and not ambiguous then
+                        if entries[index] and entries[index]~=node then return nil end
+                        entries[index]=node
+                    end
+                end
+            end
+            if anchor then
+                if found then return nil end
+                local texts,ordered={},{}
+                for index=0,255 do
+                    local node=entries[index]
+                    if node then
+                        texts[#texts+1]=a11y.engine_focus_speech(node.text,node)
+                        ordered[#ordered+1]=node
+                    end
+                end
+                found={texts=texts,nodes=ordered,anchor=anchor,
+                    selection={window=window.address,root=window.root,group=d.group,selected=d.selected},
+                    identity=tostring(window.address) .. ":" .. tostring(d.group) .. ":" .. anchor.identity .. ":" .. anchor.text}
+            end
+        end
+    end
+    if found then return found.texts,found end
+end
+
+function a11y.roster_review_allowed(review)
+    if review.generation~=a11y.read_context_state().generation then return false end
+    if review.selection then
+        local found=false
+        for _,window in ipairs(a11y.native_windows and a11y.native_windows.windows or {}) do
+            local d=window.cursor_detail
+            if window.enabled and window.address==review.selection.window and window.root==review.selection.root
+                    and d and d.group==review.selection.group and d.selected==review.selection.selected then found=true end
+        end
+        if not found then return false end
+    end
+    for _,origin in ipairs({review.origin,review.anchor}) do
+        if not a11y.speech_origin_allowed(origin)
+                or a11y.read_native_rendered_text(origin.address)~=origin.text then return false end
+    end
+    local node=a11y.ui_model.nodes[memory.hex(review.origin.address)]
+    if not node or a11y.engine_selection_identity(node.key,node)~=review.identity then return false end
+    for _,origin in ipairs(review.parts) do
+        if not a11y.speech_origin_allowed(origin)
+                or a11y.read_native_rendered_text(origin.address)~=origin.text then return false end
+    end
+    if review.list_identity then
+        local item=a11y.native_list_selection
+        if not item or item.committed~=review.list_identity then return false end
+    end
+    return true
 end
 
 function a11y.buffer_entries()
     -- A review request reads the current rendered panel, including companion
     -- lists, rather than the previous entity's cached captions.
     a11y.poll_native_texts(true)
-    local entity=a11y.entity_review_entries(a11y.presented_nodes())
-    if entity then return entity end
+    local nodes=a11y.presented_nodes()
+    local entity,entity_review=a11y.entity_review_entries(nodes)
+    if entity then return entity,entity_review end
+    local players,review=a11y.player_list_review_entries(nodes)
+    if players then return players,review end
     local context = a11y.read_context_state()
     local result, seen = {}, {}
     local function add(text)
@@ -3834,8 +3952,11 @@ end
 
 function a11y.read_buffer(action)
     if not game_is_foreground() or overlay_visible or sider_overlay_visible then return false end
+    if a11y.read_player_details(action) then return true end
+    local entries,review = a11y.buffer_entries()
     local context = a11y.read_context_state()
-    local entries = a11y.buffer_entries()
+    if review and context.review_identity~=review.identity then context.cursor=1 end
+    context.review_identity=review and review.identity
     if #entries > 0 then
         if context.cursor > #entries then context.cursor = 1 end
         if action == "next" then context.cursor = context.cursor % #entries + 1 end
@@ -3847,7 +3968,17 @@ function a11y.read_buffer(action)
     modal_focus_hold_until_ms = 0
     a11y.title_pending_first_item = nil
     a11y.deferred_modal_announcement = nil
-    speak(text, true, true)
+    local node=review and review.nodes[context.cursor]
+    local before=a11y.native_speech_last
+    context.review_sequence=(context.review_sequence or 0)+1
+    speak(text, true, true,"review:" .. tostring(context.generation) .. ":" .. tostring(context.review_sequence),node and node.address)
+    if node and review.anchor then
+        local origin={origin=a11y.capture_speech_origin(node.address),anchor=a11y.capture_speech_origin(review.anchor.address),
+            generation=context.generation,identity=a11y.engine_selection_identity(node.key,node),
+            list_identity=review.list_identity,selection=review.selection,parts={}}
+        for _,part in ipairs(a11y.player_row_details(node)) do origin.parts[#origin.parts+1]=a11y.capture_speech_origin(part.address) end
+        for index=before+1,a11y.native_speech_last do a11y.native_speech_queue[index].roster_review=origin end
+    end
     return true
 end
 
@@ -3892,7 +4023,14 @@ function a11y.buffer_key(vkey)
 end
 
 function a11y.review_right_stick(direction)
-    if not a11y.attribute_review_available() then return false end
+    if direction==0 then a11y.player_review_stick_direction=nil;return false end
+    local player=a11y.focused_player_node()
+    if not player and not a11y.attribute_review_available() then a11y.player_review_stick_direction=nil;return false end
+    if player then
+        if a11y.player_review_stick_direction==direction then return true end
+        a11y.player_review_stick_direction=direction
+        return a11y.read_buffer(direction<0 and "previous" or "next")
+    end
     local now = tonumber(ffi.C.GetTickCount64())
     if a11y.review_stick_direction == direction and now - (a11y.review_stick_ms or 0) < 120 then return true end
     a11y.review_stick_direction, a11y.review_stick_ms = direction, now
@@ -4120,11 +4258,19 @@ end
 
 function a11y.menu_tree(root, base)
     local members, visited, queue, cursor, parents = {}, {}, {root}, 1, {}
+    local queued,limit = {[root]=true},2048
+    local truncated=false
+    local function enqueue(child,parent)
+        if not child or child<0x10000 or queued[child] then return end
+        if #queue>=limit then truncated=true;return end
+        queued[child],parents[child]=true,parent
+        queue[#queue+1]=child
+    end
     local frontier = {}
     -- RTTI-proven NodeBasicNodeBase and inline NodeRectHolder layouts.
     -- NodeRectText and arbitrary NodeRect subclasses do not share these.
     local containers, holders = a11y.native_layout.containers, a11y.native_layout.holders
-    while cursor <= #queue and cursor <= 600 do
+    while cursor <= #queue do
         local node = queue[cursor]
         cursor = cursor + 1
         if not visited[node] then
@@ -4146,20 +4292,14 @@ function a11y.menu_tree(root, base)
                         and a11y.menu_read(vtable+0x28,"u64")==base+0xe8ecb0 then
                     linked=a11y.menu_read(node+0x98,"u64")
                 end
-                if linked and linked >= 0x10000 and not visited[linked] and #queue < 600 then
-                    parents[linked] = parents[linked] or node
-                    queue[#queue+1] = linked
-                end
+                enqueue(linked,node)
                 if not linked and not holders[rva] and not containers[rva]
                         and rva~=0x27b5260 and rva~=0x27c3a38 and #frontier<6 then
                     frontier[#frontier+1]={address=node,rva=rva}
                 end
                 if holders[rva] then
                     for _, child in ipairs(a11y.menu_holder_children(node+0x98)) do
-                        if not visited[child] and #queue < 600 then
-                            parents[child] = parents[child] or node
-                            queue[#queue+1] = child
-                        end
+                        enqueue(child,node)
                     end
                 end
                 if containers[rva] then
@@ -4169,16 +4309,14 @@ function a11y.menu_tree(root, base)
                             and (last - first) % 8 == 0 and last - first <= 2048 then
                         for at = first, last - 8, 8 do
                             local child = a11y.menu_read(at, "u64")
-                            if child and child >= 0x10000 and not visited[child]
-                                    and #queue < 600 then parents[child] = parents[child] or node
-                            queue[#queue + 1] = child end
+                            enqueue(child,node)
                         end
                     end
                 end
             end
         end
     end
-    return members, parents, {visited=cursor-1,queued=#queue,at_capacity=#queue>=600,frontier=frontier}
+    return members, parents, {visited=cursor-1,queued=#queue,at_capacity=truncated,frontier=frontier}
 end
 
 function a11y.menu_child(container, index)
@@ -4211,7 +4349,131 @@ function a11y.menu_cursor_texts(root, base)
     detail.parents=parents
     detail.status = "no-text"
     for _ in pairs(members) do detail.status="resolved"; return members,detail end
+    -- Some cursor groups select icons and render their current caption as a
+    -- direct text child of the group (8f0366..8f03f2), outside the icon subtree.
+    -- Only one live, non-decorative sibling can supply that shared caption.
+    local group_members,group_parents=a11y.menu_tree(group,base)
+    local caption
+    for address in pairs(group_members) do
+        if group_parents[address]==group and a11y.menu_node_active(address,base)==true
+                and a11y.widget_internal_name(address)~="padIcon" then
+            local text=a11y.read_native_rendered_text(address)
+            if text and not a11y.empty_selection_caption(text) and not text:match("^%d+$")
+                    and not a11y.unresolved_format(text) and not is_noninteractive_text(text) then
+                if caption then return nil,detail end
+                caption=address
+            end
+        end
+    end
+    if caption then
+        detail.shared_caption,detail.status=caption,"shared-caption"
+        detail.parents[caption]=group
+        return {[caption]=true},detail
+    end
     return nil,detail
+end
+
+function a11y.cursor_caption_identity(window,detail)
+    if window.impl then
+        local flags=a11y.menu_read(window.impl+9,"u8")
+        if a11y.menu_read(window.address+0x88,"u64")~=window.impl or not flags or flags%2~=1
+                or a11y.menu_read(window.impl+0x98,"u64")~=window.root then return nil end
+    end
+    if detail.cursor and detail.cursor>=0x10000 then
+        local parent=a11y.menu_read(detail.cursor+0x88,"u64")
+        local group_index=a11y.menu_read(detail.cursor+0x90,"u32")
+        local item_index=a11y.menu_read(detail.cursor+0x94,"u32")
+        local group=parent and group_index and a11y.menu_child(parent,group_index)
+        local selected=group and item_index and a11y.menu_child(group,item_index)
+        if a11y.menu_read(window.root+0x190,"u64")~=detail.cursor
+                or group~=detail.group or selected~=detail.selected or item_index~=detail.item_index then return nil end
+    end
+    return table.concat({window.address,window.root,detail.group,detail.selected,detail.item_index or -1},":")
+end
+
+-- SelectBase and ParameterPlayerInfo share a side/Task relationship. The
+-- selected card is image-only; the native parameter panel supplies its name.
+-- Recognize the shared controller methods, not a translated screen title.
+function a11y.controlled_player_caption(node,snapshot,base)
+    if not node or node.name~="playerName" or not snapshot or not snapshot.members then return nil end
+    local member=snapshot.members[tonumber(node.address)]
+    if not member or not member.active or a11y.menu_node_active(node.address,base)~=true
+            or not a11y.ui_node_matches_live(node) or a11y.read_native_rendered_text(node.address)~=node.text
+            or a11y.empty_selection_caption(node.text) then return nil end
+    local windows={}
+    for _,window in ipairs(snapshot.windows or {}) do windows[window.address]=window end
+    local result
+    for _,owner in ipairs(member.owners or {}) do
+        local panel=windows[owner.address]
+        local vt=panel and panel.enabled and a11y.menu_read(panel.address,"u64")
+        if owner.enabled and vt==base+0x261e0c8 and panel.task_parent then
+            local unique=0
+            for _,other in pairs(a11y.ui_model.names.playerName or {}) do
+                local other_member=snapshot.members[tonumber(other.address)]
+                if other_member and other_member.active and a11y.menu_node_active(other.address,base)==true then
+                    for _,other_owner in ipairs(other_member.owners or {}) do
+                        if other_owner.enabled and other_owner.address==panel.address then unique=unique+1;break end
+                    end
+                end
+            end
+            local side=a11y.menu_read(panel.address+0x98,"u32")
+            if unique==1 and (side==0 or side==1) then
+                for _,window in ipairs(snapshot.windows) do
+                    local d=window.cursor_detail
+                    local controller=window.enabled and a11y.menu_read(window.address,"u64")
+                    if controller and d and d.status=="no-text" and d.group and d.selected
+                            and window.task_parent==panel.task_parent
+                            and a11y.menu_read(window.address+0x98,"u32")==side
+                            and a11y.menu_read(controller+0x100,"u64")==base+0x917a40
+                            and a11y.menu_read(controller+0x1a0,"u64")==base+0x917ee0 then
+                        local cursor_identity=a11y.cursor_caption_identity(window,d)
+                        if cursor_identity then
+                            local identity=cursor_identity .. ":panel=" .. panel.address .. ":side=" .. side
+                            if result and result.identity~=identity then return nil end
+                            result={identity=identity,window=window.address,panel=panel.address,side=side}
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return result
+end
+
+function a11y.bind_controlled_player_captions(snapshot,base)
+    for address in pairs(snapshot.controlled_selections or {}) do
+        snapshot.selected_members[address],snapshot.cursor_members[address]=nil,nil
+    end
+    snapshot.controlled_selections={}
+    for _,node in pairs(a11y.ui_model and a11y.ui_model.names.playerName or {}) do
+        local binding=a11y.controlled_player_caption(node,snapshot,base)
+        if binding then
+            local address=tonumber(node.address)
+            snapshot.selected_members[address],snapshot.cursor_members[address]=true,true
+            snapshot.controlled_selections[address]=binding
+            -- Other fields in this controlled panel are presentation, not
+            -- additional choices created by propagated text focus events.
+            for other,member in pairs(snapshot.members) do
+                for _,owner in ipairs(member.owners or {}) do
+                    if owner.address==binding.panel then snapshot.cursor_members[other]=true;break end
+                end
+            end
+        end
+    end
+end
+
+function a11y.native_caption_selection_identity(address)
+    local snapshot=a11y.native_windows
+    local binding=snapshot and snapshot.controlled_selections and snapshot.controlled_selections[tonumber(address)]
+    if binding then
+        local node=a11y.ui_model and a11y.ui_model.nodes[memory.hex(address)]
+        local current=a11y.controlled_player_caption(node,snapshot,tonumber(process_base_u64))
+        return current and current.identity
+    end
+    for _,window in ipairs(snapshot and snapshot.windows or {}) do
+        local d=window.cursor_detail
+        if window.enabled and d and d.shared_caption==tonumber(address) then return a11y.cursor_caption_identity(window,d) end
+    end
 end
 
 -- Shared NodeRectText event dispatcher. Record only; speech runs next frame.
@@ -4283,6 +4545,11 @@ function a11y.engine_focus_candidates()
     end
     table.sort(cursor_keys)
     local cursor_identity=table.concat(cursor_keys,",")
+    for _,key in ipairs(cursor_keys) do
+        local node=a11y.ui_model and a11y.ui_model.nodes[key]
+        local binding=node and a11y.native_caption_selection_identity(node.address)
+        if binding then cursor_identity=cursor_identity .. ":caption=" .. binding end
+    end
     local owner=a11y.native_owner_token()
     if state and state.owner ~= owner then state=nil; a11y.engine_focus=nil end
     if not state and #cursor_keys>0 then
@@ -4358,6 +4625,18 @@ function a11y.engine_focus_candidates()
         local node=a11y.ui_model.nodes[candidate.key]
         local packet=node.owner_link and (tostring(node.owner_link) .. ":" .. tostring(candidate.edge))
         local detail=false
+        if node.name=="noSetting" or node.name=="allOver" then
+            local labels=0
+            for _,other in ipairs(candidates) do
+                local label=a11y.ui_model.nodes[other.key]
+                if other.edge==candidate.edge and label.name=="playerName" then
+                    for _,part in ipairs(a11y.player_row_details(label)) do
+                        if part==node then labels=labels+1 end
+                    end
+                end
+            end
+            detail=labels==1
+        end
         if node.name=="description" or (node.name and node.name:match("^description_%d+$")) then
             local labels=0
             for _,other in ipairs(candidates) do
@@ -4469,7 +4748,14 @@ end
 function a11y.engine_selection_identity(key,node)
     local row=a11y.control_for_widget(key)
     local identity=a11y.ui_focus_identity(key,node.text)
+    local binding=a11y.native_caption_selection_identity(node.address)
+    if binding then identity=identity .. ":caption=" .. binding end
     if row and row.is_control then identity=identity .. ":value=" .. (row.value or "") end
+    for _,part in ipairs(a11y.player_row_details(node)) do
+        identity=identity .. ":part=" .. part.identity .. ":" .. part.text
+    end
+    local roster=a11y.native_player_roster_context(node)
+    if roster then identity=identity .. ":panel-roster=" .. roster.identity end
     local page=a11y.native_page_context(node.address)
     if page then identity=identity .. ":page=" .. page.identity end
     local assignment=a11y.native_assignment_context(node.address)
@@ -4741,6 +5027,14 @@ end
 
 function a11y.component_link_capture_lines(snapshot)
     local lines,seen={},{}
+    local caption_count=0
+    for address in pairs(snapshot and snapshot.selected_members or {}) do
+        local binding=a11y.native_caption_selection_identity(address)
+        if binding and caption_count<32 then
+            caption_count=caption_count+1
+            lines[#lines+1]=string.format("CAPTION_SELECTION widget=%s identity=%q",tostring(address),binding)
+        end
+    end
     local result=a11y.read_context and a11y.read_context.selection_result
     if result then
         lines[#lines+1]=string.format("RESULT source=%q widget=%s generation=%s label=%q value=%q value_known=%s page=%q status=%q missing=%q",
@@ -4777,15 +5071,41 @@ function a11y.component_link_capture_lines(snapshot)
         end
         if vt and (vt==base+0x261eaa0 or vt==base+0x261f788) then
             local bound=a11y.roster_limits and a11y.roster_limits[window.address]
-            lines[#lines+1]=string.format("ROSTER window=%s type=%s root=%s input=%s side=%s scroll=%s boundary=%s boundary_root=%s",
+            local presentation=a11y.roster_presentation_root(window.address)
+            lines[#lines+1]=string.format("ROSTER window=%s type=%s root=%s input=%s side=%s scroll=%s boundary=%s boundary_root=%s presentation=%s",
                 tostring(window.address),tostring(vt),tostring(window.root),tostring(window.enabled),
                 tostring(a11y.menu_read(window.address+0x98,"u32")),
-                tostring(a11y.menu_read(window.address+0x4e8,"u32")),tostring(bound and bound.limit),tostring(bound and bound.root))
+                tostring(a11y.menu_read(window.address+0x4e8,"u32")),tostring(bound and bound.limit),tostring(bound and bound.root),tostring(presentation))
             for index=0,(vt==base+0x261eaa0 and 10 or 11) do
-                lines[#lines+1]=string.format("SLOT window=%s index=%d card=%s selection_card=%s",
+                local data=a11y.menu_read(base+0x36f38a0,"u64")
+                local side=a11y.menu_read(window.address+0x98,"u32")
+                local record=a11y.menu_read(window.address+0x2a0+index*4,"u32")
+                local object=data and a11y.menu_read(data,"u64")==base+0x2618830
+                    and (side==0 or side==1) and record and record<40
+                    and a11y.menu_read(data+side*0x340+0x568+record*16,"u64")
+                local id=object and object>=0x10000 and a11y.menu_read(object+0x30,"u32")
+                lines[#lines+1]=string.format("SLOT window=%s index=%d card=%s selection_card=%s record=%s player_object=%s player_id=%s",
                     tostring(window.address),index,tostring(a11y.menu_read(window.address+0xb8+index*8,"u64")),
-                    tostring(a11y.menu_read(window.address+0x118+index*8,"u64")))
+                    tostring(a11y.menu_read(window.address+0x118+index*8,"u64")),tostring(record),tostring(object),tostring(id))
             end
+        end
+    end
+    for address in pairs(snapshot and snapshot.members or {}) do
+        local node=a11y.ui_model and a11y.ui_model.nodes[memory.hex(address)]
+        local player=node and a11y.current_player_record(node)
+        if player then
+            local positions={}
+            for _,entry in ipairs(player.secondary or {}) do positions[#positions+1]=entry.position .. ":" .. entry.level end
+            lines[#lines+1]=string.format("PLAYER_DATA widget=%s object=%s player_id=%s slot=%s side=%s primary=%s secondary=%q field=%s mode=%s limit=%s identity=%q",
+                tostring(address),tostring(player.object),tostring(player.player_id),tostring(player.slot),tostring(player.side),
+                tostring(player.primary),table.concat(positions,","),tostring(player.field_position),
+                tostring(a11y.menu_read(player.data+8,"u32")),tostring(a11y.live_roster_limit(player.data)),player.identity)
+        end
+        local roster=node and a11y.native_player_roster_context(node)
+        if roster then
+            lines[#lines+1]=string.format("PLAYER_PANEL widget=%s window=%s slot=%s side=%s player_id=%s section=%q identity=%q",
+                tostring(address),tostring(roster.window),tostring(roster.slot),tostring(roster.side),
+                tostring(roster.player_id),roster.section or "",roster.identity)
         end
     end
     return lines
@@ -4940,6 +5260,7 @@ function a11y.read_native_windows(base)
         end
     end
     a11y.bind_presented_window_contexts(result,base)
+    a11y.bind_controlled_player_captions(result,base)
     result.command_bar=a11y.read_native_command_bar(base)
     if result.command_bar then
         local bar=result.command_bar
@@ -4975,6 +5296,7 @@ function a11y.poll_native_windows()
     local previous = a11y.native_windows
     a11y.native_windows = snapshot
     if not snapshot then return end
+    if a11y.player_detail_review and not a11y.focused_player_node() then a11y.player_detail_review=nil end
     a11y.prune_roster_limits(snapshot)
     if snapshot.keyboard ~= a11y.keyboard_window then
         a11y.keyboard_window, a11y.keyboard_text, a11y.keyboard_caret = snapshot.keyboard, nil, nil
@@ -5756,6 +6078,10 @@ end
 function a11y.engine_focus_speech(text,node)
     local spoken=ui_focus_speech(text)
     if node and node.name and node.name:lower():find("playername",1,true) then
+        spoken=a11y.output_speech_text(spoken)
+        for _,detail in ipairs(a11y.player_row_details(node)) do
+            spoken=spoken .. ", " .. detail.text
+        end
         local section=a11y.player_component_section(node)
         local prefixes=a11y.ui_language=="pt"
             and {starter="Titular. ",reserve="Reserva. ",unselected="Não relacionado. "}
@@ -5763,6 +6089,34 @@ function a11y.engine_focus_speech(text,node)
         if section then spoken=(prefixes[section] or "") .. spoken end
     end
     return spoken
+end
+
+-- The indexed player row can dispatch focus to its name, rating and optional
+-- caption together (real dev 21 packet 902). Only direct native siblings
+-- compose a row; equal text/resource names elsewhere grant no relationship.
+function a11y.player_row_details(node)
+    local result={}
+    if not node or node.name~="playerName" or a11y.empty_selection_caption(node.text) then return result end
+    local unique=0
+    local names=a11y.ui_model and a11y.ui_model.names or {}
+    for _,other in pairs(names.playerName or {}) do
+        if other.name=="playerName" and a11y.component_peers(node.address,other.address)
+                and a11y.native_presentation_ready(other.address) and not a11y.empty_selection_caption(other.text) then unique=unique+1 end
+    end
+    if unique~=1 then return result end
+    for _,name in ipairs({"allOver","noSetting"}) do
+        local found
+        for _,other in pairs(names[name] or {}) do
+            if other.name==name and a11y.component_peers(node.address,other.address)
+                    and a11y.native_presentation_ready(other.address) and a11y.ui_node_matches_live(other)
+                    and not a11y.empty_selection_caption(other.text) and not a11y.unresolved_format(other.text) then
+                if found then found=false;break end
+                found=other
+            end
+        end
+        if found and found.text~=node.text then result[#result+1]=found end
+    end
+    return result
 end
 
 a11y.cup_group_non_team_items = {
@@ -5850,6 +6204,8 @@ function a11y.player_component_section(node)
     if not member or not member.active then return nil end
     local native,_,typed=a11y.native_roster_section(node,member)
     if typed then return native end
+    local panel=a11y.native_player_roster_context(node)
+    if panel then return panel.section end
     local headings={Titulares="starter",Reservas="reserve",["Não relacionados"]="unselected",
         ["Não relacionado"]="unselected",Starters="starter",Substitutes="reserve",
         ["Starting lineup"]="starter",["Not selected"]="unselected",["Not in squad"]="unselected"}
@@ -5895,9 +6251,272 @@ function a11y.player_component_section(node)
     return result
 end
 
+-- The information panel is a separate sibling Window, not a descendant of
+-- the pitch card. Resolve its validated player id through the same model as
+-- PitchBase::getPlayer (914280), never through position or discovery order.
+function a11y.focused_player_node()
+    local context=a11y.read_context_state()
+    if context.kind=="dialog" or context.question or a11y.keyboard_window then return nil end
+    local snapshot=a11y.native_windows
+    local found
+    for address in pairs(snapshot and snapshot.controlled_selections or {}) do
+        local node=a11y.ui_model and a11y.ui_model.nodes[memory.hex(address)]
+        if node and a11y.native_caption_selection_identity(address) then
+            if found and found~=node then return nil end
+            found=node
+        end
+    end
+    return found
+end
+
+-- Mirror the record used by 910490: playerInfo_0/1 selects one native
+-- (slot, side) descriptor; the squad order resolves its actual player object.
+-- This path does not require the old attribute-copy callbacks or name cache.
+function a11y.current_player_record(node)
+    local base=tonumber(process_base_u64)
+    local snapshot=a11y.native_windows
+    local binding=node and snapshot and snapshot.controlled_selections and snapshot.controlled_selections[tonumber(node.address)]
+    if not base or not binding or not a11y.native_caption_selection_identity(node.address) then return nil end
+    local data=a11y.menu_read(base+0x36f38a0,"u64")
+    if not data or a11y.menu_read(data,"u64")~=base+0x2618830 then return nil end
+    local member=snapshot.members[tonumber(node.address)]
+    local variant
+    for _,owner in ipairs(member and member.owners or {}) do
+        if owner.address==binding.panel and owner.enabled and owner.parents then
+            local group=owner.parents[tonumber(node.address)]
+            local name=group and a11y.widget_internal_name(group)
+            for index=0,1 do
+                local pointer=a11y.menu_read(base+0x34a2048+index*8,"u64")
+                local expected=pointer and a11y.read_native_c_string(pointer,64)
+                if expected and name==expected then
+                    if variant and variant~=index then return nil end
+                    variant=index
+                end
+            end
+        end
+    end
+    if variant==nil then return nil end
+    local descriptor=data+0xba4+binding.side*0xa8+variant*20
+    local slot,side=a11y.menu_read(descriptor,"u32"),a11y.menu_read(descriptor+4,"u32")
+    if not slot or slot>=40 or (side~=0 and side~=1) then return nil end
+    local record=a11y.menu_read(data+side*0x248+0x1f8+slot,"u8")
+    if not record or record>=40 then return nil end
+    local object=a11y.menu_read(data+side*0x340+0x568+record*16,"u64")
+    if not object or object<0x10000 then return nil end
+    local id=a11y.menu_read(object+0x30,"u32")
+    local name=a11y.read_native_c_string(object+0x38,64)
+    local heading=a11y.normalized_player_name(node.text)
+    if not id or id==0 or not name or #name<2 or name:find("%c")
+            or not heading or heading:sub(1,#name)~=name then return nil end
+    local primary=a11y.menu_read(object+4,"u32")
+    primary=primary and math.floor(primary/0x10000000)
+    if primary and primary>12 then primary=nil end
+    local secondary={}
+    local first,last=a11y.menu_read(object+0x1c,"u32"),a11y.menu_read(object+0x20,"u32")
+    if first and last then
+        for position=0,12 do
+            local value=position<3 and math.floor(first/2^(25+position*2))%4
+                or math.floor(last/2^((position-3)*2))%4
+            if value>2 then secondary=nil;break end
+            if value>0 and position~=primary then secondary[#secondary+1]={position=position,level=value} end
+        end
+    else secondary=nil end
+    local field_position
+    if slot<11 then
+        local tactic=a11y.menu_read(data+side*0xa8+0xb34,"u32")
+        if tactic and tactic<3 then
+            local phase=0
+            local enabled=a11y.menu_read(data+side*0x248+tactic*0xa0+0xb4,"u8")
+            if enabled and enabled~=0 then phase=a11y.menu_read(data+side*0xa8+0xb38,"u32") end
+            if enabled and phase and phase<3 then
+                field_position=a11y.menu_read(data+side*0x248+0x18+tactic*0xa0+phase*0x21+slot,"u8")
+                if field_position and field_position>12 then field_position=nil end
+            end
+        end
+    end
+    return {data=data,object=object,player_id=id,slot=slot,side=side,record=record,
+        primary=primary,secondary=secondary,field_position=field_position,
+        identity=table.concat({binding.identity,variant,slot,side,record,object,id},":")}
+end
+
+function a11y.player_detail_packet()
+    local node=a11y.focused_player_node()
+    if not node then return nil end
+    local record=a11y.current_player_record(node)
+    local pt=a11y.ui_language=="pt"
+    local names=a11y.player_position_names[a11y.ui_language] or a11y.player_position_names.en
+    local fields={{key="name",text=node.text}}
+    fields[#fields+1]={key="primary",text=record and record.primary and
+        ((pt and "Posição principal: " or "Primary position: ") .. names[record.primary])
+        or (pt and "Posição principal indisponível." or "Primary position unavailable.")}
+    if record and record.secondary then
+        local parts={}
+        for _,position in ipairs(record.secondary) do
+            if position.level==2 or a11y.player_secondary_partial then
+                parts[#parts+1]=names[position.position] .. (position.level==1
+                    and (pt and " (adaptação parcial)" or " (partial familiarity)")
+                    or (pt and " (adaptação completa)" or " (full familiarity)"))
+            end
+        end
+        if #parts>0 then fields[#fields+1]={key="secondary",text=(pt and "Posições secundárias: " or "Secondary positions: ") .. table.concat(parts,", ")} end
+    end
+    local field=record and record.slot>=11 and (pt and "Não está no campo." or "Not on the pitch.")
+        or record and record.field_position and ((pt and "Posição no campo: " or "Position on the pitch: ") .. names[record.field_position])
+        or (pt and "Posição no campo indisponível." or "Position on the pitch unavailable.")
+    fields[#fields+1]={key="field",text=field}
+    return {node=node,record=record,fields=fields,generation=a11y.read_context_state().generation,
+        identity=node.identity .. ":" .. node.text .. ":" .. (a11y.native_caption_selection_identity(node.address) or "")
+            .. ":" .. (record and record.identity or "unknown")}
+end
+
+function a11y.player_details_allowed(origin)
+    local packet=a11y.player_detail_packet()
+    if not packet or packet.identity~=origin.identity or packet.generation~=origin.generation then return false end
+    for _,field in ipairs(packet.fields) do
+        if field.key==origin.key then return field.text==origin.text end
+    end
+    return false
+end
+
+function a11y.read_player_details(action)
+    local packet=a11y.player_detail_packet()
+    if not packet then a11y.player_detail_review=nil;return false end
+    local state=a11y.player_detail_review
+    if not state or state.identity~=packet.identity or state.generation~=packet.generation then
+        state={identity=packet.identity,generation=packet.generation,index=0};a11y.player_detail_review=state
+    end
+    local count=#packet.fields
+    if action=="first" then state.index=1
+    elseif action=="next" then state.index=state.index%count+1
+    elseif action=="previous" then state.index=state.index==0 and count or (state.index-2)%count+1
+    elseif state.index==0 or state.index>count then state.index=1 end
+    local field=packet.fields[state.index]
+    state.sequence=(state.sequence or 0)+1
+    local before=a11y.native_speech_last
+    modal_focus_hold_until_ms=0;a11y.title_pending_first_item=nil;a11y.deferred_modal_announcement=nil
+    speak(field.text,true,true,"player-review:" .. packet.identity .. ":" .. state.sequence,packet.node.address)
+    local origin={identity=packet.identity,generation=packet.generation,key=field.key,text=field.text}
+    for index=before+1,a11y.native_speech_last do a11y.native_speech_queue[index].player_details=origin end
+    return true
+end
+
+-- Read the same rule as 8e9210/15098a0 without calling game code. Competition
+-- database lookups not resolved here remain unknown; FFFF selects the current
+-- match configuration's native +33 getter (14c0d50).
+function a11y.live_roster_limit(data)
+    local base=tonumber(process_base_u64)
+    if not base or not data then return nil end
+    local mode=a11y.menu_read(data+8,"u32")
+    if mode==4 then return 23 end
+    if mode==nil or mode==0 or mode==1 or mode==3 or mode==8 then return nil end
+    local flow=a11y.menu_read(base+0x3704e38,"u64")
+    local index=flow and a11y.menu_read(flow+0xf0,"u32")
+    if not index or index>=61 then return nil end
+    local category=a11y.menu_read(base+0x34fc9c0+index*16,"u32")
+    local manager=a11y.menu_read(base+0x3705e10,"u64")
+    local config=manager and a11y.menu_read(manager+0x50,"u64")
+    if not category or not config or config<0x10000 then return nil end
+    local rule
+    if category>=7 and category<=10 then
+        return nil
+    elseif index<=39 and math.floor(0xd7c0000000/2^index)%2==1 then
+        rule=a11y.menu_read(config+0x35968,"u16")
+    else rule=0xffff end
+    if rule~=0xffff then return nil end
+    local limit=a11y.menu_read(config+0x35993,"u8")
+    if limit and limit>=11 and limit<=40 then return limit end
+end
+
+function a11y.native_player_roster_context(node)
+    if not node or node.name~="playerName" then return nil end
+    local snapshot=a11y.native_windows
+    local member=snapshot and snapshot.members and snapshot.members[tonumber(node.address)]
+    local base=tonumber(process_base_u64)
+    if not base or not member or not member.active or not a11y.native_presentation_ready(node.address)
+            or not a11y.ui_node_matches_live(node) or a11y.read_native_rendered_text(node.address)~=node.text then return nil end
+    local target=a11y.normalized_player_name(node.text)
+    local live=a11y.current_player_record(node)
+    local player=live and {player_id=live.player_id}
+    for name,entry in pairs(not live and a11y.game_plan_player_cache or {}) do
+        if target and (target==name or target:sub(1,#name)==name) and entry.player_id and entry.player_id>0 then
+            if player and player.player_id~=entry.player_id then return nil end
+            player=entry
+        end
+    end
+    if not player then return nil end
+    local data=a11y.menu_read(base+0x36f38a0,"u64") -- 8e1af0's singleton
+    if not data or a11y.menu_read(data,"u64")~=base+0x2618830 then return nil end
+    local windows={}
+    for _,window in ipairs(snapshot.windows or {}) do windows[window.address]=window end
+    local result
+    for _,owned in ipairs(member.owners or {}) do
+        local panel=windows[owned.address]
+        if owned.enabled and panel and panel.enabled and panel.task_parent
+                and a11y.menu_read(panel.address,"u64")==base+0x261e0c8 then
+            local side=a11y.menu_read(panel.address+0x98,"u32")
+            if side==0 or side==1 then
+                for _,window in ipairs(snapshot.windows) do
+                    local vt=window.enabled and a11y.menu_read(window.address,"u64")
+                    local pitch=vt==base+0x261eaa0
+                    local subs=vt==base+0x261f788
+                    if (pitch or subs) and window.task_parent==panel.task_parent
+                            and a11y.menu_read(window.address+0x98,"u32")==side then
+                        local root,impl=a11y.roster_presentation_root(window.address)
+                        local flags=root and a11y.menu_read(root+0xc,"u32")
+                        local scroll=pitch and 0 or a11y.menu_read(window.address+0x4e8,"u32")
+                        if flags and flags%8==7 and scroll and scroll<=29 then
+                            for index=0,(pitch and 10 or 11) do
+                                local slot=pitch and index or index+scroll+11
+                                local record=a11y.menu_read(window.address+0x2a0+index*4,"u32")
+                                local order=slot<40 and a11y.menu_read(data+side*0x248+0x1f8+slot,"u8")
+                                local card=a11y.menu_read(window.address+0xb8+index*8,"u64")
+                                local shown=card and card>=0x10000 and a11y.menu_read(card+0xc,"u32")
+                                if record and record<40 and order==record and shown and shown%8==7 then
+                                    local object=a11y.menu_read(data+side*0x340+0x568+record*16,"u64")
+                                    local id=object and object>=0x10000 and a11y.menu_read(object+0x30,"u32")
+                                    if id==player.player_id then
+                                        local section,limit="starter",nil
+                                        if subs then
+                                            local bound=a11y.roster_limits and a11y.roster_limits[window.address]
+                                            limit=a11y.live_roster_limit(data)
+                                            if limit then section=slot<limit and "reserve" or "unselected"
+                                            elseif bound and bound.root==root and bound.impl==impl and bound.side==side
+                                                    and bound.limit>=11 and bound.limit<=40 then
+                                                limit=bound.limit;section=slot<limit and "reserve" or "unselected"
+                                            else section=nil end
+                                        end
+                                        local identity=table.concat({panel.address,window.address,root,side,slot,record,object,id,limit or -1},":")
+                                        if result and result.identity~=identity then return nil end
+                                        result={section=section,identity=identity,window=window.address,slot=slot,player_id=id,
+                                            side=side,record=record,root=root,limit=limit}
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return result
+end
+
 -- A pitch/card array proves the displayed slot. Player position and names
 -- cannot classify it. Substitute slot indices include the native scroll offset;
 -- the match-rule boundary is recorded from the game's actual return value.
+function a11y.roster_presentation_root(address)
+    local base=tonumber(process_base_u64)
+    local impl=a11y.menu_read(address+0x88,"u64")
+    if not base or not impl or impl<0x10000 then return nil end
+    -- Pitch/PitchSubstitute have no navigation root in the real dev 21
+    -- capture. e3d790 uses Impl+90, including in the boundary renderer.
+    local root=a11y.menu_read(impl+0x90,"u64")
+    local vt=root and root>=0x10000 and a11y.menu_read(root,"u64")
+    if vt and a11y.native_layout.holders[vt-base] then return root,impl end
+    root=a11y.menu_read(impl+0x98,"u64")
+    return root and root>=0x10000 and root or nil,impl
+end
+
 function a11y.native_roster_section(node,member)
     local base=tonumber(process_base_u64)
     if not base then return nil end
@@ -5924,11 +6543,12 @@ function a11y.native_roster_section(node,member)
                     end
                 end
             end
+            if ambiguous then return nil,nil,true end
             if found and not ambiguous then
                 local value,slot,limit= nil,found,nil
                 matched=true
-                local impl=a11y.menu_read(owner.address+0x88,"u64")
-                local root=impl and a11y.menu_read(impl+0x98,"u64")
+                local root,impl=a11y.roster_presentation_root(owner.address)
+                if not root then return nil,nil,true end
                 if pitch then value="starter" else
                     local scroll=a11y.menu_read(owner.address+0x4e8,"u32")
                     local bound=a11y.roster_limits and a11y.roster_limits[owner.address]
@@ -5942,6 +6562,7 @@ function a11y.native_roster_section(node,member)
                 end
                 local current=tostring(owner.address) .. ":" .. tostring(root or owner.root) .. ":" .. tostring(slot)
                     .. ":" .. tostring(limit) .. ":" .. tostring(value)
+                    .. ":" .. tostring(a11y.menu_read(owner.address+0x98,"u32"))
                 if identity and identity~=current then return nil,nil,true end
                 identity=current
                 if value and result and result~=value then return nil,nil,true end
@@ -5958,8 +6579,7 @@ function m.on_roster_rule_boundary(ctx,event_id,registers)
     local base=tonumber(process_base_u64)
     if not base or not address or not limit or a11y.menu_read(address,"u64")~=base+0x261f788 then return end
     limit=limit%256
-    local impl=a11y.menu_read(address+0x88,"u64")
-    local root=impl and a11y.menu_read(impl+0x98,"u64")
+    local root,impl=a11y.roster_presentation_root(address)
     if not root or root<0x10000 then return end
     local side=a11y.menu_read(address+0x98,"u32")
     if side~=0 and side~=1 then return end
@@ -5978,7 +6598,8 @@ function a11y.prune_roster_limits(snapshot)
         -- Keep that short handoff, not a cache belonging to a closed component.
         if frame-(bound.frame or -10000)>2 then
             local flags=a11y.menu_read(bound.root+0xc,"u32")
-            if not window or window.impl~=bound.impl or window.root~=bound.root
+            local root,impl=a11y.roster_presentation_root(address)
+            if not window or window.impl~=bound.impl or impl~=bound.impl or root~=bound.root
                     or not flags or math.floor(flags/4)%2~=1 then a11y.roster_limits[address]=nil end
         end
     end
@@ -5987,6 +6608,9 @@ end
 function a11y.game_plan_player_section(text, heading_widget_key)
     local target=a11y.normalized_player_name(text)
     if not target then return nil end
+    local heading=heading_widget_key and a11y.ui_model and a11y.ui_model.nodes[heading_widget_key]
+    local panel=heading and heading.text==text and a11y.native_player_roster_context(heading)
+    if panel then return panel.section end
     local section,conflicting
     for key,node in pairs(a11y.ui_model and a11y.ui_model.nodes or {}) do
         if key~=heading_widget_key and a11y.normalized_player_name(node.text)==target
@@ -6096,13 +6720,17 @@ end
 
 function a11y.game_plan_focus_speech(text, widget_key)
     local context = a11y.game_plan_context
+    local node=widget_key and a11y.ui_model and a11y.ui_model.nodes[widget_key]
+    local roster=node and a11y.native_player_roster_context(node)
+    local roster_identity=roster and roster.identity
     if a11y.game_plan_basic_prompt_items[text]
             and not a11y.game_plan_basic_prompt_active then
         return nil
     end
     if a11y.game_plan_active
             and text == a11y.game_plan_last_focus_text
-            and context == a11y.game_plan_announced_context then
+            and context == a11y.game_plan_announced_context
+            and roster_identity==a11y.game_plan_last_roster_identity then
         return nil
     end
     local tactical_label, tactical_value =
@@ -6156,6 +6784,7 @@ function a11y.game_plan_focus_speech(text, widget_key)
     end
     if a11y.game_plan_active then
         a11y.game_plan_last_focus_text = text
+        a11y.game_plan_last_roster_identity=roster_identity
         a11y.game_plan_last_focus_widget = widget_key
         a11y.game_plan_last_focus_frame = frame
         if context and context ~= a11y.game_plan_announced_context then
@@ -6176,6 +6805,7 @@ function a11y.leave_game_plan()
     a11y.game_plan_context = nil
     a11y.game_plan_announced_context = nil
     a11y.game_plan_last_focus_text = nil
+    a11y.game_plan_last_roster_identity=nil
     a11y.game_plan_last_menu_focus = nil
     a11y.game_plan_last_player_section = nil
     a11y.game_plan_basic_prompt_active = false
@@ -6467,6 +7097,7 @@ function a11y.poll_attribute_input(now_ms)
         a11y.game_plan_attribute_locked_name = nil
     end
     local vertical = raw > 16000 and 1 or (raw < -16000 and -1 or 0)
+    if vertical==0 then a11y.review_right_stick(0) end
     if vertical ~= 0 and a11y.attribute_right_stick_y == 0 then
         a11y.review_right_stick(vertical > 0 and -1 or 1)
     end
@@ -9505,6 +10136,8 @@ function m.global_gamepad_input(ctx, inputs)
         a11y.review_right_stick(-1)
     elseif vertical == -1 then
         a11y.review_right_stick(1)
+    elseif vertical == 0 then
+        a11y.review_right_stick(0)
     end
 end
 
@@ -9763,6 +10396,8 @@ function a11y.reset_control_tracking_state()
 end
 
 function a11y.reset_selection_tracking_state()
+    a11y.player_detail_review=nil
+    a11y.player_review_stick_direction=nil
     last_audio_id = nil
     a11y.last_page_announcement=nil
     a11y.roster_limits=nil

@@ -84,7 +84,7 @@ def analyze(text: str) -> dict:
             resources.add(item.get('name', ''))
         elif kind == 'FRONTIER':
             frontiers.add(item.get('rva', ''))
-        elif kind in {'PAGE', 'COMMAND', 'ROSTER', 'SLOT', 'RESULT', 'ASSIGNMENT'}:
+        elif kind in {'PAGE', 'COMMAND', 'ROSTER', 'SLOT', 'RESULT', 'ASSIGNMENT', 'PLAYER_PANEL', 'CAPTION_SELECTION'}:
             link_kinds[kind] += 1
             if len(links) < 2048:
                 links.append({'kind': kind, 'sequence': (pending or {}).get('sequence'), **item})

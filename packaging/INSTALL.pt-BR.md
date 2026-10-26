@@ -1,6 +1,6 @@
-# FLAccess 0.1.7
+# FLAccess 0.1.8
 
-Publicado em 21 de outubro de 2026. Leitura experimental de menus do SP Football
+Publicado em 26 de outubro de 2026. Leitura experimental de menus do SP Football
 Life 2026 / PES 2021, sem OCR, usando dados internos do jogo e o Prism.
 Não oferece acessibilidade completa às partidas.
 
@@ -11,7 +11,7 @@ e Sider 7.3.3 funcional. Use NVDA ou outro leitor compatível; sem leitor ativo,
 o Prism pode usar SAPI.
 
 1. Feche o jogo e o Sider e faça backup dos arquivos que vai substituir.
-2. Extraia o pacote `FLAccess-0.1.7-sider.zip`.
+2. Extraia o pacote `FLAccess-0.1.8-sider.zip`.
 3. Copie a pasta `modules` do pacote para `SiderAddons/modules`, mesclando as pastas.
 4. Copie o `sider.dll` do pacote para `SiderAddons`, substituindo somente o núcleo
    compatível 7.3.3. Não use esse DLL em outra versão do Sider.
