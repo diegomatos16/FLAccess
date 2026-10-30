@@ -71,13 +71,14 @@ local context = {
 }
 module.init(context)
 
-assert(event_count == 15, "unexpected custom event count: " .. event_count)
-assert(registration_count == 22,
+assert(event_count == 16, "unexpected custom event count: " .. event_count)
+assert(registration_count == 23,
     "unexpected callback count: " .. registration_count)
 assert(callbacks.display_frame, "display_frame callback was not registered")
 assert(callbacks.livecpk_data_ready, "flow metadata callback was not registered")
 assert(callbacks["custom:flaccess_keyboard_input_set"], "native input callback was not registered")
 assert(callbacks["custom:flaccess_ui_focus_event"], "shared focus callback was not registered")
+assert(callbacks["custom:flaccess_nested_list_caption"], "nested-list caption callback was not registered")
 assert(callbacks["custom:flaccess_roster_rule_boundary"], "native roster boundary callback was not registered")
 assert(callbacks.context_reset and callbacks.overlay_content,
     "screen reset or overlay callback was not registered")

@@ -1,24 +1,33 @@
-# FLAccess 0.1.8
+# Installation — FlAccess.zip — 0.1.9
 
-Released October 26, 2026. Experimental non-OCR menu accessibility for SP Football
-Life 2026 / PES 2021. Reads native game text and focus through Sider and Prism.
-This is not complete match accessibility.
+The archive has three folders: livecpk, modules and sider. FlAccessReader handles
+menus; FlAccessGameplay handles the radar and future in-match announcements.
+Time/score announcements are not implemented by this reorganization.
 
-## Installation
+1. Close the game and Sider. Back up sider.ini and sider.dll.
+2. Merge livecpk and modules into SiderAddons, preserving other mods.
+3. Copy sider/sider.dll from the archive to SiderAddons/sider.dll. It belongs in
+   that root, not a sider subfolder. This core targets the documented compatible
+   Sider 7.3.3 only; verify compatibility before installing over another version.
+4. Add sider/sider.ini.snippet entries to the existing [sider] section. Do not
+   replace the entire configuration. The two lua.module entries can be enabled
+   independently.
+5. Remove only old FLAccess.lua, FLAccess_audio.lua, FLAccess_match_registry.lua
+   and FLAccess_gameplay_live.lua entries. Never enable old and new copies together.
+6. To migrate preferences, copy modules/FLAccess.ini to
+   modules/FlAccessReader/FlAccessReader.ini before first use.
+7. Start the game through Sider normally.
 
-Requires Windows x64, the compatible `FL_2026.exe` and working Sider 7.3.3.
-NVDA or another supported screen reader is recommended; Prism can fall back to SAPI.
+Editable unencrypted WAVs: livecpk/FlAccessGameplay/sounds. Replace an existing
+filename and restart the game to reload it. New filenames need event wiring.
+Reader text assets: livecpk/FlAccessReader/text. Modules read their WAV/TSV assets
+directly; LiveCPK itself does not play loose WAV files.
 
-1. Close the game and Sider; back up the files you will replace.
-2. Extract `FLAccess-0.1.8-sider.zip` and merge its `modules` folder into
-   `SiderAddons/modules`.
-3. Copy the included `sider.dll` into `SiderAddons`, replacing only the compatible
-   Sider 7.3.3 core. Do not use this DLL with another Sider version.
-4. Add `lua.module = "FLAccess.lua"` once under `[sider]` in `sider.ini`.
-5. Start through Sider. Do not replace your entire configuration.
+This release was investigated for FL 2026/FL_2026.exe and compatible Sider
+7.3.3. FL 27 requires a separate compatibility check. Reader0.1.9 (base 42);
+Gameplay experimental 16. Audible ball approval predates
+this layout change; other new gameplay behavior still awaits real listening tests.
+Prism and OpenAL licenses accompany their respective modules.
 
-Includes Lua, Prism with its licenses and PT/EN text indices. Python is not
-required to use the mod. Includes the locally tested modified Sider 7.3.3 DLL,
-with the `overlay_content` event for reading other modules' textual overlays and
-the stack-alignment fix. See `sider-core` for source and binary identification.
-Game-menu reading uses its own hooks.
+Back up custom WAVs/INIs before updating: the package includes defaults.
+Do not add separate module entries for internal engine/ files.

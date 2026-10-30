@@ -1,10 +1,7 @@
 # Documentation / Documentação
 
-- [Português (Brasil)](README.pt-BR.md)
+Release **0.1.9 — experimental**, Reader + optional Gameplay.
+
+- [Português](README.pt-BR.md)
 - [English](README.en.md)
-
-Current release: **0.1.7** (experimental).
-
-Game Plan remains an unresolved experimental area in this release. Its main
-commands, submenus and Edit Position player selection are not reliably spoken.
-See the installation guides and release notes for known limitations.
+- [Mudanças e pendências](RELEASE-0.1.9.pt-BR.md)

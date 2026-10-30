@@ -1,5 +1,5 @@
 param(
-    [string]$ModulePath = "modules\FLAccess.lua",
+    [string]$ModulePath = "modules\FlAccessReader\FlAccessReader.lua",
     [string]$GameExePath = ""
 )
 
@@ -49,17 +49,19 @@ if ($LASTEXITCODE -ne 0) {
 
 New-Item -ItemType Directory -Path $temporaryModules -Force | Out-Null
 try {
-    $prismRuntime = Join-Path $projectRoot "modules\FLAccess-Prism"
-    if (-not (Test-Path -LiteralPath (Join-Path $prismRuntime "prism.dll"))) {
-        throw "Native Prism runtime is missing from modules\FLAccess-Prism."
+    $prismRuntime = Join-Path $projectRoot "modules\FlAccessReader"
+    if (-not (Test-Path -LiteralPath (Join-Path $prismRuntime "bin\prism.dll"))) {
+        throw "Native Prism runtime is missing from modules\FlAccessReader\bin."
     }
     Copy-Item -LiteralPath $prismRuntime -Destination $temporaryModules -Recurse -Force
-    $textRuntime = Join-Path $projectRoot "modules\FLAccess-text"
+    $temporaryText = Join-Path $temporarySider "livecpk\FlAccessReader"
+    New-Item -ItemType Directory -Path $temporaryText -Force | Out-Null
+    $textRuntime = Join-Path $projectRoot "livecpk\FlAccessReader\text"
     if (-not (Test-Path -LiteralPath (Join-Path $textRuntime "pt.tsv")) -or
             -not (Test-Path -LiteralPath (Join-Path $textRuntime "en.tsv"))) {
-        throw "Runtime text assets are missing from modules\FLAccess-text."
+        throw "Runtime text assets are missing from livecpk\FlAccessReader\text."
     }
-    Copy-Item -LiteralPath $textRuntime -Destination $temporaryModules -Recurse -Force
+    Copy-Item -LiteralPath $textRuntime -Destination $temporaryText -Recurse -Force
     & $luaJit $harness $sourcePath $temporarySider
     if ($LASTEXITCODE -ne 0) {
         throw "Sider sandbox initialization failed."
@@ -88,6 +90,7 @@ if (Test-Path -LiteralPath $GameExePath) {
         0x0e48af0 = "48895c24084889742410574883ec20"
         0x0e7a990 = "488bc455574156488d68d84881ec10010000"
         0x0c97408 = "458b074d8d4f40488b4c2478488bd0"
+        0x0c978b5 = "904533c94533c0488d542430488bcf"
         0x0c97c32 = "904533c94533c0488d55e7488bcf"
         0x0c97ca8 = "904533c94533c0488d55e7488bcf"
         0x0b22a50 = "48895c2408574883ec308bda488bf9"

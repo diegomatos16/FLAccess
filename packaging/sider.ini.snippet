@@ -1,2 +1,11 @@
-; Add this line inside the existing [sider] section.
-lua.module = "FLAccess.lua"
+; Add inside the existing [sider] section; do not replace other mods.
+; LiveCPK roots contain editable assets; the mod reads its own WAV/TSV files.
+livecpk.enabled = 1
+cpk.root = ".\livecpk\FlAccessReader"
+cpk.root = ".\livecpk\FlAccessGameplay"
+lua.enabled = 1
+luajit.ext.enabled = 1
+match-stats.enabled = 1
+; Independent mods. Remove only the corresponding lua.module line to disable one.
+lua.module = "FlAccessReader\FlAccessReader.lua"
+lua.module = "FlAccessGameplay\FlAccessGameplay.lua"

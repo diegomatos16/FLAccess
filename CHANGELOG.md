@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.9 - 2026-10-30
+
+- Melhorias na escalação, alvo de substituição, nomes/valores de Ajuda e repetição de jogador/situação.
+- Atributos completos por passo, título automático Y/Triângulo e revisão I/K/analógico direito com escopo selecionado; retiradas posições originais/secundárias incorretas.
+- Ajustes em treino, formação, volumes/idioma do comentário, pausa, trilha sonora e usuário LT/RT.
+- Primeiro item pelo canal comum, países pelo ID filtrado nativo e agrupamento de classificação/calendário.
+- Reader refatorado: fontes geradas, fila após foco, cancelamento/revalidação, RPM seguro e cache de fase; corrigido aborto cdata/math.floor. Voz ainda síncrona; pendências reais preservadas.
+- Gameplay experimental opcional: HRTF, avisos de posse/continuidade/desarme, perfis de câmera e efeitos seguindo volume/mudo do jogo.
+- FlAccess.zip em livecpk/modules/sider, WAVs editáveis e DLLs/licenças obrigatórias. Reader e Gameplay independentes.
+- Notas completas em docs/RELEASE-0.1.9.pt-BR.md. Base Reader42/Gameplay16; testes internos não substituem audição.
+
+
 ## 0.1.8 - 2026-10-26
 
 - Corrigidos bugs na leitura de alguns menus e implementado suporte inicial

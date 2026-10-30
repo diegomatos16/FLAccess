@@ -7,16 +7,18 @@ $project = Split-Path -Parent $PSScriptRoot
 $workspace = Split-Path -Parent $project
 $luaJit = Join-Path $project "reference\sider7\soft\LuaJIT-2.1.0-beta3\src\luajit.exe"
 $tests = Join-Path $PSScriptRoot "run.lua"
-$source = Join-Path $project "modules\FLAccess.lua"
-$deployed = Join-Path $workspace "SiderAddons\modules\FLAccess.lua"
+$source = Join-Path $project "modules\FlAccessReader\FlAccessReader.lua"
+$deployed = Join-Path $workspace "SiderAddons\modules\FlAccessReader\FlAccessReader.lua"
 $sider = Join-Path $workspace "SiderAddons"
 $compatibility = Join-Path $project "tools\check_sider_compatibility.ps1"
-$sourceText = Join-Path $project "modules\FLAccess-text"
-$deployedText = Join-Path $sider "modules\FLAccess-text"
+$sourceText = Join-Path $project "livecpk\FlAccessReader\text"
+$deployedText = Join-Path $sider "livecpk\FlAccessReader\text"
 
 foreach ($pair in @(
         @($source, $deployed),
         @((Join-Path $sourceText "pt.tsv"), (Join-Path $deployedText "pt.tsv")),
+        @((Join-Path $sourceText "styles-pt.tsv"), (Join-Path $deployedText "styles-pt.tsv")),
+        @((Join-Path $sourceText "styles-en.tsv"), (Join-Path $deployedText "styles-en.tsv")),
         @((Join-Path $sourceText "en.tsv"), (Join-Path $deployedText "en.tsv")))) {
     $left = (Get-FileHash -LiteralPath $pair[0] -Algorithm SHA256).Hash
     $right = (Get-FileHash -LiteralPath $pair[1] -Algorithm SHA256).Hash
@@ -49,6 +51,9 @@ if (-not $PythonPath) {
 if (-not (Test-Path -LiteralPath $PythonPath)) {
     throw "Python test runtime missing; pass -PythonPath."
 }
+& $PythonPath (Join-Path $project "tools\build_reader_module.py") --check
+if ($LASTEXITCODE -ne 0) { throw "Reader bundle differs from maintained sources." }
+
 Push-Location $workspace
 try {
     & $PythonPath -m unittest discover -s "textAssets/tests" -p "test_*.py" -v

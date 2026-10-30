@@ -43,6 +43,102 @@ class NativeContracts(unittest.TestCase):
         self.assertEqual(data.count(bytes.fromhex("488b4b40")), 2)  # child +40
         self.assertEqual(data[-1], 0xC3)
 
+    def test_structured_record_inner_selector_uses_the_native_selected_index_getter(self):
+        self.assertEqual(self.read_rva(0xE3D91E, 6).hex(), '8b80bc000000')
+        self.assertEqual(self.read_rva(0xE3D910, 4).hex(), '418d5010')
+        for vt,kind in ((0x27B84D0,b'NodeRectSelector@'),(0x27BE998,b'NodeRectSelectorJump@')):
+            col=struct.unpack('<Q',self.read_rva(vt-8,8))[0]-0x140000000
+            td=struct.unpack('<I',self.read_rva(col+12,4))[0]
+            self.assertIn(kind,self.read_rva(td+16,96))
+
+    def test_standings_column_names_come_from_the_actual_native_renderer(self):
+        # af7327..af7389 initializes the ordered numeric column descriptors;
+        # af76b1 resolves the team caption. Read the executable's pointers.
+        expected={0x34ACD00:'match',0x34ACD48:'ptsText',0x34ACD40:'winText',
+            0x34ACD38:'drawText',0x34ACD30:'loseText',0x34ACD28:'goalsText',
+            0x34ACD20:'goalsAgainstText',0x34ACD18:'goalDifferenceText',0x34ACD50:'teamNameText'}
+        for at,name in expected.items():
+            ptr=struct.unpack('<Q',self.read_rva(at,8))[0]-0x140000000
+            self.assertEqual(self.read_rva(ptr,len(name)+1),name.encode()+b'\0')
+
+    def test_loading_singleton_is_created_typed_and_cleared_by_its_cleanup(self):
+        create = self.read_rva(0xE4A698, 7)
+        self.assertEqual(create[:3], bytes.fromhex('488905'))
+        self.assertEqual(0xE4A69F + struct.unpack_from('<i', create, 3)[0], 0x36F9A68)
+        clear = self.read_rva(0xE4A63B, 11)
+        self.assertEqual(clear[:3], bytes.fromhex('48c705'))
+        self.assertEqual(0xE4A646 + struct.unpack_from('<i', clear, 3)[0], 0x36F9A68)
+        constructor = self.read_rva(0xE4A2BA, 7)
+        self.assertEqual(0xE4A2C1 + struct.unpack_from('<i', constructor, 3)[0], 0x27B55B8)
+        self.assertEqual(struct.unpack('<Q', self.read_rva(0x27B55B8 + 8, 8))[0], 0x140E4A630)
+
+    def test_mailbox_selected_record_layout_matches_the_native_render_producer(self):
+        self.assertEqual(struct.unpack('<Q', self.read_rva(0x26A1120 + 0x148, 8))[0], 0x140B43AD0)
+        data = self.read_rva(0xB44520, 0x400)
+        for pattern in ('488b8998000000', '482b8f90000000', '488d5308', '48635348', '4c8d4350'):
+            self.assertIn(bytes.fromhex(pattern), data)
+        self.assertEqual(self.read_rva(0xB4458E, 15).hex(), '4b8d1cc048c1e30448039f90000000')
+        self.assertEqual(self.read_rva(0xE3D91E, 6).hex(), '8b80bc000000')
+
+    def test_country_guard_uses_the_real_native_method_slot(self):
+        source = (EXE.parent / 'FLAccess/modules/FlAccessReader/FlAccessReader.lua').read_text(encoding='utf-8')
+        import re
+        guard = re.search(r'menu_read\(vt\+(0x[0-9a-f]+),"u64"\)==base\+0xc97190', source)
+        self.assertIsNotNone(guard)
+        slot = int(guard[1], 16)
+        self.assertEqual(struct.unpack('<Q', self.read_rva(0x271f4d0 + slot, 8))[0], 0x140C97190)
+        self.assertEqual(struct.unpack('<Q', self.read_rva(0x271f4d0 + 0x260, 8))[0], 0x140C9DAF0)
+
+    def test_nationality_override_uses_filtered_ids_instead_of_generic_caption_records(self):
+        vt = 0x271f4d0
+        self.assertEqual(struct.unpack('<Q', self.read_rva(vt + 0x278, 8))[0], 0x140C9E980)
+        render = self.read_rva(0xC9E980, 0x290)
+        self.assertIn(bytes.fromhex('80bd8001000000'), render)  # specialized mode at +180
+        self.assertIn(bytes.fromhex('458b7f64'), render)  # center scroll index
+        for at, target in ((0xC9EB30, 0xC9D900), (0xC9EB3D, 0xCBBA20)):
+            call = self.read_rva(at, 5)
+            self.assertEqual(call[0], 0xe8)
+            self.assertEqual(at + 5 + struct.unpack_from('<i', call, 1)[0], target)
+        selected = self.read_rva(0xC952F3, 6)
+        self.assertEqual(selected.hex(), '8b4168034164')  # selected+scroll, not cursor flags
+        getter = self.read_rva(0xC9D900, 0x7a)
+        self.assertIn(bytes.fromhex('488d8b70010000'), getter)  # per-continent filtered map
+        self.assertIn(bytes.fromhex('488b4128'), getter)
+        self.assertIn(bytes.fromhex('0fb70450'), getter)  # uint16 ID vector
+
+    def test_country_name_database_layout_matches_the_native_lookup(self):
+        getter = self.read_rva(0x14B6A60, 8)
+        self.assertEqual(getter[:3], bytes.fromhex('488b05'))
+        self.assertEqual(0x14B6A67 + struct.unpack_from('<i', getter, 3)[0], 0x3705E10)
+        self.assertEqual(self.read_rva(0xCBBA3F, 4).hex(), '488b4848')
+        lookup = self.read_rva(0x14BB0B0, 0x3c)
+        self.assertIn(bytes.fromhex('8b81e0b58401'), lookup)  # count
+        self.assertIn(bytes.fromhex('488d99203f8401'), lookup)  # records
+        self.assertIn(bytes.fromhex('4c6bc04c'), lookup)  # 0x4c stride
+        search = self.read_rva(0x14B8060, 0x85)
+        self.assertIn(bytes.fromhex('81e1ff010000'), search)  # 9-bit country ID
+        # Compare maintained Lua offsets with values encoded by the native
+        # consumer; a fixture repeating a wrong constant must not certify it.
+        source = (EXE.parent / 'FLAccess/modules/FlAccessReader/engine/observations.lua').read_text(encoding='utf-8')
+        import re
+        body = source.split('function a11y.country_name(id)', 1)[1].split('function a11y.native_country_selection()', 1)[0]
+        global_offset = int(re.search(r'base\+(0x[0-9a-f]+)', body)[1], 16)
+        count_offset = int(re.search(r'database\+(0x[0-9a-f]+),"u32"', body)[1], 16)
+        records_offset = int(re.search(r'local first=database\+(0x[0-9a-f]+)', body)[1], 16)
+        stride = int(re.search(r'first\+mid\*(0x[0-9a-f]+)', body)[1], 16)
+        self.assertEqual(global_offset, 0x14B6A67 + struct.unpack_from('<i', getter, 3)[0])
+        self.assertEqual(count_offset, struct.unpack('<I', self.read_rva(0x14BB0B8, 4))[0])
+        self.assertEqual(records_offset, struct.unpack('<I', self.read_rva(0x14BB0BF, 4))[0])
+        self.assertEqual(stride, self.read_rva(0x14BB0D0, 1)[0])
+
+    def test_nested_list_caption_hook_preserves_complete_nonrelative_instructions(self):
+        self.assertEqual(self.read_rva(0xC978B5,15).hex(),'904533c94533c0488d542430488bcf')
+        self.assertEqual(self.read_rva(0xC97874,4).hex(),'488d5628')
+        call=self.read_rva(0xC978C4,5)
+        self.assertEqual(call[0],0xe8)
+        self.assertEqual(0xC978C9+struct.unpack_from('<i',call,1)[0],0xE48BF0)
+
+
     def test_final_setter_prologue_contains_complete_instructions(self):
         self.assertEqual(self.read_rva(0xE49070, 22).hex(),
                          "488bc45556574881ec0001000048c7442420feffffff")
@@ -58,6 +154,33 @@ class NativeContracts(unittest.TestCase):
         for vtable in (0x27AE960, 0x27B0860):
             self.assertEqual(struct.unpack("<Q", self.read_rva(vtable + 16, 8))[0],
                              0x140000000 + 0xE29E40)
+
+    def test_headline_and_slider_thunk_has_the_same_owned_node_contract(self):
+        code = self.read_rva(0xE546A0, 5)
+        self.assertEqual(code[0], 0xE9)
+        self.assertEqual(0xE546A5 + struct.unpack('<i', code[1:])[0], 0xE8ECD0)
+        for vtable in (0x27B9770, 0x27B9848, 0x27BAC10):
+            self.assertEqual(struct.unpack('<Q', self.read_rva(vtable + 0x88, 8))[0], 0x140E546A0)
+            self.assertEqual(struct.unpack('<Q', self.read_rva(vtable + 0x28, 8))[0], 0x140E8ECB0)
+
+    def test_language_commit_slot_distinguishes_sound_and_text_before_confirmation(self):
+        for vtable, setter in ((0x2696610, 0xB229F0), (0x2696390, 0xB22A50)):
+            self.assertEqual(struct.unpack('<Q', self.read_rva(vtable + 0x258, 8))[0], 0x140000000 + setter)
+
+    def test_playing_style_uses_property_3b_and_separate_native_translation_tables(self):
+        self.assertEqual(self.read_rva(0x14C0309, 5), bytes.fromhex('ba3b000000'))
+        target = struct.unpack('<I', self.read_rva(0x14C6CDC + 0x3B * 4, 4))[0]
+        self.assertEqual(self.read_rva(target, 10), bytes.fromhex('8b411cc1e80b83e01f41'))
+        self.assertEqual(struct.unpack('<22I', self.read_rva(0x2979080, 88)),
+                         (0,1,2,3,6,9,10,11,14,12,19,15,17,4,5,18,20,21,7,8,13,16))
+        self.assertEqual(self.read_rva(0xEA67B0, 3), bytes.fromhex('83f916'))
+        self.assertEqual(self.read_rva(0xEA67C1, 3), bytes.fromhex('8b04c1'))
+
+    def test_information_and_pause_roles_have_distinct_lifecycle_and_update_methods(self):
+        for vtable, destructor, update in ((0x2628BD0,0x90CA30,0x9113C0),
+                                          (0x25B3CF8,0x4D7540,0x4D7610)):
+            self.assertEqual(struct.unpack('<Q',self.read_rva(vtable+0x18,8))[0],0x140000000+destructor)
+            self.assertEqual(struct.unpack('<Q',self.read_rva(vtable+0x100,8))[0],0x140000000+update)
 
     def test_parts_forward_to_owned_node_pointer_not_inline_holder(self):
         # Two independent forwarders read +98 then invoke the child, proving

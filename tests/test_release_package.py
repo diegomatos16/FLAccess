@@ -19,11 +19,22 @@ class ReleasePackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             archive, manifest = release.build(ROOT, directory)
             with zipfile.ZipFile(archive) as z:
-                self.assertEqual(json.loads(z.read('BUILD.json')), manifest)
-                for path, source in [('sider.dll', 'sider-core/sider.dll'),
-                                     ('modules/FLAccess-Prism/prism.dll', 'modules/FLAccess-Prism/prism.dll'),
-                                     ('modules/FLAccess.lua', 'modules/FLAccess.lua')]:
+                self.assertEqual(json.loads(z.read('sider/BUILD.json')), manifest)
+                self.assertEqual({p.split('/')[0] for p in z.namelist()}, {'livecpk', 'modules', 'sider'})
+                self.assertEqual(set(manifest['components']), {'FlAccessReader', 'FlAccessGameplay'})
+                for path, source in [('sider/sider.dll', 'sider-core/sider.dll'),
+                                     ('modules/FlAccessReader/bin/prism.dll', 'modules/FlAccessReader/bin/prism.dll'),
+                                     ('modules/FlAccessReader/FlAccessReader.lua', 'modules/FlAccessReader/FlAccessReader.lua'),
+                                     ('modules/FlAccessGameplay/FlAccessGameplay.lua', 'modules/FlAccessGameplay/FlAccessGameplay.lua'),
+                                     ('modules/FlAccessGameplay/bin/flaccess_audio_master.dll', 'modules/FlAccessGameplay/bin/flaccess_audio_master.dll')]:
                     self.assertEqual(z.read(path), (ROOT / source).read_bytes())
+                for camera_id in range(10):
+                    path = f'modules/FlAccessGameplay/engine/cameraRadars/camera_{camera_id:02d}.ini'
+                    self.assertEqual(z.read(path), (ROOT / path).read_bytes())
+                self.assertIn('modules/FlAccessGameplay/engine/cameraRadars.lua', z.namelist())
+                for asset in (ROOT / 'livecpk').rglob('*'):
+                    if asset.is_file(): self.assertEqual(z.read(asset.relative_to(ROOT).as_posix()), asset.read_bytes())
+                self.assertFalse(any('FLAccess-Audio' in p or 'FLAccess-text' in p or p.endswith('FLAccess.lua') for p in z.namelist()))
                 for name, digest in manifest['sha256'].items():
                     self.assertEqual(hashlib.sha256(z.read(name)).hexdigest(), digest)
                 self.assertFalse(any(name.endswith(('.log', '.exe')) or 'probe' in name for name in z.namelist()))
@@ -36,9 +47,9 @@ class ReleasePackageTests(unittest.TestCase):
     def test_packaging_stops_if_either_runtime_dll_is_missing(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = Path(directory) / 'source'
-            for name in ('modules/FLAccess.lua',
-                         'modules/FLAccess-Prism/licenses/LICENSE',
-                         'modules/FLAccess-Prism/licenses/NOTICE'):
+            for name in ('modules/FlAccessReader/FlAccessReader.lua',
+                         'modules/FlAccessReader/licenses/LICENSE',
+                         'modules/FlAccessReader/licenses/NOTICE'):
                 target = fixture / name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(ROOT / name, target)

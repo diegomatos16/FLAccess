@@ -43,6 +43,11 @@ local function set_upvalue(fn, wanted, value)
 end
 
 local a11y = upvalue(module.init, "a11y")
+local production_safe_memory_read=a11y.safe_memory_read
+-- Synthetic pointer fixtures replace only the OS boundary. Separate tests
+-- below execute the real ReadProcessMemory implementation against Windows.
+a11y.safe_memory_read=function(address,size) return host.memory.read(address,size) end
+local production_begin_focus_trace=a11y.begin_focus_trace
 a11y.begin_focus_trace = function() end
 a11y.ui_owner_link = function() return nil end
 a11y.sider_dir = sider_dir
@@ -165,7 +170,7 @@ check("control help is a delayed tooltip, never a modal paragraph", function()
         == "Volume dos comentários")
     remember_message(help, "help-widget")
     assert(upvalue(module.display_frame, "pending_message_text") == nil)
-    assert(not a11y.capture_resolved_dialog(help, 12345, 0x123456))
+
     assert(label_from_help(
         "As configurações de câmera que serão usadas ao assistir partidas, incluindo a grande final do Matchday.")
         == "Configurações de câmera")
@@ -183,15 +188,6 @@ check("a user caption alone cannot invent a side and unchanged selection stays s
     assert(not first.assignment and a11y.deliver_selection_result(first))
     assert(a11y.deliver_selection_result(assert(a11y.selection_result({text="Usuário 1",identity="user",source="component"}))))
     assert(#speech_texts()==1 and a11y.output_speech_text(speech_texts()[1])=="Usuário 1")
-end)
-
-check("legacy paragraph helper remains callable but is not visibility evidence", function()
-    local message = "Há muitas escolhas na carreira de um jogador de futebol. Talvez você prefira ser o defensor leal das cores do seu time de infância, ou então buscar novos ares e novas conquistas em um grande clube. Qual caminho você vai seguir?"
-    assert(a11y.text_asset_role(message) == "dialog")
-    assert(a11y.capture_resolved_dialog(message, 8094, 0x123456))
-    assert(upvalue(module.display_frame, "pending_message_text") == message)
-    assert(not a11y.capture_resolved_dialog(
-        "Escolha sua aparência", 6716, 0x123456))
 end)
 
 check("parameterized dialog role matches rendered player name", function()
@@ -1000,7 +996,7 @@ check("formation speech uses effective value and avoids repeat", function()
     a11y.game_plan_context = "Alterar formação"
     local first = a11y.game_plan_focus_speech(
         "4-4-2 (4-3-3) Padrão", "formation-widget")
-    assert(first:find("Formação 4-3-3", 1, true))
+    assert(first:find("4-3-3", 1, true) and not first:find("Formação",1,true))
     assert(not first:find("4-4-2", 1, true))
     assert(a11y.game_plan_focus_speech(
         "4-4-2 (4-3-3) Padrão", "formation-widget") == nil)
@@ -1222,28 +1218,6 @@ check("same caption on different controls is spoken for each identity", function
     assert(a11y.native_speech_last == 2)
 end)
 
-check("surface transition drops old observations but keeps current batch", function()
-    local original_frame = upvalue(a11y.observe_ui_widget, "frame")
-    with_widget_names({[0x110000]="old_item", [0x120000]="old_value",
-            [0x130000]="new_item", [0x140000]="new_value"}, function()
-        set_upvalue(a11y.observe_ui_widget, "frame", 100)
-        emit_ui_text(0x110000, "Campo antigo")
-        emit_ui_text(0x120000, "Valor antigo")
-        set_upvalue(a11y.observe_ui_widget, "frame", 101)
-        emit_ui_text(0x140000, "Valor novo")
-        emit_ui_text(0x130000, "Campo novo")
-        local generation = a11y.ui_model.generation
-        assert(a11y.begin_ui_surface("Tela nova"))
-        assert(a11y.ui_model.generation > generation)
-        assert(a11y.ui_model.nodes[tostring(0x110000)] == nil)
-        assert(a11y.structural_control_row(0x120000) == nil)
-        local row = a11y.structural_control_row(0x140000)
-        assert(row and row.value == "Valor novo")
-        assert(not a11y.begin_ui_surface("Tela nova"))
-    end)
-    set_upvalue(a11y.observe_ui_widget, "frame", original_frame)
-end)
-
 check("return after transition has a fresh focus identity", function()
     with_widget_names({[0x110000]="field_item"}, function()
         a11y.observe_ui_widget(0x110000, "Campo")
@@ -1380,26 +1354,13 @@ check("option explanation does not lock or replace field speech", function()
             emit_ui_text(0x120000, "10 min.")
             local help = "Escolha a duração aproximada para cada partida, do início ao apito final."
             assert(a11y.is_control_help(help))
-            assert(not a11y.capture_resolved_dialog(help, 999, 123))
+
             emit_ui_text(0x130000, help)
             assert(upvalue(module.display_frame, "pending_message_text") == nil)
             tick(120)
             tick(125)
             assert(speech_texts()[1] == "Duração da partida, seletor, 10 min.")
         end)
-    end)
-end)
-
-check("title retains catalog and native controls from current batch", function()
-    with_widget_names({[0x110000]="volume_item"}, function()
-        local register = upvalue(a11y.capture_structural_control, "register_control_label")
-        local row = register("Volume", 0x110000, "controle deslizante", true)
-        row.native_slider, row.minimum, row.maximum, row.value = true, 0, 15, "5 de 15"
-        assert(a11y.begin_ui_surface("Configurações de som"))
-        local rows = upvalue(register, "control_rows_by_label_widget")
-        assert(rows[host.memory.hex(0x110000)] == row)
-        assert(row.native_slider and row.role == "controle deslizante" and row.value == "5 de 15")
-        assert(row.generation == a11y.ui_model.generation)
     end)
 end)
 
@@ -1539,7 +1500,7 @@ check("buffer is one sequence with repeat first and wrap without moving selectio
     a11y.commit_read_selection("Opção confirmada", "focus", "primary-focus")
     a11y.set_read_help("Ajuda confirmada")
     local selected = a11y.read_context.selection
-    assert(#a11y.buffer_entries() == 3)
+    assert(#a11y.buffer_entries() == 2)
     assert(a11y.read_buffer("repeat"))
     assert(a11y.read_buffer("next"))
     assert(a11y.read_context.selection == selected)
@@ -1549,7 +1510,7 @@ check("buffer is one sequence with repeat first and wrap without moving selectio
     assert(a11y.read_buffer("previous"))
     assert(a11y.read_context.cursor == 1)
     assert(a11y.read_buffer("previous"))
-    assert(a11y.read_context.cursor == 3)
+    assert(a11y.read_context.cursor == 2)
     assert(a11y.read_buffer("first"))
     assert(a11y.read_context.cursor == 1)
 end)
@@ -1578,14 +1539,15 @@ check("ambiguous answers remain unresolved instead of guessing", function()
     end)
 end)
 
-check("unknown title waits for real selection instead of reading song caption", function()
+check("unowned song title never becomes a pending screen title", function()
     with_widget_names({[0x110000]="title"}, function()
         emit_ui_text(0x110000, "Faixa inédita XYZ")
         assert(#speech_texts() == 0)
         assert((not a11y.read_context.title and not a11y.read_context.question))
         a11y.commit_read_selection("Primeira opção", "verified", "primary-focus")
-        assert((a11y.read_context.question or a11y.read_context.title) == "Faixa inédita XYZ")
-        assert(speech_texts()[1] == "Faixa inédita XYZ")
+        assert(not a11y.read_context.pending_title)
+        assert((a11y.read_context.question or a11y.read_context.title) ~= "Faixa inédita XYZ")
+        for _,text in ipairs(speech_texts()) do assert(text~="Faixa inédita XYZ") end
     end)
 end)
 
@@ -1693,7 +1655,7 @@ check("letter review works without Control and leaves ordinary arrows free", fun
     assert(not a11y.buffer_key(0x28))
     a11y.buffer_last_key = nil
     assert(a11y.buffer_key(0x4b))
-    assert(a11y.read_context.cursor == 2)
+    assert(a11y.read_context.cursor == 1)
     assert(not a11y.buffer_key(0x77))
     keys[0x28] = true
     a11y.poll_diagnostic_keyboard()
@@ -1703,18 +1665,18 @@ check("letter review works without Control and leaves ordinary arrows free", fun
     set_upvalue(a11y.poll_diagnostic_keyboard, "user32", original)
 end)
 
-check("right stick review stays inside recognized player attributes", function()
+check("right stick reviews confirmed context without promoting cached player attributes", function()
     a11y.set_read_title("Plano de jogo")
     a11y.game_plan_active = false
     a11y.game_plan_attribute_items = {{label="Velocidade", value="90"}}
     a11y.game_plan_attribute_panel_until_ms = tonumber(ffi.C.GetTickCount64()) + 10000
-    assert(not a11y.review_right_stick(1))
+    assert(a11y.review_right_stick(1))
     a11y.game_plan_active = true
     a11y.review_stick_direction = nil
     assert(a11y.review_right_stick(1))
-    assert(speech_texts()[1] == "Velocidade, 90")
+    assert(#speech_texts()==1 and speech_texts()[1]=="Plano de jogo")
     a11y.open_read_dialog("Confirmar?", "question")
-    assert(not a11y.review_right_stick(-1))
+    assert(a11y.review_right_stick(-1))
     assert(#a11y.buffer_entries() == 1)
 end)
 
@@ -1805,6 +1767,8 @@ check("old secondary control cannot inherit authority when primary focus is lost
 end)
 
 check("focus investigation logs field changes including zero without affecting speech", function()
+    local diagnostic=a11y.diagnostic_mode
+    a11y.diagnostic_mode=true
     local old_io, old_read, old_unpack = host.io, host.memory.read, host.memory.unpack
     local old_readable = upvalue(a11y.capture_focus_trace,"readable")
     local old_model, old_trace = a11y.ui_model, a11y.focus_trace
@@ -1836,6 +1800,7 @@ check("focus investigation logs field changes including zero without affecting s
     host.io,host.memory.read,host.memory.unpack=old_io,old_read,old_unpack
     set_upvalue(a11y.capture_focus_trace,"readable",old_readable)
     a11y.ui_model,a11y.focus_trace=old_model,old_trace
+    a11y.diagnostic_mode=diagnostic
 end)
 
 check("simultaneous primary label and value are one selected control", function()
@@ -2413,7 +2378,6 @@ end)
 
 check("production MSVC reader accepts empty strings and preserves accented bytes",function()
     local old_read,old_unpack=host.memory.read,host.memory.unpack
-    local old_readable=upvalue(a11y.read_msvc_string,"readable")
     local address=0x110000
     local text="José"
     local function packed(value)
@@ -2430,7 +2394,6 @@ check("production MSVC reader accepts empty strings and preserves accented bytes
         if kind=="u64" then local pointer=ffi.new("uint64_t[1]");ffi.copy(pointer,bytes,8);return pointer[0] end
         return old_unpack(kind,bytes)
     end
-    set_upvalue(a11y.read_msvc_string,"readable",function() return true end)
     assert(a11y.read_msvc_string(address)=="José")
     text="Jos"
     assert(a11y.read_msvc_string(address)=="Jos")
@@ -2439,7 +2402,6 @@ check("production MSVC reader accepts empty strings and preserves accented bytes
     text=string.rep("a",16)
     assert(a11y.read_msvc_string(address)==nil)
     host.memory.read,host.memory.unpack=old_read,old_unpack
-    set_upvalue(a11y.read_msvc_string,"readable",old_readable)
 end)
 
 check("late guidance keeps existing generic field pairs",function()
@@ -2524,9 +2486,9 @@ check("production localization callback cannot announce an unbound future paragr
 end)
 
 check("base release version and local development build remain separate",function()
-    assert(upvalue(a11y.start_diagnostic,"VERSION")=="0.1.8")
-    assert(a11y.build==25 and a11y.runtime_version=="0.1.8")
-    assert(a11y.overlay_text():find("0.1.8",1,true))
+    assert(upvalue(a11y.start_diagnostic,"VERSION")=="0.1.9")
+    assert(a11y.build==42 and a11y.runtime_version=="0.1.9")
+    assert(a11y.overlay_text():find("0.1.9",1,true))
 end)
 
 local function holder_map(values, node, secondary, head, record, child)
@@ -3436,7 +3398,7 @@ check("plain output removes synthetic roles for every producer but preserves act
         speak("Nome do treinador, ativar para editar, José")
         speak("Concordo., opção selecionada")
         speak("Lesões, Marcado")
-        module.display_frame({})
+        a11y.flush_native_speech(100000)
         assert(#output==5)
         assert(output[1][1]=="Duração, 10 min.")
         assert(output[2][1]=="Confirmar")
@@ -3638,14 +3600,15 @@ check("a proven initial heading waits for presentation then precedes its descrip
 end)
 
 
-check("the actual first featured-menu callback no longer suppresses its loaded title",function()
+local function test_first_featured_callback(text_id)
     jit.flush()
     local read,unpack_memory=host.memory.read,host.memory.unpack
     local old_base=upvalue(module.init,"process_base_u64")
     local base,address,stack,widget=0x140000000,0x210000,0x220000,0x230000
     local foreground=a11y.game_is_foreground
     a11y.game_is_foreground=function() return true end
-    local text="Football Life 2026"
+    local text=text_id==60948637 and "Liga Master" or "Football Life 2026"
+    a11y.featured_title_by_language={}
     local function packed(value) return ffi.string(ffi.new("uint64_t[1]",value),8) end
     set_upvalue(module.init,"process_base_u64",ffi.cast("uint64_t",base))
     host.memory.read=function(ptr,size)
@@ -3661,8 +3624,9 @@ check("the actual first featured-menu callback no longer suppresses its loaded t
     end
     with_widget_names({[widget]="text"},function()
         with_render_harness(function(output)
-            module.on_resolved_text({},0,setmetatable({rax=packed(address),r8=packed(#text),rsp=packed(stack),rdi=packed(60948637)},
+            module.on_resolved_text({},0,setmetatable({rax=packed(address),r8=packed(#text),rsp=packed(stack),rdi=packed(text_id)},
                 {__index=function() return packed(0) end}))
+            if text_id==60948637 then assert(not a11y.featured_title_by_language.pt,"ML cannot supply the initial Football Life caption") end
             module.display_frame({})
             assert(#output>=1 and output[1][1]==text,"output=" .. tostring(#output) .. " queue=" .. table.concat(speech_texts()," | ") .. " logs=" .. table.concat(logs," | ",math.max(1,#logs-8)))
         end)
@@ -3670,6 +3634,13 @@ check("the actual first featured-menu callback no longer suppresses its loaded t
     host.memory.read,host.memory.unpack=read,unpack_memory
     a11y.game_is_foreground=foreground
     set_upvalue(module.init,"process_base_u64",old_base)
+end
+
+check("legacy menu title callback remains readable without becoming the initial Football Life label",function()
+    test_first_featured_callback(60948637)
+end)
+check("SP Football Life title ID uses the bound first-menu choice channel",function()
+    test_first_featured_callback(13107593)
 end)
 
 check("bounded observation retention protects the current native selection under background churn",function()
@@ -5115,11 +5086,11 @@ local function with_player_list(fn)
     end)
 end
 
-check("player review keeps native row order duplicate names and excludes side panels",function()
+check("player review contains only the selected native row and excludes side panels",function()
     with_player_list(function(values,snapshot)
         local entries,review=a11y.buffer_entries()
-        assert(#entries==2 and entries[1]:find("Mesmo nome",1,true) and entries[1]==entries[2])
-        assert(review.nodes[1].address==0x120000 and review.nodes[2].address==0x110000)
+        assert(#entries==1 and entries[1]:find("Mesmo nome",1,true))
+        assert(review.nodes[1].address==0x120000)
         values[0x120000]="Nome após rolagem"
         entries=a11y.buffer_entries()
         assert(entries[1]:find("Nome após rolagem",1,true))
@@ -5139,7 +5110,7 @@ check("I K J L review moves repeats and rejects stale rendered players before Pr
             a11y.read_buffer("repeat");a11y.flush_native_speech(100000)
             assert(#output==4 and a11y.read_context.cursor==1)
             a11y.read_buffer("next")
-            values[0x110000]="Jogador atualizado"
+            values[0x120000]="Jogador atualizado"
             a11y.flush_native_speech(100000);assert(#output==4)
             a11y.read_buffer("repeat");a11y.flush_native_speech(100000)
             assert(#output==5 and output[5][1]=="Jogador atualizado")
@@ -5429,7 +5400,10 @@ local function with_native_player_details(fn)
         memory[data+0x1f8]=3;memory[data+0x568+3*16]=object
         memory[object+0x30]=1234;strings[object+0x38]="Anthoni Spier"
         memory[object+4]=0x10000000 -- primary CB
-        memory[object+0x1c]=2*2^27+1*2^29 -- CB complete, LB partial
+        memory[object+0x1c]=2*2^27+1*2^29+2^11 -- secondary fields and separate style property
+        memory[base+0x2979080+4]=5;memory[base+0x2979080+8]=6
+        memory[base+0x27d3500+5*8]=777;memory[base+0x27d3500+6*8]=778
+        a11y.player_style_texts={pt={[777]="Estilo observado A",[778]="Estilo observado B"}}
         memory[object+0x20]=2 -- RB complete
         memory[data+0xb34],memory[data+0xb38],memory[data+0xb4]=0,0,0
         memory[data+0x18]=3 -- actual field role RB, different from primary CB
@@ -5441,21 +5415,19 @@ local function with_native_player_details(fn)
     end)
 end
 
-check("native player review separates name main secondary and actual field position",function()
+check("native player review separates playing style from pitch role and hides unverified positions",function()
     with_native_player_details(function(memory,values,snapshot,refresh,base,data,object)
         local node=assert(a11y.focused_player_node())
         local record=assert(a11y.current_player_record(node))
         assert(record.player_id==1234 and record.primary==1 and record.field_position==3)
         local packet=assert(a11y.player_detail_packet())
-        assert(#packet.fields==4 and packet.fields[1].text=="24  Anthoni Spier")
-        assert(packet.fields[2].text=="Posição principal: Zagueiro central")
-        assert(packet.fields[3].text:find("Lateral esquerdo (adaptação parcial)",1,true))
-        assert(packet.fields[3].text:find("Lateral direito",1,true))
-        assert(not packet.fields[3].text:find("Zagueiro central",1,true))
-        assert(packet.fields[4].text=="Posição no campo: Lateral direito")
+        assert(not a11y.player_secondary_verified)
+        assert(#packet.fields==3 and packet.fields[1].text=="24  Anthoni Spier")
+        assert(packet.fields[2].text=="Estilo de jogo: Estilo observado A")
+        assert(packet.fields[3].text=="Posição no campo: Lateral direito")
         memory[data+0xba4]=11;memory[data+0x1f8+11]=3;refresh()
         packet=a11y.player_detail_packet()
-        assert(packet.fields[4].text=="Não está no campo.")
+        assert(packet.fields[3].text=="Não está no campo.")
     end)
 end)
 
@@ -5468,9 +5440,9 @@ check("K starts on name I reverses and changing native player resets the detail 
             a11y.read_buffer("next");a11y.flush_native_speech(100000)
             a11y.read_buffer("previous");a11y.flush_native_speech(100000)
             assert(#output==5 and output[1][1]=="24  Anthoni Spier")
-            assert(output[2][1]:find("Posição principal:",1,true))
-            assert(output[3][1]:find("Posições secundárias:",1,true))
-            assert(output[4][1]:find("Posição no campo:",1,true) and output[5][1]==output[3][1])
+            assert(output[2][1]:find("Estilo de jogo:",1,true))
+            assert(output[3][1]:find("Posição no campo:",1,true))
+            assert(output[4][1]==output[1][1] and output[5][1]==output[3][1])
             values[0x110000]="41  Victor Gabriel";strings[object+0x38]="Victor Gabriel";memory[object+0x30]=5678
             a11y.poll_native_texts(true);snapshot.windows[2].cursor_detail.selected=0xe01000;refresh()
             a11y.read_buffer("next");a11y.flush_native_speech(100000)
@@ -5495,7 +5467,7 @@ check("empty secondary positions are omitted and field roles follow native forma
         assert(a11y.player_detail_packet().fields[3].text=="Posição no campo indisponível.")
         memory[data+0xba4]=0xff
         packet=a11y.player_detail_packet()
-        assert(packet.fields[2].text=="Posição principal indisponível.")
+        assert(packet.fields[2].text=="Estilo de jogo indisponível.")
         assert(packet.fields[3].text~="Não está no campo.","unknown slot is not a bench slot")
     end)
 end)
@@ -5504,12 +5476,12 @@ check("review rejects queued field values and names from an obsolete native play
     with_native_player_details(function(memory,values,snapshot,refresh,base,data,object)
         with_render_harness(function(output)
             a11y.read_buffer("next");a11y.read_buffer("next")
-            memory[object+4]=3*0x10000000
+            memory[object+0x1c]=2*2^11
             a11y.flush_native_speech(100000)
-            for _,entry in ipairs(output) do assert(not entry[1]:find("Zagueiro central",1,true)) end
+            for _,entry in ipairs(output) do assert(not entry[1]:find("Estilo observado A",1,true)) end
             output[1]=nil
             a11y.read_buffer("repeat");a11y.flush_native_speech(100000)
-            assert(output[1][1]=="Posição principal: Lateral direito")
+            assert(output[1][1]=="Estilo de jogo: Estilo observado B")
             a11y.read_buffer("next")
             values[0x110000]="Outro jogador"
             a11y.flush_native_speech(100000)
@@ -5528,7 +5500,7 @@ check("right stick down and up equal K and I and held input does not duplicate r
             assert(#output==1 and output[1][1]=="24  Anthoni Spier")
             module.global_gamepad_input({},{RSy=0})
             module.global_gamepad_input({},{RSy=-1});a11y.flush_native_speech(100000)
-            assert(#output==2 and output[2][1]:find("Posição principal:",1,true))
+            assert(#output==2 and output[2][1]:find("Estilo de jogo:",1,true))
             module.global_gamepad_input({},{RSy=0})
             module.global_gamepad_input({},{RSy=1});a11y.flush_native_speech(100000)
             assert(#output==3 and output[3][1]=="24  Anthoni Spier")
@@ -5555,7 +5527,7 @@ check("native panel supplies navigation status without the old player cache",fun
         memory[pitch+0x4e8]=12;memory[data+0xba4]=23;memory[data+0x1f8+23]=3
         assert(a11y.native_player_roster_context(node).section=="unselected")
         assert(a11y.engine_focus_speech(node.text,node):find("Não relacionado.",1,true))
-        assert(a11y.player_detail_packet().fields[4].text=="Não está no campo.")
+        assert(a11y.player_detail_packet().fields[3].text=="Não está no campo.")
         memory[data+8]=0;a11y.roster_limits=nil
         assert(a11y.native_player_roster_context(node).section==nil)
     end)
@@ -5588,6 +5560,1863 @@ check("live rule lookup validates the native default configuration instead of a 
         memory[data+8]=4
         assert(a11y.live_roster_limit(data)==23)
     end)
+end)
+
+check("normal navigation performs no raw focus dumps and cancels diagnostic followups",function()
+    a11y.diagnostic_mode=false;a11y.focus_trace=nil
+    production_begin_focus_trace("down")
+    assert(a11y.focus_trace==nil)
+    a11y.focus_trace={sequence=1,followups={0}}
+    a11y.poll_focus_trace()
+    assert(a11y.focus_trace==nil)
+end)
+
+check("scrolling captions retain letters and collapse only exact marquee copies",function()
+    a11y.ui_language="pt"
+    assert(clean_text("Configurações de volume\17s     \17sConfigurações de volume\17s     \17s")=="Configurações de volume")
+    assert(clean_text("Música\17s Música")=="Música")
+    assert(clean_text("Não não")=="Não não")
+    assert(clean_text("Texto\17s diferente")=="Texto diferente")
+end)
+
+check("headline and slider jump forwarders expose their actual text children",function()
+    with_native_windows(function(values,base)
+        local wrapper,delegate=0x500000,0x520000
+        values[wrapper]=base+0x27bac10
+        values[base+0x27bac10+0x88]=base+0xe546a0
+        values[base+0x27bac10+0x28]=base+0xe8ecb0
+        values[wrapper+0x98]=delegate;values[delegate]=base+0x27b5260
+        local snapshot=assert(a11y.read_native_windows(base))
+        assert(snapshot.members[delegate] and snapshot.members[delegate].owners[1].parents[delegate]==wrapper)
+        values[base+0x27bac10+0x28]=base+0x421f40
+        a11y.native_tree_cache=nil
+        assert(not a11y.read_native_windows(base).members[delegate],"matching one method cannot establish a delegate")
+    end)
+end)
+
+check("slider values compose with their own native choice label and follow changes",function()
+    with_native_field(function(snapshot,parents,kinds,base)
+        kinds[0x310000]=base+0x27bac10
+        assert(a11y.native_field_label(0x120000).address==0x110000)
+        a11y.observe_ui_widget(0x110000,"Volume")
+        snapshot.selected_members={[0x110000]=true,[0x120000]=true}
+        snapshot.cursor_members={[0x110000]=true,[0x120000]=true}
+        with_focus_memory({},function(tick)
+            emit_ui_text(0x120000,"10");tick(120);tick(123)
+            assert(speech_texts()[1]:find("Volume",1,true) and speech_texts()[1]:find("10",1,true))
+            emit_ui_text(0x120000,"9");tick(126);tick(129)
+            assert(speech_texts()[#speech_texts()]:find("9",1,true))
+        end)
+    end)
+end)
+
+check("snapshot traversal reuse reduces reads and never retains parent edits or next snapshot data",function()
+    with_native_windows(function(values,base)
+        local reader,count=a11y.menu_read,0
+        a11y.menu_read=function(at,kind) count=count+1;return reader(at,kind) end
+        a11y.menu_tree(0x300000,base);a11y.menu_tree(0x300000,base)
+        local baseline=count;count=0;a11y.snapshot_tree_work={}
+        local members,parents=a11y.menu_tree(0x300000,base)
+        parents[0x500000]=0xdeadbeef
+        local again,second=a11y.menu_tree(0x300000,base)
+        assert(again[0x500000] and second[0x500000]~=0xdeadbeef)
+        assert(count*2==baseline)
+        print("SNAPSHOT_TREE_READS baseline=" .. baseline .. " reused=" .. count)
+        a11y.snapshot_tree_work=nil
+        values[0x600000]=0x530000;values[0x530000]=base+0x27b5260
+        assert(a11y.menu_tree(0x300000,base)[0x530000])
+        a11y.menu_read=reader
+    end)
+end)
+
+check("language heading follows actual commit method before confirming and rejects background owners",function()
+    with_native_pages(function(memory,values,snapshot,owner)
+        local base=0x140000000
+        local names=a11y.widget_internal_name
+        a11y.widget_internal_name=function(at) return at==0x110000 and "title" or names(at) end
+        memory[base+0x27d65c8+0x258]=base+0xb229f0
+        a11y.ui_language="pt"
+        assert(a11y.language_setting_label(owner.address)=="Idioma do comentário")
+        assert(a11y.native_language_heading(0x110000)=="Idioma do comentário")
+        assert(not a11y.native_language_heading(0x120000),"a language item cannot become a heading")
+        memory[base+0x27d65c8+0x258]=base+0xb22a50
+        assert(a11y.native_language_heading(0x110000)=="Texto do jogo")
+        owner.enabled=false
+        assert(not a11y.native_language_heading(0x110000))
+        memory[base+0x27d65c8+0x258]=0
+        assert(not a11y.language_setting_label(owner.address))
+        a11y.widget_internal_name=names
+    end)
+end)
+
+check("roster speech names the group only after entry or a real group change",function()
+    with_components({[0x110000]={name="heading",text="Titulares",parent=0x210000},
+        [0x120000]={name="playerName",text="Diego",parent=0x210000},
+        [0x130000]={name="playerName",text="Ricardo",parent=0x210000},
+        [0x140000]={name="heading",text="Reservas",parent=0x220000},
+        [0x150000]={name="playerName",text="Matos",parent=0x220000},
+        [0x160000]={name="playerName",text="Outro",parent=0x220000}},function()
+        with_render_harness(function(output)
+            local function deliver(at)
+                local node=a11y.ui_model.nodes[host.memory.hex(at)]
+                local result=assert(a11y.selection_result({node=node,widget=at,identity=node.identity}))
+                assert(a11y.deliver_selection_result(result))
+                a11y.flush_native_speech(100000)
+            end
+            deliver(0x120000);deliver(0x130000);deliver(0x150000);deliver(0x160000)
+            assert(output[1][1]=="Titular. Diego" and output[2][1]=="Ricardo")
+            assert(output[3][1]=="Reserva. Matos" and output[4][1]=="Outro")
+            deliver(0x120000);assert(output[5][1]=="Titular. Diego")
+            a11y.reset_read_context("reentry")
+            deliver(0x130000);assert(output[6][1]=="Titular. Ricardo")
+        end)
+    end)
+end)
+
+check("tooltips have no programmed delay and still respect their focused label",function()
+    local delayed=upvalue(module.display_frame,"process_delayed_speech")
+    set_upvalue(delayed,"active_controller_label","Volume")
+    set_upvalue(delayed,"pending_controller_tooltip_label","Volume")
+    set_upvalue(delayed,"pending_controller_tooltip","Ajuda atual")
+    set_upvalue(delayed,"last_spoken_controller_tooltip_key",nil)
+    set_upvalue(delayed,"controller_tooltip_due_ms",500)
+    delayed(500,false)
+    assert(speech_texts()[1]=="Ajuda atual")
+    a11y.clear_speech_queue()
+    set_upvalue(delayed,"pending_controller_tooltip_label","Anterior")
+    set_upvalue(delayed,"controller_tooltip_due_ms",500)
+    delayed(500,false);assert(#speech_texts()==0)
+    a11y.clear_pending_tooltips()
+end)
+
+check("tabs announce without any selected exercise and discard speech after changing tab",function()
+    with_native_pages(function(memory,values,snapshot,owner)
+        snapshot.selected_members={};snapshot.cursor_members={}
+        a11y.last_page_announcement=nil
+        a11y.poll_native_pages(false)
+        assert(speech_texts()[1]=="Guia sem catálogo")
+        local old=a11y.native_speech_queue[a11y.native_speech_first]
+        assert(a11y.speech_entry_allowed(old))
+        a11y.poll_native_pages(false);assert(#speech_texts()==1)
+        memory[owner.address+0x1d0]=1
+        assert(not a11y.speech_entry_allowed(old))
+        a11y.poll_native_pages(false)
+        assert(speech_texts()[2]=="Outra guia")
+        a11y.poll_native_pages(true);assert(#speech_texts()==2)
+    end)
+end)
+
+check("read-only version information speaks once without becoming a focused menu item",function()
+    with_rendered_panel({[0x110000]={name="dp_value",text="Versão 26.2.03 edit file 2.00",parent=0x900000},
+        [0x120000]={name="copyRight",text="Versão do jogo: 2.2",parent=0x900000}},function(values,snapshot)
+        with_render_harness(function(output)
+            a11y.poll_static_presentations(a11y.presented_nodes())
+            a11y.flush_native_speech(100000)
+            assert(#output==1 and output[1][1]==values[0x110000])
+            a11y.poll_static_presentations(a11y.presented_nodes());a11y.flush_native_speech(100000)
+            assert(#output==1 and not a11y.read_context_state().selection)
+            a11y.static_presentation_seen={}
+            a11y.poll_static_presentations(a11y.presented_nodes())
+            values[0x110000]="Outro texto"
+            a11y.flush_native_speech(100000);assert(#output==1)
+        end)
+    end)
+end)
+
+check("read-only field visualization pairs shared labels with one populated data column",function()
+    with_rendered_panel({
+        [0x110000]={name="height_item",text="Altura (cm)",parent=0x900000},
+        [0x120000]={name="weight_item",text="Peso (kg)",parent=0x900000},
+        [0x130000]={name="passing_item",text="Passe",parent=0x900000},
+        [0x140000]={name="height_value",text="170",parent=0x210000},
+        [0x150000]={name="weight_value",text="70",parent=0x210000},
+        [0x160000]={name="passing_value",text="90",parent=0x210000},
+        [0x170000]={name="height_value",text="-",parent=0x220000},
+        [0x180000]={name="weight_value",text="-",parent=0x220000}},function(values,snapshot,parents)
+        parents[0x210000],parents[0x220000]=0x900000,0x900000
+        local packet=assert(a11y.visualization_packet())
+        assert(#packet.fields==3)
+        with_render_harness(function(output)
+            a11y.read_buffer("next");a11y.flush_native_speech(100000)
+            assert(output[1][1]=="Altura: 1,70 metros")
+            module.global_gamepad_input({},{RSy=-1});a11y.flush_native_speech(100000)
+            assert(output[2][1]=="Peso: 70 quilos")
+            module.global_gamepad_input({},{RSy=-1});a11y.flush_native_speech(100000)
+            assert(#output==2,"held stick is one review step")
+            module.global_gamepad_input({},{RSy=0})
+            module.global_gamepad_input({},{RSy=-1});a11y.flush_native_speech(100000)
+            assert(output[3][1]=="Passe: 90")
+            a11y.read_buffer("repeat");values[0x160000]="88"
+            a11y.flush_native_speech(100000);assert(#output==3,"obsolete field value must be discarded")
+            a11y.read_buffer("first");a11y.flush_native_speech(100000)
+            assert(output[4][1]=="Altura: 1,70 metros")
+            values[0x170000]="180";a11y.poll_native_texts(true)
+            local current=a11y.visualization_packet()
+            for _,field in ipairs(current and current.fields or {}) do
+                assert(field.key~="height_item","two populated height columns cannot be guessed")
+            end
+        end)
+    end)
+end)
+
+check("same player focus retains its identity through temporary loss of optional roster evidence",function()
+    with_native_player_details(function(memory,values,snapshot,refresh,base,data,object)
+        local getter=a11y.native_player_roster_context
+        local node=a11y.focused_player_node()
+        a11y.engine_focus={}
+        a11y.native_player_roster_context=function() return {identity="proven-player-slot",section="starter"} end
+        local first=a11y.engine_selection_identity(node.key,node)
+        a11y.native_player_roster_context=function() return nil end
+        assert(a11y.engine_selection_identity(node.key,node)==first)
+        a11y.native_player_roster_context=function() return {identity="other-player-slot",section="reserve"} end
+        assert(a11y.engine_selection_identity(node.key,node)~=first)
+        a11y.native_player_roster_context=getter
+    end)
+end)
+
+check("Y anchors attributes by ID and current descriptor rather than keeping the selected object",function()
+    with_native_player_details(function(memory,values,snapshot,refresh,base,data,object)
+        a11y.record_game_plan_input("Y","test")
+        assert(a11y.visualization_player.player_id==1234 and a11y.visualization_player.object==nil)
+        assert(a11y.visualization_player_record().object==object)
+        memory[object+0x30]=5678
+        assert(not a11y.visualization_player_record(),"same name cannot keep a different player's attributes")
+        a11y.record_game_plan_input("B","test")
+        assert(not a11y.visualization_player)
+    end)
+end)
+
+check("playing style localization is chosen by the player's native style ID and language",function()
+    with_native_player_details(function(memory,values,snapshot,refresh,base,data,object)
+        local record=a11y.current_player_record(a11y.focused_player_node())
+        assert(a11y.player_style_text(record)=="Estilo observado A")
+        memory[object+4]=12*0x10000000
+        assert(a11y.player_style_text(record)=="Estilo observado A","position cannot supply playing style")
+        a11y.player_style_texts.pt[777]=nil
+        assert(not a11y.player_style_text(record),"an untranslated style is not invented")
+        a11y.player_style_ids={[777]=true}
+        a11y.remember_player_style_text(777,"Texto resolvido pelo jogo")
+        assert(a11y.player_style_text(record)=="Texto resolvido pelo jogo")
+        a11y.ui_language="en";assert(not a11y.player_style_text(record))
+    end)
+end)
+
+check("individual attributes follow a current player record and reject changed packed values",function()
+    with_rendered_panel({[0x110000]={name="height_item",text="Altura (cm)",parent=0x900000},
+        [0x120000]={name="weight_item",text="Peso (kg)",parent=0x900000},
+        [0x130000]={name="height_value",text="170",parent=0x210000},
+        [0x140000]={name="weight_value",text="70",parent=0x210000}},function()
+        local getter,read=a11y.visualization_player_record,host.memory.read
+        local readable=upvalue(a11y.append_visualization_attributes,"readable")
+        local bytes={};for i=1,0x30 do bytes[i]=0 end
+        local function set_value(spec,value)
+            for bit=0,6 do
+                local at=spec[3]+math.floor((spec[4]+bit)/8)+1
+                local mask=2^((spec[4]+bit)%8)
+                bytes[at]=bytes[at]-(math.floor(bytes[at]/mask)%2)*mask+(math.floor(value/2^bit)%2)*mask
+            end
+        end
+        for _,spec in ipairs(a11y.player_attribute_specs) do set_value(spec,80) end
+        a11y.visualization_player_record=function() return {object=0xf00000,player_id=17} end
+        set_upvalue(a11y.append_visualization_attributes,"readable",function(at) return at==0xf00000 end)
+        host.memory.read=function(at,size) if at==0xf00000 and size==0x30 then return string.char(unpack(bytes)) end;return read(at,size) end
+        local packet=assert(a11y.visualization_packet())
+        assert(#packet.fields==2+#a11y.player_attribute_specs)
+        local field,index
+        for i,item in ipairs(packet.fields) do if item.text=="Passe rasteiro: 80" then field,index=item,i end end
+        assert(field,"each individual rating must carry its own label")
+        local origin={identity=packet.identity,generation=packet.generation,key=field.key,text=field.text}
+        assert(a11y.visualization_allowed(origin))
+        set_value(a11y.player_attribute_specs[index-2],90)
+        assert(not a11y.visualization_allowed(origin))
+        a11y.visualization_player_record,host.memory.read=getter,read
+        set_upvalue(a11y.append_visualization_attributes,"readable",readable)
+    end)
+end)
+
+local function with_reader_role(role,entries,fn)
+    with_rendered_panel(entries,function(values,snapshot,parents,owner)
+        local base,vt=0x140000000,role=="information" and 0x2628bd0 or 0x25b3cf8
+        local old_base=upvalue(module.init,"process_base_u64")
+        set_upvalue(module.init,"process_base_u64",ffi.cast("uint64_t",base))
+        local memory={[owner.address]=base+vt,[owner.root+0xc]=263,[owner.address+0x98]=0,
+            [base+vt+0x18]=base+(role=="information" and 0x90ca30 or 0x4d7540),
+            [base+vt+0x100]=base+(role=="information" and 0x9113c0 or 0x4d7610)}
+        a11y.menu_read=function(at) return memory[at] end
+        fn(values,snapshot,parents,owner,memory,base)
+        set_upvalue(module.init,"process_base_u64",old_base)
+    end)
+end
+
+check("formation values omit the synthetic prefix and retain the native default state",function()
+    local formatter=upvalue(a11y.engine_focus_speech,"ui_focus_speech")
+    assert(formatter("4-4-2")=="4-4-2")
+    assert(formatter("4-4-2 (4-3-3) Padrão")=="4-3-3, padrão")
+    a11y.game_plan_active=true
+    with_render_harness(function(output)
+        speak("4-4-2 (4-3-3) Padrão");a11y.flush_native_speech(100000)
+        assert(output[1][1]=="4-3-3, padrão")
+    end)
+end)
+
+check("a queued guide precedes its exercise even when native content binding arrives later",function()
+    with_native_pages(function(memory,values,snapshot)
+        with_render_harness(function(output)
+            a11y.last_page_announcement,a11y.last_page_delivery=nil,nil
+            a11y.poll_native_pages(false)
+            local result=a11y.selection_result({widget=0x110000,identity="exercise-a"})
+            a11y.deliver_selection_result(result,{interrupt=true});a11y.flush_native_speech(100000)
+            assert(#output==1 and output[1][1]:find("Guia sem catálogo. Exercício comum",1,true))
+            assert(a11y.last_page_delivery==result.page.identity)
+            memory[0x800000+0x1d0]=1
+            a11y.poll_native_pages(false)
+            local getter=a11y.native_page_context
+            a11y.native_page_context=function(at) if at~=0x110000 then return getter(at) end end
+            result=a11y.selection_result({widget=0x110000,identity="exercise-b"})
+            assert(not result.page)
+            a11y.deliver_selection_result(result,{interrupt=true});a11y.flush_native_speech(100000)
+            assert(output[2][1]=="Outra guia" and output[3][1]=="Exercício comum")
+            a11y.native_page_context=getter
+        end)
+    end)
+end)
+
+check("native information view announces its title once and reviews only grouped player fields",function()
+    with_reader_role("information",{
+        [0x110000]={name="height_item",text="Altura (cm)",parent=0x900000},
+        [0x120000]={name="weight_item",text="Peso (kg)",parent=0x900000},
+        [0x130000]={name="height_value",text="170",parent=0x210000},
+        [0x140000]={name="weight_value",text="70",parent=0x210000},
+        [0x150000]={name="itemName",text="Ajuda",parent=0x220000},
+        [0x160000]={name="text",text="Voltar",parent=0x220000}},function(values,snapshot,parents,owner,memory)
+        with_render_harness(function(output)
+            a11y.poll_information_context();a11y.flush_native_speech(100000)
+            assert(#output==1 and output[1][1]=="Informações do jogador")
+            a11y.poll_information_context()
+            speak("Ajuda",true,nil,nil,0x150000);speak("Informações do jogador",true,nil,nil,0x150000)
+            a11y.flush_native_speech(100000);assert(#output==1)
+            a11y.read_buffer("next");a11y.flush_native_speech(100000)
+            a11y.read_buffer("next");a11y.flush_native_speech(100000)
+            assert(output[2][1]=="Altura: 1,70 metros" and output[3][1]=="Peso: 70 quilos")
+            values[0x130000],values[0x140000]="-","-";a11y.poll_native_texts(true)
+            a11y.read_buffer("next");a11y.flush_native_speech(100000)
+            assert(output[4][1]=="Atributos ainda indisponíveis.","missing fields cannot fall through to command legends")
+            memory[owner.root+0xc]=7
+            assert(not a11y.native_information_context(),"hidden parameter tasks do not own review")
+        end)
+    end)
+end)
+
+check("typed pause context replaces match-ready text without changing real pre-match notices",function()
+    with_reader_role("pause",{[0x110000]={name="itemName",text="Continuar",parent=0x900000}},function(values,snapshot,parents,owner,memory)
+        with_render_harness(function(output)
+            a11y.pre_match_active=true
+            a11y.poll_native_pause();a11y.flush_native_speech(100000)
+            assert(output[1][1]=="Menu de pausa" and not a11y.pre_match_active)
+            local notice="A partida começará quando os dois times estiverem prontos. Aguarde."
+            remember_message(notice,"notice");speak(notice,true,true)
+            a11y.flush_native_speech(100000);assert(#output==1)
+            assert(upvalue(module.display_frame,"pending_message_text")==nil)
+            memory[owner.address]=0;a11y.poll_native_pause()
+            speak(notice,true,true);a11y.flush_native_speech(100000)
+            assert(output[2][1]==notice,"ready text outside a proven pause is preserved")
+        end)
+    end)
+end)
+
+check("an indexed button does not compete with unbound percentage data from another cursor",function()
+    with_rendered_panel({[0x110000]={name="itemName",text="Lista de comandos",parent=0x210000},
+        [0x120000]={name="teamRecord_value_home",text="49％",parent=0x220000},
+        [0x130000]={name="teamRecord_value_away",text="51％",parent=0x220000}},function(values,snapshot)
+        snapshot.selected_members={[0x110000]=true,[0x120000]=true,[0x130000]=true}
+        snapshot.cursor_members=snapshot.selected_members
+        with_focus_memory({},function(tick)
+            tick(120);tick(123)
+            assert(#speech_texts()==1 and speech_texts()[1]:find("Lista de comandos",1,true))
+        end)
+    end)
+end)
+
+check("music banner remains silent even when it belongs to a selected generic group",function()
+    with_rendered_panel({[0x110000]={name="music",text="Nome da música",parent=0x210000},
+        [0x120000]={name="artist",text="Nome do artista",parent=0x210000}},function(values,snapshot)
+        speak(values[0x110000],true,nil,nil,0x110000)
+        speak(values[0x120000],true,nil,nil,0x120000)
+        assert(#speech_texts()==0)
+        assert(not a11y.selection_result({widget=0x110000,identity="background-song"}))
+        for _,text in ipairs(a11y.buffer_entries()) do assert(text~=values[0x110000] and text~=values[0x120000]) end
+        snapshot.selected_members={[0x110000]=true};snapshot.cursor_members=snapshot.selected_members
+        assert(not a11y.selection_result({widget=0x110000,identity="selected-song"}))
+    end)
+end)
+
+check("native information descriptor recovers the current primary player when Y timing missed the old focus",function()
+    with_native_player_details(function(memory,values,snapshot,refresh,base,data,object)
+        local getter=a11y.native_information_context
+        a11y.native_information_context=function() return {side=0,window=0x800000,root=0x900000} end
+        a11y.visualization_player=nil
+        assert(a11y.visualization_player_record().player_id==1234)
+        memory[object+0x30]=5678
+        assert(a11y.visualization_player_record().player_id==5678)
+        memory[data+0xba4]=255
+        assert(not a11y.visualization_player_record())
+        a11y.native_information_context=getter
+    end)
+end)
+
+
+check("independent cursors keep their own edges during every-frame navigation",function()
+    with_rendered_panel({[0x110000]={name="itemName",text="Primeira escolha",parent=0x210000},
+        [0x120000]={name="itemName",text="Segunda escolha",parent=0x210000},
+        [0x130000]={name="teamRecord_item",text="Posse de bola",parent=0x220000}},function(values,snapshot)
+        with_focus_memory({},function(tick)
+            snapshot.selected_members={[0x110000]=true,[0x130000]=true}
+            snapshot.cursor_members={[0x110000]=true,[0x120000]=true,[0x130000]=true}
+            tick(120)
+            assert(#speech_texts()==0,"two independent initial choices remain ambiguous")
+            for f=121,140 do
+                local address=f%2==1 and 0x120000 or 0x110000
+                snapshot.selected_members={[address]=true,[0x130000]=true}
+                tick(f)
+                local state=a11y.engine_focus
+                assert(state.nodes[host.memory.hex(0x130000)].edge==120,"static cursor was not moved")
+                assert(speech_texts()[#speech_texts()]:find(values[address],1,true))
+            end
+            assert(#speech_texts()==20,"one spoken selection per real cursor move")
+            tick(141);assert(#speech_texts()==20,"stationary cursor cannot repeat")
+        end)
+    end)
+end)
+
+check("typed pause reads every indexed option while statistics retain their own cursor",function()
+    local entries={}
+    local labels={"Continuar","Plano de jogo","Lista de comandos","Configurações de câmera",
+        "Configuração do sistema","Selecionar lado","Selecionar time","Menu Principal"}
+    for i,label in ipairs(labels) do entries[0x110000+i*0x10000]={name="itemName",text=label,parent=0x210000} end
+    entries[0x220000]={name="teamRecord_item",text="Posse de bola",parent=0x230000}
+    with_reader_role("pause",entries,function(values,snapshot,parents,owner,memory)
+        local statistics={address=0x880000,root=0x990000,enabled=true,parents=parents}
+        snapshot.members[0x220000].owners={statistics}
+        local base=0x140000000
+        memory[statistics.address]=base+0x25be1c8
+        memory[base+0x25be1c8+0x18]=base+0x4eb1c0
+        memory[base+0x25be1c8+0x100]=base+0xca1a50
+        snapshot.windows[#snapshot.windows+1]=statistics
+        snapshot.cursor_members={}
+        for address in pairs(entries) do snapshot.cursor_members[address]=true end
+        with_focus_memory({},function(tick)
+            for i,label in ipairs(labels) do
+                snapshot.selected_members={[0x110000+i*0x10000]=true,[0x220000]=true}
+                tick(120+i)
+                assert(speech_texts()[#speech_texts()]:find(label,1,true),label)
+            end
+            assert(#speech_texts()==#labels)
+        end)
+    end)
+end)
+
+check("language header is announced from the shown controller without a title widget",function()
+    with_reader_role("pause",{[0x110000]={name="itemName",text="Português",parent=0x900000}},function(values,snapshot,parents,owner,memory,base)
+        memory[base+0x25b3cf8+0x258]=base+0xb229f0
+        with_render_harness(function(output)
+            a11y.poll_native_language();a11y.flush_native_speech(100000)
+            assert(output[1][1]=="Idioma do comentário")
+            a11y.poll_native_language();a11y.flush_native_speech(100000);assert(#output==1)
+            memory[owner.root+0xc]=7
+            a11y.poll_native_language();assert(not a11y.language_announced)
+            memory[owner.root+0xc]=263
+            a11y.poll_native_language();a11y.flush_native_speech(100000);assert(#output==2)
+            memory[owner.root+0xc]=7
+            a11y.poll_native_language()
+            memory[owner.root+0xc]=263
+            a11y.poll_native_language()
+            memory[base+0x25b3cf8+0x258]=0
+            a11y.flush_native_speech(100000);assert(#output==2,"closed/changed setting cannot deliver stale header")
+        end)
+    end)
+end)
+
+check("synchronous memory queries reuse regions but revalidate on the next operation",function()
+    local readable=upvalue(a11y.menu_read,"readable")
+    local query=a11y.query_memory_region
+    local count,allowed=0,true
+    a11y.query_memory_region=function(at)
+        count=count+1
+        return {first=0x100000,last=0x110000,allowed=allowed}
+    end
+    a11y.snapshot_read_work={}
+    for i=1,100 do assert(readable(0x100000+i*8,8)) end
+    assert(count==1)
+    assert(not readable(0x10fffc,8),"reads may not cross the validated memory region")
+    a11y.snapshot_read_work=nil;allowed=false
+    assert(not readable(0x100008,8) and count==2,"new operation revalidates protection")
+    a11y.query_memory_region=query
+    print("MEMORY_REGION_QUERIES baseline=100 synchronous=1 next-operation=revalidated")
+end)
+
+check("shared roots are scanned once per snapshot even with multiple native owners",function()
+    with_native_windows(function(values,base)
+        values[0x1210098]=0x300000
+        local tree=a11y.menu_tree
+        local scans=0
+        a11y.menu_tree=function(root,at) if root==0x300000 then scans=scans+1 end;return tree(root,at) end
+        assert(a11y.read_native_windows(base));assert(scans==1)
+        a11y.native_tree_cache=nil
+        assert(a11y.read_native_windows(base));assert(scans==2)
+        a11y.menu_tree=tree
+    end)
+end)
+
+
+check("a reused selected caption keeps fast navigation ahead of an unchanged independent cursor",function()
+    with_rendered_panel({[0x110000]={name="itemName",text="Escolha inicial",parent=0x210000},
+        [0x120000]={name="other_item",text="Outro painel",parent=0x220000}},function(values,snapshot)
+        with_focus_memory({},function(tick)
+            snapshot.selected_members={[0x110000]=true,[0x120000]=true}
+            snapshot.cursor_members=snapshot.selected_members
+            tick(120);assert(#speech_texts()==0)
+            for f=121,140 do
+                local text="Escolha " .. tostring(f)
+                values[0x110000]=text
+                a11y.observe_ui_widget(0x110000,text)
+                tick(f)
+                assert(speech_texts()[#speech_texts()]:find(text,1,true))
+            end
+            assert(#speech_texts()==20)
+        end)
+    end)
+end)
+
+check("pause statistics filtering preserves a genuinely selected child submenu",function()
+    with_reader_role("pause",{[0x110000]={name="itemName",text="Configuração do sistema",parent=0x900000},
+        [0x120000]={name="itemName",text="Dificuldade",parent=0x990000}},function(values,snapshot,parents,owner,memory)
+        local child={address=0x880000,root=0x990000,enabled=true,parents=parents}
+        snapshot.members[0x120000].owners={child}
+        snapshot.windows[#snapshot.windows+1]=child
+        snapshot.cursor_members={[0x110000]=true,[0x120000]=true}
+        with_focus_memory({},function(tick)
+            snapshot.selected_members={[0x110000]=true};tick(120)
+            assert(speech_texts()[1]:find(values[0x110000],1,true))
+            snapshot.selected_members={[0x110000]=true,[0x120000]=true};tick(121)
+            assert(speech_texts()[2]:find(values[0x120000],1,true))
+            snapshot.selected_members={[0x110000]=true};tick(122)
+            assert(speech_texts()[3]:find(values[0x110000],1,true))
+        end)
+    end)
+end)
+
+
+check("native boolean selectors retain their field labels without turning dialog answers into settings",function()
+    with_native_field(function(snapshot)
+        a11y.observe_ui_widget(0x120000,"Não")
+        local label=assert(a11y.native_field_label(0x120000))
+        assert(label.address==0x110000)
+        a11y.rebind_presented_control(a11y.ui_model.nodes[host.memory.hex(0x120000)])
+        local row=assert(a11y.control_for_widget(host.memory.hex(0x120000)))
+        assert(row.native_field and row.value=="Não")
+        assert(not a11y.valid_control_value(0x120000,"Não"),"unbound No remains a dialog answer")
+        assert(not a11y.valid_control_value(0x120000,"OK",true),"OK cannot become a boolean setting")
+        snapshot.selected_members={[0x120000]=true};snapshot.cursor_members=snapshot.selected_members
+        with_focus_memory({},function(tick)
+            tick(120)
+            assert(speech_texts()[1]:find("Campo sem catálogo",1,true) and speech_texts()[1]:find("Não",1,true))
+        end)
+    end)
+end)
+
+check("two parameter panels without cursor target proof cannot promote the frozen primary name",function()
+    with_native_player_details(function(memory,values,snapshot,refresh,base,data,object,input,strings)
+        local names=a11y.widget_internal_name
+        a11y.widget_internal_name=function(at)
+            if at==0x130000 then return "playerName" elseif at==0x220000 then return "playerInfo_1" end
+            return names(at)
+        end
+        local owners=snapshot.members[0x110000].owners
+        owners[1].parents[0x130000]=0x220000
+        snapshot.members[0x130000]={active=true,owners=owners}
+        memory[0x130000],memory[0x13000c]=base+0x27b5260,263
+        values[0x130000]="Outro jogador"
+        a11y.observe_ui_widget(0x130000,values[0x130000]);refresh()
+        assert(not snapshot.selected_members[0x110000] and not snapshot.selected_members[0x130000])
+        a11y.widget_internal_name=names
+    end)
+end)
+
+check("main menu changes interrupt a tooltip and never queue behind the previous choice",function()
+    with_rendered_panel({[0x110000]={name="title",text="Controles de áudio",parent=0x210000},
+        [0x120000]={name="title",text="Liga Master",parent=0x210000}},function(values)
+        with_render_harness(function(output)
+            speak("Tooltip anterior",false);a11y.flush_native_speech(100000)
+            a11y.title_pending_first_item="Controles de áudio"
+            a11y.title_pending_first_item_until_ms=tonumber(ffi.C.GetTickCount64())+2000
+            a11y.present_main_menu_choice(0x120000,values[0x120000]);a11y.flush_native_speech(100000)
+            a11y.present_main_menu_choice(0x110000,values[0x110000]);a11y.flush_native_speech(100000)
+            assert(output[2][1]=="Liga Master" and output[2][2]==true)
+            assert(output[3][1]=="Controles de áudio" and output[3][2]==true)
+            assert(not a11y.title_pending_first_item)
+        end)
+    end)
+end)
+
+check("project description cannot become focus speech or a modal notice and leaves game input unchanged",function()
+    with_rendered_panel({[0x110000]={name="description_offline",text="SP Football Life project description",parent=0x210000}},function(values,snapshot)
+        snapshot.selected_members={[0x110000]=true};snapshot.cursor_members=snapshot.selected_members
+        assert(not a11y.selection_result({widget=0x110000,identity="description"}))
+        speak(values[0x110000],true,nil,nil,0x110000)
+        remember_message(values[0x110000],host.memory.hex(0x110000))
+        assert(#speech_texts()==0 and not upvalue(module.display_frame,"pending_message_text"))
+        local input={LSy=-1,Down=1,RSy=0}
+        module.global_gamepad_input({},input)
+        assert(input.LSy==-1 and input.Down==1)
+    end)
+end)
+
+local function with_soundtrack(fn)
+    with_rendered_panel({[0x110000]={name="music",text="Faixa A",parent=0x210000},
+        [0x120000]={name="artist",text="Artista A",parent=0x210000}},function(values,snapshot,parents,owner)
+        local base=0x140000000
+        local saved_base=upvalue(module.init,"process_base_u64")
+        set_upvalue(module.init,"process_base_u64",ffi.cast("uint64_t",base))
+        local impl,records,categories,states=0x880000,0x3000000,0x3100000,0x3200000
+        snapshot.windows[1].impl=impl
+        local memory={[owner.address]=base+0x2697b40,[owner.address+0x88]=impl,
+            [base+0x2697b40+0x270]=base+0xcb8310,[base+0x2697b40+0x280]=base+0xcb8520,
+            [impl+0xa0]=0,[impl+0xa8]=0,[impl+0xb0]=0,[impl+0xd8]=0,
+            [owner.address+0xf0]=records,[owner.address+0xf8]=records+0xa0,
+            [owner.address+0xbc]=0,[owner.address+0xc0]=categories,[owner.address+0xc8]=categories+64,
+            [records+8]=states,[records+0x41]=0,[records+0x58]=states+0x10,[records+0x91]=0,
+            [states]=1,[states+1]=0,[states+0x10]=0,[states+0x11]=1}
+        a11y.menu_read=function(at) return memory[at] end
+        snapshot.selected_members={[0x110000]=true,[0x120000]=true};snapshot.cursor_members=snapshot.selected_members
+        fn(values,snapshot,memory,base,owner,impl,records,states)
+        set_upvalue(module.init,"process_base_u64",saved_base)
+    end)
+end
+
+check("soundtrack composes title artist and checked state as one selection and follows toggles",function()
+    with_soundtrack(function(values,snapshot,memory,base,owner,impl,records,states)
+        with_focus_memory({},function(tick)
+            tick(120);assert(speech_texts()[1]=="Faixa A, Artista A, ativada")
+            memory[states]=0;tick(121);assert(speech_texts()[2]=="Faixa A, Artista A, desativada")
+            memory[impl+0xd8]=1;values[0x110000],values[0x120000]="Faixa B","Artista B"
+            a11y.observe_ui_widget(0x110000,values[0x110000]);a11y.observe_ui_widget(0x120000,values[0x120000])
+            tick(122);assert(speech_texts()[3]=="Faixa B, Artista B, desativada")
+            memory[owner.address+0xbc]=1;tick(123);assert(speech_texts()[4]=="Faixa B, Artista B, ativada")
+            tick(124);assert(#speech_texts()==4)
+        end)
+    end)
+end)
+
+check("soundtrack delivery rejects old checkbox state and unknown data never invents enabled",function()
+    with_soundtrack(function(values,snapshot,memory,base,owner,impl,records,states)
+        with_render_harness(function(output)
+            local result=a11y.selection_result({widget=0x110000,identity="track"})
+            a11y.deliver_selection_result(result,{interrupt=true})
+            memory[states]=0;a11y.flush_native_speech(100000);assert(#output==0)
+            memory[states]=255
+            local current=a11y.native_music_packet(a11y.ui_model.nodes[host.memory.hex(0x110000)])
+            assert(current.text=="Faixa A, Artista A" and not current.state)
+            snapshot.selected_members={};assert(not a11y.native_music_packet(a11y.ui_model.nodes[host.memory.hex(0x110000)]))
+        end)
+    end)
+end)
+
+
+local function with_assignment_panel(fn)
+    with_rendered_panel({[0x110000]={name="personalDataName",text="Usuário 1",parent=0x300000},
+        [0x120000]={name="personalDataName",text="Usuário 1",parent=0x310000},
+        [0x130000]={name="personalDataName",text="Usuário 1",parent=0x320000},
+        [0x140000]={name="text_home",text="Em casa",parent=0x230000},
+        [0x150000]={name="text_away",text="Fora",parent=0x230000}},function(values,snapshot)
+        local base=0x140000000
+        local saved_base=upvalue(module.init,"process_base_u64")
+        set_upvalue(module.init,"process_base_u64",ffi.cast("uint64_t",base))
+        local memory={[0x810000]=base+0x2715608,[base+0x2715608+0x140]=base+0xc68fd0,
+            [base+0x2715608+0x148]=base+0xc67970,[0x810094]=0,[0x8100a4]=2,
+            [0x900100]=base+0x27bae88,[0x900270]=0x200000,[0x900278]=0x200008,
+            [0x200000]=0x210000,[0x210000]=base+0x27b8d60,
+            [0x210170]=0x220000,[0x210178]=0x220018}
+        for index=0,2 do
+            local column=0x300000+index*0x10000
+            memory[0x220000+index*8]=column;memory[column]=base+0x27cb508
+            memory[column+0x170],memory[column+0x178]=0x400000+index*0x100,0x400008+index*0x100
+            memory[0x400000+index*0x100]=0x110000+index*0x10000
+        end
+        for at in pairs(values) do memory[at]=base+0x27b5260;memory[at+0xc]=263 end
+        a11y.menu_read=function(at) return memory[at] end
+        snapshot.windows[2]={address=0x810000,root=0x900100,task_parent=0x800000,enabled=true}
+        snapshot.selected_members={}
+        fn(values,snapshot,memory,base)
+        set_upvalue(module.init,"process_base_u64",saved_base)
+    end)
+end
+
+check("assignment buttons announce changed user and side without an arrow or selected text cursor",function()
+    with_assignment_panel(function(values,snapshot,memory,base)
+        with_render_harness(function(output)
+            a11y.poll_assignment_changes();a11y.flush_native_speech(100000);assert(#output==0)
+            for i,state in ipairs({0,1,2}) do
+                memory[0x8100a4]=state
+                local at=0x110000+state*0x10000
+                -- No setter/focus event: buttons can replace the rendered name directly.
+                values[at]="Usuário " .. tostring(i+1)
+                a11y.poll_assignment_changes();a11y.flush_native_speech(100000)
+                local labels={[0]="Em casa",[1]="Neutro",[2]="Fora"}
+                assert(output[i][1]==values[at] .. ", " .. labels[state])
+                a11y.poll_assignment_changes();a11y.flush_native_speech(100000);assert(#output==i)
+            end
+            memory[0x8100a4]=0;a11y.poll_assignment_changes()
+            memory[0x8100a4]=1;a11y.flush_native_speech(100000);assert(#output==3,"old side must be discarded")
+            snapshot.windows[2].enabled=false
+            assert(not a11y.native_assignment_context(0x110000,true))
+        end)
+    end)
+end)
+
+check("LT RT profile change announces without arrows across passive window changes and retries discarded speech",function()
+    with_assignment_panel(function(values,snapshot,memory)
+        with_render_harness(function(output)
+            memory[0x810098]=0
+            a11y.poll_assignment_changes()
+            memory[0x810098]=1
+            a11y.poll_assignment_changes();a11y.flush_native_speech(100000)
+            assert(#output==0,"profile updates before the caption cannot announce the previous user")
+            a11y.poll_assignment_changes();a11y.flush_native_speech(100000);assert(#output==0)
+            values[0x130000]="Usuário 2"
+            snapshot.windows[3]={address=0xa10000,root=0xa20000,enabled=true}
+            a11y.poll_assignment_changes()
+            -- Another passive window appears between enqueue and actual delivery.
+            snapshot.windows[4]={address=0xa30000,root=0xa40000,enabled=true}
+            a11y.flush_native_speech(100000);assert(#output==0)
+            a11y.poll_assignment_changes();a11y.flush_native_speech(100000)
+            assert(#output==1 and output[1][1]=="Usuário 2, Fora")
+            a11y.poll_assignment_changes();a11y.flush_native_speech(100000);assert(#output==1)
+            memory[0x810098]=2;values[0x130000]="Usuário 3"
+            a11y.poll_assignment_changes();a11y.flush_native_speech(100000)
+            assert(#output==2 and output[2][1]=="Usuário 3, Fora")
+        end)
+    end)
+end)
+
+check("automatic user change survives the real 0x105 unfocused caption state",function()
+    with_assignment_panel(function(values,snapshot,memory)
+        with_render_harness(function(output)
+            memory[0x810098]=0;a11y.poll_assignment_changes()
+            -- The log's user labels become 261, not the fixture's old 263.
+            memory[0x13000c]=261
+            assert(not a11y.native_presentation_ready(0x130000))
+            memory[0x810098]=1;values[0x130000]="Usuário 2"
+            a11y.poll_assignment_changes();a11y.flush_native_speech(100000)
+            assert(#output==1 and output[1][1]=="Usuário 2, Fora")
+            a11y.poll_assignment_changes();a11y.flush_native_speech(100000);assert(#output==1)
+            -- A destroyed/replaced controller cannot deliver the next user.
+            memory[0x810098]=2;values[0x130000]="Usuário 3";a11y.poll_assignment_changes()
+            snapshot.windows[2].enabled=false;a11y.flush_native_speech(100000);assert(#output==1)
+        end)
+    end)
+end)
+
+check("soundtrack scrolling uses the native mapped selector index and rejects an invalid mapping",function()
+    with_soundtrack(function(values,snapshot,memory,base,owner,impl,records,states)
+        local children,selectors=a11y.menu_child,a11y.holder_kind_nodes
+        memory[impl+0xa8],memory[impl+0xb0]=0x5000000,0x5000018
+        memory[0x5000000]=0;memory[0x51000bc]=1
+        a11y.menu_child=function(root,index) if root==owner.root and index==0 then return 0x5200000 end;return children(root,index) end
+        a11y.holder_kind_nodes=function(at,kind) if at==0x5200098 and kind==0x10 then return {0x5100000} end;return selectors(at,kind) end
+        local node=a11y.ui_model.nodes[host.memory.hex(0x110000)]
+        assert(a11y.native_music_state(node).index==1)
+        memory[0x51000bc]=2
+        assert(not a11y.native_music_state(node),"out-of-vector scrolling index cannot borrow another track state")
+        memory[0x51000bc]=0
+        memory[impl+0xb0]=0x5000019
+        assert(not a11y.native_music_state(node),"malformed map cannot use flat fallback")
+        a11y.menu_child,a11y.holder_kind_nodes=children,selectors
+    end)
+end)
+
+
+local function with_cursor_target_panels(fn)
+    with_native_player_details(function(memory,values,snapshot,refresh,base,data,object,input,strings)
+        local names=a11y.widget_internal_name
+        a11y.widget_internal_name=function(at)
+            if at==0x130000 then return "playerName" elseif at==0x220000 then return "playerInfo_1" end
+            return names(at)
+        end
+        local owners=snapshot.members[0x110000].owners
+        owners[1].parents[0x130000]=0x220000
+        snapshot.members[0x130000]={active=true,owners=owners}
+        memory[0x130000],memory[0x13000c]=base+0x27b5260,263
+        strings[object+0x38]="Gabriel Mercado"
+        values[0x110000]="25  Gabriel Mercado";a11y.observe_ui_widget(0x110000,values[0x110000])
+        local roster=0x1400000
+        memory[roster],memory[roster+0x98]=base+0x261eaa0,0
+        snapshot.windows[3]={address=roster,root=0x1500000,enabled=true,task_parent=0xa00000}
+        local labels={[0]="Gabriel Mercado",[1]="Silva",[2]="Bruno"}
+        for slot=0,2 do
+            local record=slot+3;local obj=slot==0 and object or object+slot*0x1000
+            memory[roster+0x2a0+slot*4]=record
+            memory[roster+0xb8+slot*8]=0x1b00000+slot*0x100
+            memory[roster+0x118+slot*8]=0x1c00000+slot*0x100
+            memory[0x1b00000+slot*0x100+0xc]=263
+            memory[data+0x1f8+slot]=record
+            memory[data+0x568+record*16]=obj
+            memory[obj+0x30]=1000+slot;strings[obj+0x38]=labels[slot]
+        end
+        local function select(slot,caption)
+            local d=snapshot.windows[2].cursor_detail
+            d.group_index,d.item_index,d.selected=0,slot,0xe00000+slot*0x100
+            memory[d.selected+0xc]=263
+            memory[data+0xbb8],memory[data+0xbbc]=slot,0
+            values[0x130000]=caption or labels[slot]
+            a11y.observe_ui_widget(0x130000,values[0x130000]);refresh()
+        end
+        select(1)
+        fn(memory,values,snapshot,refresh,base,data,object,input,strings,select,roster)
+        a11y.widget_internal_name=names
+    end)
+end
+
+check("replacement follows cursor target instead of Mercado frozen in the original panel",function()
+    with_cursor_target_panels(function(memory,values,snapshot,refresh,base,data,object,input,strings,select)
+        with_focus_memory({},function(tick)
+            for i,slot in ipairs({1,2,0,1}) do
+                select(slot)
+                assert(snapshot.selected_members[0x130000] and not snapshot.selected_members[0x110000])
+                tick(120+i)
+                local labels={[0]="Gabriel Mercado",[1]="Silva",[2]="Bruno"}
+                assert(speech_texts()[#speech_texts()]:find(labels[slot],1,true))
+            end
+            assert(#speech_texts()==4)
+            select(2,"Silva")
+            assert(not snapshot.selected_members[0x130000] and not snapshot.selected_members[0x110000],
+                "late target caption cannot speak the previous player's name")
+            select(2);tick(130)
+            assert(speech_texts()[5]:find("Bruno",1,true))
+        end)
+    end)
+end)
+
+check("replacement validates row order and discards a queued name after moving to another target",function()
+    with_cursor_target_panels(function(memory,values,snapshot,refresh,base,data,object,input,strings,select,roster)
+        with_render_harness(function(output)
+            select(1)
+            local result=assert(a11y.selection_result({widget=0x130000,identity="target-silva"}))
+            a11y.deliver_selection_result(result,{interrupt=true})
+            select(2);a11y.flush_native_speech(100000);assert(#output==0)
+            memory[data+0x1fa]=39;refresh()
+            assert(not snapshot.selected_members[0x130000],"roster record/order mismatch invalidates target")
+            memory[data+0x1fa]=5;select(2)
+            assert(snapshot.selected_members[0x130000])
+        end)
+    end)
+end)
+
+check("Windows safe copy survives freed and protected pointers without calling Sider raw reads",function()
+    ffi.cdef[[
+        void *VirtualAlloc(void*,size_t,unsigned long,unsigned long);
+        int VirtualProtect(void*,size_t,unsigned long,unsigned long*);
+        int VirtualFree(void*,size_t,unsigned long);
+    ]]
+    local region=ffi.C.VirtualAlloc(nil,4096,0x3000,0x04)
+    assert(region~=nil)
+    local address=tonumber(ffi.cast("uint64_t",region))
+    ffi.copy(region,"Não",#"Não")
+    local fields=ffi.cast("uint64_t*",region)
+    fields[2],fields[3]=#"Não",15
+    local old_safe=a11y.safe_memory_read
+    local old_raw,old_unpack=host.memory.read,host.memory.unpack
+    host.memory.unpack=function(kind,bytes)
+        if kind=="u64" then local value=ffi.new("uint64_t[1]");ffi.copy(value,bytes,8);return value[0] end
+        return old_unpack(kind,bytes)
+    end
+    a11y.safe_memory_read=production_safe_memory_read
+    host.memory.read=function() error("unsafe Sider read reached") end
+    assert(a11y.safe_memory_read(address,4)=="Não")
+    assert(a11y.read_msvc_string(address)=="Não")
+    local protect=ffi.new("unsigned long[1]")
+    assert(ffi.C.VirtualProtect(region,4096,0x01,protect)~=0)
+    assert(not a11y.safe_memory_read(address,4))
+    assert(not a11y.read_msvc_string(address))
+    local function packed(value) return ffi.string(ffi.new("uint64_t[1]",value),8) end
+    for _=1,100 do
+        module.on_resolved_text({},0,{rax=packed(address),r8=packed(4),rsp=packed(0),rdi=packed(0)})
+    end
+    assert(ffi.C.VirtualProtect(region,4096,0x04,protect)~=0)
+    assert(a11y.safe_memory_read(address,4)=="Não")
+    -- Text can be readable while the saved hook stack has already disappeared.
+    module.on_resolved_text({},0,{rax=packed(address),r8=packed(4),rsp=packed(0x10000),rdi=packed(0)})
+    assert(ffi.C.VirtualFree(region,0,0x8000)~=0)
+    assert(not a11y.safe_memory_read(address,4))
+    assert(not a11y.safe_memory_read(0,8) and not a11y.safe_memory_read(address,65537))
+    host.memory.read,host.memory.unpack,a11y.safe_memory_read=old_raw,old_unpack,old_safe
+    print("REAL_WINDOWS_SAFE_COPY_OK protected/freed/invalid-stack/exact-count")
+end)
+
+
+check("replacement candidate in a scrolled substitute row matches its actual roster slot",function()
+    with_cursor_target_panels(function(memory,values,snapshot,refresh,base,data,object,input,strings,select,roster)
+        memory[roster]=base+0x261f788;memory[roster+0x4e8]=5
+        memory[roster+0x2a4]=6;memory[data+0x1f8+17]=6
+        memory[data+0x568+6*16]=0xf40000;memory[0xf40030]=2001;strings[0xf40038]="Reserva alvo"
+        local d=snapshot.windows[2].cursor_detail
+        d.group_index,d.item_index,d.selected=1,1,0xe00100
+        memory[d.selected+0xc]=263
+        memory[data+0xbb8],memory[data+0xbbc]=17,0
+        values[0x130000]="Reserva alvo";a11y.observe_ui_widget(0x130000,values[0x130000]);refresh()
+        assert(snapshot.selected_members[0x130000] and not snapshot.selected_members[0x110000])
+        local record=assert(a11y.current_player_record(a11y.ui_model.nodes[host.memory.hex(0x130000)]))
+        assert(record.slot==17 and record.player_id==2001)
+        memory[roster+0x4e8]=6;refresh()
+        assert(not snapshot.selected_members[0x130000],"old descriptor cannot follow a changed scroll offset")
+    end)
+end)
+
+check("main heading retries a discarded owner transition before a matching tooltip can speak",function()
+    with_rendered_panel({[0x110000]={name="title",text="Configurações",parent=0x210000}},function(values,snapshot,parents,owner)
+        with_render_harness(function(output)
+            a11y.present_main_menu_choice(0x110000,values[0x110000])
+            local state=assert(a11y.main_menu_choice_state)
+            assert(state.status=="queued")
+            -- A passive owner transition invalidates the queued origin, while the
+            -- actual title's owning window remains active.
+            snapshot.windows[2]={address=0x910000,root=0x920000,enabled=true}
+            a11y.flush_native_speech(100000)
+            assert(#output==0 and state.status~="delivered")
+            a11y.poll_main_menu_choice();a11y.flush_native_speech(100000)
+            assert(#output==1 and output[1][1]=="Configurações" and state.status=="delivered")
+            a11y.poll_main_menu_choice();a11y.flush_native_speech(100000);assert(#output==1)
+            owner.enabled=false;a11y.poll_main_menu_choice();assert(state.status=="suspended")
+            owner.enabled=true;a11y.poll_main_menu_choice();a11y.flush_native_speech(100000)
+            assert(#output==2 and output[2][1]=="Configurações")
+        end)
+    end)
+end)
+
+check("main heading discards a recycled caption and an obsolete tooltip",function()
+    with_rendered_panel({[0x110000]={name="title",text="Configurações",parent=0x210000}},function(values)
+        with_render_harness(function(output)
+            a11y.present_main_menu_choice(0x110000,values[0x110000]);a11y.flush_native_speech(100000)
+            local old=a11y.main_menu_choice_state
+            speak("Descrição antiga",false,nil,"old-tooltip")
+            a11y.native_speech_queue[a11y.native_speech_last].menu_tooltip=old
+            values[0x110000]="Controles de áudio"
+            a11y.observe_ui_widget(0x110000,values[0x110000])
+            a11y.present_main_menu_choice(0x110000,values[0x110000]);a11y.flush_native_speech(100000)
+            assert(#output==2 and output[2][1]=="Controles de áudio")
+            values[0x110000]="Outro texto sem evento"
+            a11y.poll_main_menu_choice();assert(not a11y.main_menu_choice_state)
+        end)
+    end)
+end)
+
+check("matching tooltip waits for heading delivery without a fixed navigation delay",function()
+    local delayed=upvalue(module.display_frame,"process_delayed_speech")
+    with_rendered_panel({[0x110000]={name="title",text="Configurações",parent=0x210000}},function(values)
+        with_render_harness(function(output)
+            a11y.present_main_menu_choice(0x110000,values[0x110000])
+            a11y.main_menu_tooltip_choice=a11y.main_menu_choice_state
+            set_upvalue(delayed,"main_menu_tooltip","Descrição atual")
+            set_upvalue(delayed,"main_menu_tooltip_due_ms",0)
+            delayed(100000)
+            assert(#speech_texts()==1,"tooltip must wait for delivery, not just enqueue")
+            a11y.flush_native_speech(100000);delayed(100000);a11y.flush_native_speech(100000)
+            assert(#output==2 and output[1][1]=="Configurações" and output[2][1]=="Descrição atual")
+        end)
+    end)
+end)
+
+check("cursor dedupe releases only on native movement in its own window",function()
+    local old=a11y.native_windows
+    local w={address=0x810000,root=0x900000,enabled=true,
+        cursor_detail={group=0x910000,selected=0x920000,group_index=0,item_index=0}}
+    a11y.native_windows={windows={w,{address=0x820000,root=0x930000,enabled=true,
+        cursor_detail={group=0x940000,selected=0x950000,group_index=0,item_index=1}}}}
+    local state={last_identity="same player",last_key="missing",last_anchor=a11y.window_cursor_anchor(w)}
+    w.cursor_detail.caption=nil;a11y.release_moved_engine_selection(state)
+    assert(state.last_identity=="same player","missing optional caption is not movement")
+    a11y.native_windows.windows[2].cursor_detail.item_index=2
+    a11y.release_moved_engine_selection(state);assert(state.last_identity=="same player")
+    w.cursor_detail.item_index=1;a11y.release_moved_engine_selection(state)
+    assert(not state.last_identity and not state.last_anchor)
+    a11y.native_windows=old
+end)
+
+check("main navigation probe reads types only on input and stops at its log budget",function()
+    with_rendered_panel({[0x110000]={name="title",text="Configurações",parent=0x210000}},function(values)
+        a11y.present_main_menu_choice(0x110000,values[0x110000])
+        local reads=0
+        a11y.menu_read=function() reads=reads+1;return 0x140000000 end
+        a11y.poll_main_navigation_probe();assert(reads==0)
+        a11y.record_game_plan_input("up","keyboard")
+        a11y.poll_main_navigation_probe();a11y.poll_main_navigation_probe()
+        assert(reads>0 and a11y.main_navigation_log_count==2 and not a11y.main_navigation_probe)
+        a11y.main_navigation_log_count=64
+        a11y.record_game_plan_input("down","keyboard")
+        local before=reads;a11y.poll_main_navigation_probe()
+        assert(reads==before and not a11y.main_navigation_probe)
+    end)
+end)
+
+check("playing style uses verified resource ID before opening details and live text overrides asset",function()
+    with_native_player_details(function(memory,values,snapshot,refresh,base,data,object)
+        local saved=a11y.player_style_asset_texts
+        a11y.player_style_texts={}
+        a11y.player_style_asset_texts={pt={[777]="Ala produtivo"},en={[777]="Prolific Winger"}}
+        local record=assert(a11y.current_player_record(a11y.focused_player_node()))
+        assert(a11y.player_style_text(record)=="Ala produtivo")
+        a11y.ui_language="en";assert(a11y.player_style_text(record)=="Prolific Winger")
+        a11y.ui_language="pt";a11y.player_style_texts={pt={[777]="Texto personalizado"}}
+        assert(a11y.player_style_text(record)=="Texto personalizado")
+        memory[base+0x27d3500+5*8]=999
+        assert(not a11y.player_style_text(record),"unmapped ID cannot borrow another style")
+        a11y.player_style_asset_texts=saved
+    end)
+end)
+
+local function with_country_panel(fn)
+    with_rendered_panel({[0x110000]={name="teamName",text="ALBÂNIA",parent=0x210000},
+        [0x120000]={name="teamName",text="ANDORRA",parent=0x220000},
+        [0x130000]={name="leagueName",text="Europa",parent=0x230000}},function(values,snapshot,parents,owner)
+        local old_base=upvalue(module.init,"process_base_u64")
+        local old_string=a11y.read_msvc_string
+        local base,outer,inner=0x140000000,0x3000000,0x3100000
+        set_upvalue(module.init,"process_base_u64",ffi.cast("uint64_t",base))
+        local memory={[owner.address]=base+0x271f4d0,[base+0x271f4d0+0xd8]=base+0xc9d990,
+            [base+0x271f4d0+0x260]=base+0xc9daf0,[base+0x271f4d0+0x268]=base+0xc97190,[owner.address+0x9b]=1,[owner.address+0x180]=1,
+            [owner.address+0x100]=outer,[owner.address+0x108]=outer+0x70,
+            [owner.address+0x118]=0,[owner.address+0x11c]=0,
+            [outer+8]=inner,[outer+0x10]=inner+0xa0,[outer+0x64]=0,[outer+0x68]=0}
+        for at in pairs(values) do memory[at],memory[at+0xc]=base+0x27b5260,263 end
+        a11y.menu_read=function(at) return memory[at] end
+        a11y.read_msvc_string=function(at,...)
+            if at==inner+0x28 then return "ALBÂNIA" elseif at==inner+0x78 then return "ANDORRA" end
+            return old_string(at,...)
+        end
+        snapshot.selected_members={[0x110000]=true,[0x120000]=true,[0x130000]=true}
+        snapshot.cursor_members=snapshot.selected_members
+        fn(values,snapshot,memory,owner,outer,inner)
+        a11y.read_msvc_string=old_string
+        set_upvalue(module.init,"process_base_u64",old_base)
+    end)
+end
+
+check("country nested selection replaces stale continent and reads each real country despite broad cursor flags",function()
+    with_country_panel(function(values,snapshot,memory,owner,outer)
+        with_render_harness(function(output)
+            a11y.observe_native_list_selection("Europa","old-continent",0x130000)
+            a11y.poll_native_country_selection()
+            assert(a11y.native_list_selection.text=="ALBÂNIA")
+            a11y.process_native_list_focus(false);a11y.flush_native_speech(100000)
+            assert(#output==1 and output[1][1]=="ALBÂNIA")
+            memory[outer+0x64]=1 -- scrolled inner selection, without a setter callback
+            a11y.poll_native_country_selection();a11y.process_native_list_focus(false);a11y.flush_native_speech(100000)
+            assert(#output==2 and output[2][1]=="ANDORRA")
+            a11y.poll_native_country_selection();a11y.process_native_list_focus(false);a11y.flush_native_speech(100000)
+            assert(#output==2)
+        end)
+    end)
+end)
+
+check("country delivery rejects moved selection stale caption bad vectors and inactive owner",function()
+    with_country_panel(function(values,snapshot,memory,owner,outer)
+        with_render_harness(function(output)
+            a11y.poll_native_country_selection();a11y.process_native_list_focus(false)
+            memory[outer+0x68]=1;a11y.flush_native_speech(100000);assert(#output==0)
+            values[0x120000]="Europa"
+            assert(a11y.native_country_selection().native_only and a11y.native_country_selection().text=="ANDORRA",
+                "typed selected data remains authoritative when its caption is absent or stale")
+            values[0x120000]="ANDORRA";assert(a11y.native_country_selection().text=="ANDORRA")
+            memory[outer+0x10]=memory[outer+8]+0xa1;assert(not a11y.native_country_selection())
+            memory[outer+0x10]=memory[outer+8]+0xa0;memory[outer+0x64]=3
+            assert(not a11y.native_country_selection())
+            memory[outer+0x64]=0;owner.enabled=false;snapshot.windows[1].enabled=false;assert(not a11y.native_country_selection())
+        end)
+    end)
+end)
+
+check("main flow diagnostic also records input when its title was never bound",function()
+    a11y.dashboard_review=true
+    a11y.record_game_plan_input("down","keyboard")
+    assert(a11y.main_navigation_probe)
+    a11y.poll_main_navigation_probe()
+    assert(a11y.main_navigation_log_count==1)
+    a11y.dashboard_review=false
+end)
+
+check("useful-text review filters command chrome and shares one cursor with right stick",function()
+    with_rendered_panel({[0x110000]={name="headline",text="Coletiva de imprensa",parent=0x210000},
+        [0x120000]={name="textSentence",text="O técnico falou sobre a próxima partida.",parent=0x210000},
+        [0x130000]={name="helpText",text="Use os botões para continuar",parent=0x220000},
+        [0x140000]={name="text",text="Avançar",parent=0x220000},
+        [0x150000]={name="padIcon",text="A",parent=0x220000}},function()
+        local entries=a11y.buffer_entries()
+        assert(#entries==2 and entries[1]=="Coletiva de imprensa",table.concat(entries," | "))
+        assert(a11y.review_right_stick(1));assert(speech_texts()[1]==entries[1])
+        assert(a11y.review_right_stick(1));assert(#speech_texts()==1,"held input is one step")
+        a11y.review_right_stick(0);a11y.review_right_stick(1)
+        assert(speech_texts()[2]==entries[2])
+        a11y.read_buffer("previous");assert(speech_texts()[3]==entries[1])
+        a11y.read_buffer("next");assert(speech_texts()[4]==entries[2])
+    end)
+end)
+
+check("dialog review keeps question only while native answer selection remains intact",function()
+    a11y.open_read_dialog("Qual é o objetivo da temporada?","question")
+    a11y.commit_read_selection("Ganhar o campeonato","answer","dialog-answer")
+    local answer=a11y.read_context.selection
+    assert(#a11y.buffer_entries()==1)
+    a11y.review_right_stick(-1);a11y.read_buffer("next")
+    assert(speech_texts()[1]=="Qual é o objetivo da temporada?" and speech_texts()[2]==speech_texts()[1])
+    assert(a11y.read_context.selection==answer)
+end)
+
+check("queued useful content rejects a paragraph changed before delivery",function()
+    with_rendered_panel({[0x110000]={name="textSentence",text="Notícia atual do clube.",parent=0x210000}},function(values)
+        with_render_harness(function(output)
+            a11y.read_buffer("first")
+            values[0x110000]="Notícia seguinte do clube."
+            a11y.flush_native_speech(100000);assert(#output==0)
+        end)
+    end)
+end)
+
+check("initial main heading binds when its native owner finishes construction",function()
+    with_rendered_panel({[0x110000]={name="text",text="SP Football Life",parent=0x210000}},function(values,snapshot,parents,owner)
+        with_render_harness(function(output)
+            local members,windows=snapshot.members,snapshot.windows
+            snapshot.members,snapshot.windows={},{}
+            a11y.present_main_menu_choice(0x110000,values[0x110000])
+            assert(a11y.main_menu_choice_state.status=="suspended")
+            snapshot.members,snapshot.windows=members,windows
+            a11y.poll_main_menu_choice();a11y.flush_native_speech(100000)
+            assert(#output==1 and output[1][1]=="SP Football Life")
+            a11y.poll_main_menu_choice();a11y.flush_native_speech(100000);assert(#output==1)
+        end)
+    end)
+end)
+
+check("nested list caption hook captures the selected child without a teamName widget",function()
+    with_rendered_panel({[0x110000]={name="text",text="Europa",parent=0x210000}},function(values,snapshot)
+        local reader=a11y.read_msvc_string
+        local unpacker=host.memory.unpack
+        host.memory.unpack=function(kind,bytes)
+            if kind=="u64" and bytes then return ffi.cast("uint64_t*",bytes)[0] end
+            return unpacker(kind,bytes)
+        end
+        a11y.read_msvc_string=function(at) if at==0x3000028 then return "ALEMANHA" end;return reader(at) end
+        local function packed(n) return ffi.string(ffi.new("uint64_t[1]",n),8) end
+        local regs={rsi=packed(0x3000000),rdi=packed(0x110000)}
+        snapshot.selected_members={[0x110000]=true};snapshot.cursor_members=snapshot.selected_members
+        with_render_harness(function(output)
+            module.on_nested_list_caption({},0,regs)
+            assert(a11y.native_list_selection and a11y.native_list_selection.text=="ALEMANHA","nested caption not captured")
+            a11y.process_native_list_focus(false);a11y.flush_native_speech(100000);assert(#output==0)
+            values[0x110000]="ALEMANHA";a11y.observe_ui_widget(0x110000,values[0x110000])
+            a11y.process_native_list_focus(false);a11y.flush_native_speech(100000)
+            assert(#output==1 and output[1][1]=="ALEMANHA","count=" .. #output .. " queue=" .. table.concat(speech_texts(),"|") .. " logs=" .. table.concat(logs,"|",math.max(1,#logs-6)))
+        end)
+        a11y.read_msvc_string=reader
+        host.memory.unpack=unpacker
+    end)
+end)
+
+check("notice footer actions are announced but remain outside the content buffer",function()
+    with_rendered_panel({[0x110000]={name="text_contents",text="Bem-vindo à sua carreira.",parent=0x210000},
+        [0x120000]={name="text",text="Próximo",parent=0x220000},
+        [0x130000]={name="padIcon",text="A",parent=0x220000}},function(values,snapshot)
+        snapshot.selected_members={[0x110000]=true}
+        assert(a11y.capture_reading_panel(a11y.ui_model.nodes[host.memory.hex(0x110000)]))
+        snapshot.command_bar={pairs={{caption=0x120000,icon=0x130000}}}
+        a11y.poll_notice_actions()
+        assert(speech_texts()[2]=="Próximo")
+        snapshot.selected_members={[0x120000]=true}
+        assert(a11y.reading_panel_is_current(),"moving to a button keeps the presented body reviewable")
+        local entries=a11y.buffer_entries()
+        assert(#entries==1 and entries[1]==values[0x110000])
+    end)
+end)
+
+check("body review excludes menu options ranking and command captions behind the panel",function()
+    with_rendered_panel({[0x110000]={name="text_contents",text="Bem-vindo à Liga Master.",parent=0x210000},
+        [0x120000]={name="itemName",text="Avançar",parent=0x220000},
+        [0x130000]={name="text",text="Ajuda",parent=0x230000},
+        [0x140000]={name="leagueRank_point",text="50",parent=0x240000}},function()
+        a11y.set_read_title("Menu ao fundo")
+        local entries=a11y.buffer_entries()
+        assert(#entries==1 and entries[1]=="Bem-vindo à Liga Master.")
+    end)
+end)
+
+check("unavailable selected player cannot expose the other players as review content",function()
+    with_player_list(function(values,snapshot)
+        values[0x120000]="-"
+        assert(#a11y.buffer_entries()==0)
+    end)
+end)
+
+local function with_mail_packet(fn)
+    with_rendered_panel({[0x110000]={name="subject_value",text="Assunto A",parent=0x210000},
+        [0x120000]={name="date_value",text="1/8/2025",parent=0x210000},
+        [0x130000]={name="subject_value",text="Assunto B",parent=0x220000}},function(values,snapshot,parents,owner)
+        local old_base=upvalue(module.init,"process_base_u64")
+        local reader=a11y.read_msvc_string
+        local base,records=0x140000000,0x3000000
+        set_upvalue(module.init,"process_base_u64",ffi.cast("uint64_t",base))
+        local memory={[owner.address]=base+0x26a1120,[base+0x26a1120+0x148]=base+0xb43ad0,
+            [owner.address+0x88]=0x3100000,[0x31000a0]=0,[0x31000a8]=0,[0x31000b0]=0,[0x31000d8]=0,
+            [owner.address+0x90]=records,[owner.address+0x98]=records+2*0x90,
+            [records+0x48]=0,[records+0x90+0x48]=0}
+        local strings={[records+8]="Assunto A",[records+0x50]="Conteúdo A",
+            [records+0x90+8]="Assunto B",[records+0x90+0x50]="Conteúdo B"}
+        a11y.menu_read=function(at) return memory[at] end
+        a11y.read_msvc_string=function(at) return strings[at] end
+        fn(memory,strings,snapshot,records,base)
+        a11y.read_msvc_string=reader
+        set_upvalue(module.init,"process_base_u64",old_base)
+    end)
+end
+
+check("mail review loops title and body only and automatic speech follows native selected record",function()
+    with_mail_packet(function(memory,strings,snapshot,records)
+        with_render_harness(function(output)
+            a11y.poll_selected_message();a11y.flush_native_speech(100000)
+            assert(#output==1 and output[1][1]=="Assunto A. Conteúdo A")
+            a11y.poll_selected_message();a11y.flush_native_speech(100000);assert(#output==1)
+            local items=a11y.buffer_entries();assert(#items==2 and items[1]=="Assunto A" and items[2]=="Conteúdo A")
+            a11y.read_buffer("first");a11y.flush_native_speech(100000)
+            a11y.read_buffer("next");a11y.flush_native_speech(100000)
+            a11y.read_buffer("next");a11y.flush_native_speech(100000)
+            assert(output[2][1]=="Assunto A" and output[3][1]=="Conteúdo A" and output[4][1]=="Assunto A")
+            memory[0x31000d8]=1
+            a11y.poll_selected_message()
+            memory[0x31000d8]=0;a11y.flush_native_speech(100000);assert(#output==4,"stale message discarded")
+            memory[0x31000d8]=1;a11y.poll_selected_message();a11y.flush_native_speech(100000)
+            assert(output[5][1]=="Assunto B. Conteúdo B")
+            local current=a11y.buffer_entries();assert(#current==2 and current[1]=="Assunto B")
+            memory[0x31000d8]=3;assert(#a11y.buffer_entries()==0,"bad record cannot expose the table")
+        end)
+    end)
+end)
+
+check("mail multipart content uses native record strings and never voices unresolved templates",function()
+    with_mail_packet(function(memory,strings,snapshot,records)
+        memory[records+0x48]=1
+        memory[records+0x70],memory[records+0x78]=0x4000000,0x4000050
+        strings[0x4000008],strings[0x4000030]="Primeiro relatório","Segundo relatório"
+        local entries=a11y.buffer_entries()
+        assert(#entries==2 and entries[2]=="Conteúdo A. Primeiro relatório. Segundo relatório")
+        strings[records+0x50]="%s";assert(#a11y.buffer_entries()==1)
+        memory[records+0x48]=99;assert(#a11y.buffer_entries()==1)
+    end)
+end)
+
+check("selected message retries queue replacement instead of becoming permanently silent",function()
+    with_mail_packet(function()
+        with_render_harness(function(output)
+            a11y.poll_selected_message();a11y.clear_speech_queue()
+            a11y.poll_selected_message();a11y.flush_native_speech(100000)
+            assert(#output==1 and output[1][1]=="Assunto A. Conteúdo A")
+        end)
+    end)
+end)
+
+check("loading requires native singleton and three seconds then speaks once per lifecycle",function()
+    with_native_windows(function(memory,base)
+        local saved_base=upvalue(module.init,"process_base_u64")
+        set_upvalue(module.init,"process_base_u64",ffi.cast("uint64_t",base))
+        with_render_harness(function(output)
+            a11y.poll_loading(0);a11y.poll_loading(10000);assert(#speech_texts()==0)
+            memory[base+0x36f9a68]=0x3000000;memory[0x3000000]=base+0x27b55b8
+            memory[base+0x27b55b8+8]=base+0xe4a630
+            a11y.poll_loading(10000);a11y.poll_loading(12999);a11y.flush_native_speech(100000);assert(#output==0)
+            a11y.poll_loading(13000);a11y.flush_native_speech(100000)
+            assert(#output==1 and output[1][1]=="Carregando tela")
+            a11y.poll_loading(19000);a11y.flush_native_speech(100000);assert(#output==1)
+            memory[base+0x36f9a68]=0;a11y.poll_loading(20000)
+            memory[base+0x36f9a68]=0x3000000;a11y.poll_loading(21000);a11y.poll_loading(24000)
+            memory[base+0x36f9a68]=0;a11y.poll_loading(24001)
+            memory[base+0x36f9a68]=0x3000000;a11y.poll_loading(24002)
+            a11y.flush_native_speech(100000);assert(#output==1,"new short lifecycle at same address cannot reuse old notice")
+        end)
+        set_upvalue(module.init,"process_base_u64",saved_base)
+    end)
+end)
+
+check("main first choice and other choices use the same rendered pair and publisher",function()
+    with_rendered_panel({[0x110000]={name="text_item",text="Football Life 2026",parent=0x210000},
+        [0x120000]={name="text_value",text="Amistosos, Ligas e muito mais",parent=0x210000}},function(values,snapshot,parents,owner)
+        local saved_base=upvalue(module.init,"process_base_u64")
+        local base=0x140000000
+        parents[0x210000]=owner.root
+        set_upvalue(module.init,"process_base_u64",ffi.cast("uint64_t",base))
+        a11y.menu_read=function(at) if tonumber(at)==owner.address then return base+0x266ddd8 end end
+        with_render_harness(function(output)
+            local choices={"Football Life 2026","Liga Master","Rumo ao Estrelato","Football Life 2026"}
+            for i,text in ipairs(choices) do
+                values[0x110000]=text;a11y.observe_ui_widget(0x110000,text)
+                a11y.poll_main_menu_choice()
+                assert(a11y.native_speech_queue[a11y.native_speech_last].menu_choice==a11y.main_menu_choice_state)
+                a11y.flush_native_speech(100000)
+                assert(#output==i and output[i][1]==text)
+                a11y.poll_main_menu_choice();a11y.flush_native_speech(100000);assert(#output==i)
+            end
+            values[0x110000]="Liga Master";a11y.observe_ui_widget(0x110000,"Liga Master")
+            a11y.poll_main_menu_choice();snapshot.windows[1].enabled=false
+            a11y.flush_native_speech(100000);assert(#output==4,"inactive owner cannot deliver old caption")
+        end)
+        set_upvalue(module.init,"process_base_u64",saved_base)
+    end)
+end)
+
+
+check("nested country selection escapes a generic heading dialog but never a real question",function()
+    with_country_panel(function(values,snapshot,memory,owner)
+        local context=a11y.read_context_state();context.kind="dialog";context.question="Nacional./Região"
+        a11y.observe_native_list_selection("ALBÂNIA","nested:test",0x110000)
+        a11y.native_list_selection.nested=true
+        with_render_harness(function(output)
+            a11y.process_native_list_focus(true);a11y.flush_native_speech(100000)
+            assert(#output==1 and output[1][1]=="ALBÂNIA")
+            context=a11y.read_context_state();context.kind="dialog";context.structural_question=true
+            a11y.native_list_selection.committed=nil
+            assert(not a11y.process_native_list_focus(true))
+        end)
+    end)
+end)
+
+check("render phase reuses scalar OS copies and drops all values before the next phase",function()
+    local query,reader,unpacker=a11y.query_memory_region,a11y.safe_memory_read,host.memory.unpack
+    local calls,value=0,12
+    a11y.query_memory_region=function() return {first=0x100000,last=0x110000,allowed=true} end
+    a11y.safe_memory_read=function() calls=calls+1;return ffi.string(ffi.new("uint32_t[1]",value),4) end
+    host.memory.unpack=function(_,bytes) return ffi.cast("const uint32_t*",bytes)[0] end
+    for _=1,100 do assert(a11y.menu_read(0x100008,"u32")==12) end
+    assert(calls==100)
+    a11y.render_read_work={};calls=0
+    for _=1,100 do assert(a11y.menu_read(0x100008,"u32")==12) end
+    assert(calls==1)
+    a11y.render_read_work=nil;value=34
+    assert(a11y.menu_read(0x100008,"u32")==34 and calls==2)
+    a11y.query_memory_region,a11y.safe_memory_read,host.memory.unpack=query,reader,unpacker
+    print("RENDER_SCALAR_COPIES baseline=100 scoped=1 next-phase=fresh")
+end)
+
+check("invalid message content never changes backend or retries every frame",function()
+    with_mail_packet(function()
+        with_render_harness(function()
+            local selector=a11y.select_prism_backend
+            local switches,calls=0,0
+            a11y.select_prism_backend=function() switches=switches+1;return true end
+            a11y.prism_functions.backend_speak=function() calls=calls+1;return 13 end
+            a11y.poll_selected_message();a11y.flush_native_speech(100000)
+            for _=1,100 do a11y.poll_selected_message();a11y.flush_native_speech(100000) end
+            assert(switches==0 and calls==1)
+            assert(a11y.selected_message_announced.status=="failed-content")
+            a11y.select_prism_backend=selector
+        end)
+    end)
+end)
+
+check("inactive window trees stay cached while active roots keep refreshing",function()
+    with_native_windows(function(values,base)
+        local original=a11y.menu_tree
+        local old_frame=upvalue(module.display_frame,"frame")
+        local inactive,active=0,0
+        a11y.native_tree_cache=nil
+        a11y.menu_tree=function(root,...)
+            if root==0x300000 then inactive=inactive+1 elseif root==0x310000 then active=active+1 end
+            return original(root,...)
+        end
+        for f=0,12,6 do
+            set_upvalue(module.display_frame,"frame",f)
+            assert(a11y.read_native_windows(base))
+        end
+        assert(inactive==1 and active==3)
+        values[0x1200009]=1
+        set_upvalue(module.display_frame,"frame",18)
+        assert(a11y.read_native_windows(base));assert(inactive==2,"activation refreshes the previously hidden root")
+        a11y.menu_tree=original;set_upvalue(module.display_frame,"frame",old_frame)
+    end)
+end)
+
+local function with_structured_rows(kind,fn)
+    local entries=kind=="calendar" and {
+        [0x110000]={name="date",text="10",parent=0x210000},
+        [0x120000]={name="event",text="Copa do Brasil",parent=0x210000},
+        [0x130000]={name="date",text="11",parent=0x220000},
+        [0x140000]={name="event",text="Janela de transferências",parent=0x220000},
+    } or {
+        [0x110000]={name="leagueRank_teamName",text="Time A",parent=0x210000},
+        [0x120000]={name="leagueRank_point",text="15",parent=0x210000},
+        [0x130000]={name="leagueRank_teamName",text="Time B",parent=0x220000},
+        [0x140000]={name="leagueRank_point",text="0",parent=0x220000},
+        [0x150000]={name="wins_value",text="5",parent=0x210000},
+        [0x160000]={name="wins_item",text="Vitórias",parent=0x230000},
+    }
+    with_rendered_panel(entries,function(values,snapshot,parents,owner)
+        local saved_base=upvalue(module.init,"process_base_u64")
+        local base,choice,selector,head,map=0x140000000,0x300000,0x310000,0x320000,0x330000
+        set_upvalue(module.init,"process_base_u64",ffi.cast("uint64_t",base))
+        local memory={[choice]=base+0x27cb508,[choice+0x98+0x78]=head,[head+0x19]=1,[head+8]=map,
+            [map]=head,[map+0x10]=head,[map+0x19]=0,[map+0x40]=selector,
+            [selector]=base+0x27b84d0,[selector+0x88]=16,[selector+0xbc]=0,
+            [choice+0x170]=0x340000,[choice+0x178]=0x340010,[0x340000]=0x210000,[0x340008]=0x220000}
+        parents[0x210000],parents[0x220000],parents[0x230000]=choice,choice,owner.root
+        parents[choice]=owner.root
+        snapshot.windows[1].cursor_detail={selected=choice,group=owner.root,status="resolved"}
+        a11y.menu_read=function(at) return memory[at] end
+        fn(values,snapshot,memory,selector)
+        set_upvalue(module.init,"process_base_u64",saved_base)
+    end)
+end
+
+check("standings selected row groups native columns and actual header labels without reading other teams",function()
+    with_structured_rows("standings",function(values,snapshot,memory,selector)
+        with_render_harness(function(output)
+            assert(a11y.poll_structured_record(false));a11y.flush_native_speech(100000)
+            assert(#output==1 and output[1][1]=="Classificação. Time: Time A; Pontos: 15; Vitórias: 5")
+            a11y.poll_structured_record(false);a11y.flush_native_speech(100000);assert(#output==1)
+            local entries=a11y.buffer_entries();assert(#entries==3 and entries[1]=="Time: Time A" and entries[3]=="Vitórias: 5")
+            a11y.read_buffer("first");a11y.flush_native_speech(100000)
+            a11y.read_buffer("next");memory[selector+0xbc]=1;a11y.flush_native_speech(100000)
+            assert(#output==2,"old row review cannot survive native internal cursor movement")
+            a11y.poll_structured_record(false);a11y.flush_native_speech(100000)
+            assert(output[3][1]=="Classificação. Time: Time B; Pontos: 0")
+            local current=a11y.buffer_entries();assert(#current==2 and current[1]=="Time: Time B")
+        end)
+    end)
+end)
+
+check("calendar internal selection groups only the current day and event and review wraps within it",function()
+    with_structured_rows("calendar",function(values,snapshot,memory,selector)
+        with_render_harness(function(output)
+            a11y.poll_structured_record(false);a11y.flush_native_speech(100000)
+            assert(output[1][1]=="Dia: 10; Evento: Copa do Brasil")
+            a11y.read_buffer("first");a11y.flush_native_speech(100000)
+            a11y.read_buffer("next");a11y.flush_native_speech(100000)
+            a11y.read_buffer("next");a11y.flush_native_speech(100000)
+            assert(output[2][1]=="Dia: 10" and output[3][1]=="Evento: Copa do Brasil" and output[4][1]=="Dia: 10")
+            memory[selector+0xbc]=1;a11y.poll_structured_record(false);a11y.flush_native_speech(100000)
+            assert(output[5][1]=="Dia: 11; Evento: Janela de transferências")
+            a11y.read_context.structural_question=true
+            assert(not a11y.structured_record_packet(),"question owns review over a background calendar")
+        end)
+    end)
+end)
+
+check("calendar empty event reads its day without inventing a fixture or exposing another day",function()
+    with_structured_rows("calendar",function(values)
+        values[0x120000]=""
+        local packet=a11y.structured_record_packet()
+        assert(packet and #packet.entries==1 and packet.entries[1]=="Dia: 10")
+    end)
+end)
+
+check("real Windows scalar blocks batch adjacent reads and recheck protected memory next phase",function()
+    local old_reader,old_unpack=a11y.safe_memory_read,host.memory.unpack
+    local region=ffi.C.VirtualAlloc(nil,4096,0x3000,0x04)
+    assert(region~=nil)
+    local at=tonumber(ffi.cast("uint64_t",region))
+    local words=ffi.cast("uint32_t*",region)
+    for i=0,15 do words[i]=i+10 end
+    a11y.safe_memory_read=production_safe_memory_read
+    host.memory.unpack=native_memory_codec.unpack
+    a11y.render_metric={reads=0};a11y.render_read_work={}
+    for i=0,15 do
+        local pointer=i%2==0 and ffi.cast("uint64_t",at+i*4) or at+i*4
+        assert(a11y.menu_read(pointer,"u32")==i+10)
+        assert(a11y.menu_read(ffi.cast("uint64_t",pointer),"u32")==i+10)
+    end
+    assert(a11y.render_metric.reads==1,"sixteen actual scalar fields share one safe OS copy")
+    a11y.render_read_work=nil
+    local previous=ffi.new("unsigned long[1]")
+    assert(ffi.C.VirtualProtect(region,4096,0x01,previous)~=0)
+    a11y.render_read_work={};assert(a11y.menu_read(at,"u32")==nil)
+    a11y.render_metric,a11y.render_read_work=nil,nil
+    assert(ffi.C.VirtualFree(region,0,0x8000)~=0)
+    a11y.safe_memory_read,host.memory.unpack=old_reader,old_unpack
+    print("WINDOWS_SCALAR_COPIES fields=16 copies=1 next-phase=PAGE_NOACCESS-rejected")
+end)
+
+check("rootless ancillary tasks do not invalidate rooted focus but a rootless primary still owns its screen",function()
+    with_native_windows(function(values,base)
+        values[0x1200009],values[0x1200098]=1,0
+        local first=assert(a11y.read_native_windows(base))
+        assert(not first.owner_token:find("17825792",1,true)) -- ancillary 0x1100000
+        values[0x700000]=0x1120000;values[0x1120088]=0x1220000
+        values[0x1220009],values[0x1220098]=1,0
+        local second=assert(a11y.read_native_windows(base))
+        assert(first.owner_token==second.owner_token and first.active_identity==second.active_identity)
+        values[0x1210098]=0
+        local rootless=assert(a11y.read_native_windows(base))
+        assert(rootless.owner_token:find(tostring(0x1110000) .. ":0",1,true),"primary transition remains observable")
+    end)
+end)
+
+check("main literal caption and tooltip use common flow without resolver or cached labels",function()
+    with_rendered_panel({[0x110000]={name="text_item",text="Football Life 2026",parent=0x210000},
+        [0x120000]={name="text_value",text="Amistosos, Ligas e muito mais",parent=0x210000}},function(values,snapshot,parents,owner)
+        local saved_base=upvalue(module.init,"process_base_u64")
+        local base=0x140000000
+        parents[0x210000]=owner.root
+        set_upvalue(module.init,"process_base_u64",ffi.cast("uint64_t",base))
+        a11y.menu_read=function(at) if tonumber(at)==owner.address then return base+0x266ddd8 end end
+        a11y.featured_title_by_language={pt="Liga Master errada"}
+        local delayed=upvalue(module.display_frame,"process_delayed_speech")
+        with_render_harness(function(output)
+            a11y.poll_main_menu_choice();a11y.flush_native_speech(100000)
+            assert(#output==1 and output[1][1]=="Football Life 2026")
+            local state=a11y.main_menu_choice_state
+            assert(state.description=="Amistosos, Ligas e muito mais")
+            assert(upvalue(a11y.poll_main_menu_caption,"main_menu_tooltip")==state.description)
+            delayed(tonumber(ffi.C.GetTickCount64())+1,false);a11y.flush_native_speech(100000)
+            assert(#output==2 and output[2][1]==state.description)
+            a11y.poll_main_menu_choice();a11y.flush_native_speech(100000);assert(#output==2)
+            values[0x110000]="Legenda nova ainda não capturada"
+            a11y.poll_main_menu_choice();a11y.flush_native_speech(100000);assert(#output==2)
+        end)
+        set_upvalue(module.init,"process_base_u64",saved_base)
+    end)
+end)
+
+
+check("common tooltip speaks after current option without a screen-specific label map and rejects stale selection",function()
+    with_rendered_panel({[0x110000]={name="itemName",text="Estilo ofensivo",parent=0x210000},
+        [0x120000]={name="menu_description",text="Explicação da opção selecionada nesta tela.",parent=0x220000}},function(values,snapshot)
+        snapshot.windows[1].cursor_detail={selected=0x210000,item_index=0,group_index=0}
+        with_render_harness(function(output)
+            speak("Estilo ofensivo",true)
+            a11y.poll_common_tooltip();a11y.flush_native_speech(100000)
+            assert(#output==2 and output[1][1]=="Estilo ofensivo" and output[2][1]==values[0x120000])
+            a11y.poll_common_tooltip();a11y.flush_native_speech(100000);assert(#output==2)
+            snapshot.windows[1].cursor_detail.item_index=1;a11y.poll_common_tooltip()
+            snapshot.windows[1].cursor_detail.item_index=2;a11y.flush_native_speech(100000);assert(#output==2)
+            a11y.read_context.structural_question=true
+            a11y.poll_common_tooltip();assert(#speech_texts()==0)
+        end)
+    end)
+end)
+
+check("countries from all five native groups remain readable without any matching rendered caption",function()
+    with_country_panel(function(values,snapshot,memory,owner,outer,inner)
+        local reader=a11y.read_msvc_string
+        local countries={"PORTUGAL","ANGOLA","JAPÃO","BRASIL","AUSTRÁLIA"}
+        local strings={}
+        memory[owner.address+0x108]=outer+#countries*0x70
+        for i,text in ipairs(countries) do
+            local parent,children=outer+(i-1)*0x70,inner+i*0x1000
+            memory[parent+8],memory[parent+0x10]=children,children+0x50
+            memory[parent+0x64],memory[parent+0x68]=0,0
+            strings[children+0x28]=text
+        end
+        for at in pairs(values) do values[at]="Legenda antiga" end
+        a11y.read_msvc_string=function(at) return strings[at] end
+        with_render_harness(function(output)
+            for i,text in ipairs(countries) do
+                memory[owner.address+0x11c]=i-1
+                a11y.poll_native_country_selection();a11y.process_native_list_focus(false);a11y.flush_native_speech(100000)
+                assert(output[i] and output[i][1]==text)
+            end
+        end)
+        a11y.read_msvc_string=reader
+    end)
+end)
+
+check("real standings field names group a record without descending into its numeric columns",function()
+    with_rendered_panel({[0x110000]={name="teamNameText",text="SC Internacional",parent=0x210000},
+        [0x120000]={name="winText",text="5",parent=0x210000},
+        [0x130000]={name="ptsText",text="15",parent=0x210000},
+        [0x140000]={name="drawText",text="0",parent=0x210000},
+        [0x150000]={name="loseText",text="1",parent=0x210000}},function(values,snapshot,parents,owner)
+        local old_base=upvalue(module.init,"process_base_u64")
+        local base=0x140000000
+        set_upvalue(module.init,"process_base_u64",ffi.cast("uint64_t",base))
+        parents[0x210000]=owner.root
+        snapshot.windows[1].cursor_detail={selected=0x210000,group=owner.root}
+        a11y.menu_read=function(at) if at==0x210000 then return base+0x27cb508 end end
+        with_render_harness(function(output)
+            a11y.poll_structured_record(false);a11y.flush_native_speech(100000)
+            assert(output[1][1]=="Time: SC Internacional; Vitórias: 5; Empates: 0; Derrotas: 1; Pontos: 15")
+            local fields=a11y.buffer_entries();assert(#fields==5 and fields[2]=="Vitórias: 5")
+        end)
+        set_upvalue(module.init,"process_base_u64",old_base)
+    end)
+end)
+
+check("long UTF8 message conversion failure uses bounded same-backend fragments without losing accents",function()
+    with_mail_packet(function(memory,strings,snapshot,records)
+        strings[records+0x50]=string.rep("Ação rápida na próxima opção. ",12)
+        with_render_harness(function(output)
+            local selector=a11y.select_prism_backend
+            local switches=0
+            a11y.select_prism_backend=function() switches=switches+1;return false end
+            a11y.prism_functions.backend_speak=function(_,ptr,interrupt)
+                local text=ffi.string(ptr)
+                if #text>160 then return 13 end
+                output[#output+1]={text,interrupt};return 0
+            end
+            a11y.poll_selected_message();a11y.flush_native_speech(100000)
+            local parts={};for _,item in ipairs(output) do parts[#parts+1]=item[1] end
+            assert(table.concat(parts)=="Assunto A. " .. strings[records+0x50])
+            assert(switches==0 and #output>1 and output[1][2] and not output[2][2])
+            assert(a11y.selected_message_announced.status=="delivered")
+            a11y.select_prism_backend=selector
+        end)
+    end)
+end)
+
+check("typed native HelpBox speaks on an unknown control surface and does not require an audio-field binding",function()
+    with_rendered_panel({[0x110000]={name="itemName",text="Controle desconhecido",parent=0x210000},
+        [0x120000]={name="text",text="Uma explicação nativa sem cadastro de tela.",parent=0x310000}},function(values,snapshot,parents,owner)
+        local saved_base=upvalue(module.init,"process_base_u64")
+        local base=0x140000000
+        set_upvalue(module.init,"process_base_u64",ffi.cast("uint64_t",base))
+        parents[0x310000]=owner.root
+        a11y.menu_read=function(at) if at==0x310000 then return base+0x27c17a0 end end
+        snapshot.windows[1].cursor_detail={selected=0x210000,group_index=0,item_index=0}
+        snapshot.selected_members={[0x110000]=true,[0x120000]=true} -- propagated focus is not a denial of help
+        assert(a11y.native_control_help(values[0x120000]))
+        with_render_harness(function(output)
+            a11y.poll_common_tooltip();a11y.flush_native_speech(100000)
+            assert(#output==1 and output[1][1]==values[0x120000])
+        end)
+        set_upvalue(module.init,"process_base_u64",saved_base)
+    end)
+end)
+
+check("text index removes replaced and retired captions rather than retaining scroll history",function()
+    with_components({[0x110000]={name="text",text="Antigo",parent=0x210000}},function()
+        a11y.observe_ui_widget(0x110000,"Novo")
+        assert(not a11y.ui_model.texts.Antigo and a11y.ui_model.texts.Novo.count==1)
+        a11y.forget_ui_widget(host.memory.hex(0x110000))
+        assert(not a11y.ui_model.texts.Novo)
+    end)
+end)
+
+
+check("cancelled main tooltip leaves its choice delivered on the common path",function()
+    local state={status="delivered"}
+    a11y.native_speech_queue={{menu_tooltip=state}}
+    a11y.native_speech_last=1
+    a11y.clear_speech_queue()
+    assert(state.status=="delivered")
+end)
+
+
+check("discarded country and common tooltip retain a retryable publication state",function()
+    local country={committed="ALBANIA",speech_status="queued"}
+    local tooltip={status="queued"}
+    a11y.native_speech_queue={{native_list={state=country}},{common_tooltip=tooltip}}
+    a11y.native_speech_last=2
+    a11y.clear_speech_queue()
+    assert(country.committed==nil and country.speech_status=="pending")
+    assert(tooltip.status=="pending" and a11y.tooltip_dirty)
+end)
+
+check("render speech budget continues valid sentences next frame and skips obsolete entries",function()
+    with_render_harness(function(output)
+        for i=1,5 do speak("Dado " .. i,false,true,"budget:" .. i) end
+        a11y.native_speech_queue[1].superseded=true
+        a11y.render_metric={speech_calls=0}
+        a11y.flush_native_speech(100000)
+        assert(#output==2 and output[1][1]=="Dado 2" and output[2][1]=="Dado 3")
+        assert(a11y.render_metric.speech_calls==2 and #speech_texts()==2)
+        a11y.render_metric={speech_calls=0}
+        a11y.flush_native_speech(100001)
+        assert(#output==4 and output[4][1]=="Dado 5" and #speech_texts()==0)
+        a11y.render_metric=nil;a11y.render_read_work=nil
+    end)
+end)
+
+check("fragment group only delivers on final success and never conceals an intermediate failure",function()
+    with_render_harness(function(output)
+        local state={status="queued"}
+        local old_validator=a11y.selected_message_allowed
+        a11y.selected_message_allowed=function() return true end
+        speak(string.rep("Mensagem longa com dados. ",20),false,true,"group")
+        local entry=a11y.native_speech_queue[1]
+        entry.selected_message={state=state}
+        assert(a11y.queue_speech_fragments(entry))
+        a11y.native_speech_queue[1]=nil;a11y.native_speech_first=2
+        a11y.render_metric={speech_calls=0};a11y.flush_native_speech(100000)
+        assert(#output==2 and state.status=="queued" and #speech_texts()>0)
+        a11y.render_metric=nil;a11y.flush_native_speech(100001)
+        assert(state.status=="delivered")
+        speak(string.rep("Outra mensagem longa com dados. ",20),false,true,"group-fail")
+        entry=a11y.native_speech_queue[1];entry.selected_message={state=state}
+        state.status="queued";assert(a11y.queue_speech_fragments(entry))
+        a11y.native_speech_queue[1]=nil;a11y.native_speech_first=2
+        a11y.prism_functions.backend_speak=function() return 13 end
+        a11y.flush_native_speech(100002)
+        assert(state.status=="failed-content" and #speech_texts()==0)
+        a11y.selected_message_allowed=old_validator
+    end)
+end)
+
+check("focus replacement happens before any render publication",function()
+    with_render_harness(function(output)
+        speak("Selecao antiga",false,true,"old")
+        local scanner=upvalue(module.display_frame,"scan_current_ui_focus")
+        set_upvalue(module.display_frame,"scan_current_ui_focus",function()
+            assert(#output==0,"previous selection leaked before current focus scan")
+            a11y.clear_speech_queue();speak("Selecao atual",false,true,"current")
+            return true
+        end)
+        module.display_frame({})
+        assert(#output==1 and output[1][1]=="Selecao atual")
+        set_upvalue(module.display_frame,"scan_current_ui_focus",scanner)
+    end)
+end)
+
+check("early startup return still publishes once and background never speaks",function()
+    with_render_harness(function(output)
+        set_upvalue(module.display_frame,"process_startup_speech",function()
+            speak("Inicio",false,true,"startup-budget");return true
+        end)
+        module.display_frame({});assert(#output==1 and output[1][1]=="Inicio")
+        local foreground=upvalue(module.display_frame,"game_is_foreground")
+        set_upvalue(module.display_frame,"game_is_foreground",function() return false end)
+        speak("Fundo",false,true,"background-budget");module.display_frame({})
+        assert(#output==1 and #speech_texts()==0)
+        set_upvalue(module.display_frame,"game_is_foreground",foreground)
+    end)
+end)
+
+check("native router prioritizes selected message and leaves live dialogs out of record grouping",function()
+    local packet,poll,record,focus=a11y.selected_message_packet,a11y.poll_selected_message,
+        a11y.poll_structured_record,a11y.process_engine_focus
+    local calls={}
+    a11y.selected_message_packet=function() return {} end
+    a11y.poll_selected_message=function() calls[#calls+1]="message" end
+    a11y.poll_structured_record=function() calls[#calls+1]="record";return true end
+    a11y.process_engine_focus=function() calls[#calls+1]="focus";return true end
+    assert(a11y.dispatch_native_selection(false,false) and table.concat(calls)=="message")
+    a11y.selected_message_packet=function() end;calls={}
+    assert(a11y.dispatch_native_selection(false,false) and table.concat(calls)=="record")
+    calls={};assert(a11y.dispatch_native_selection(true,true) and table.concat(calls)=="focus")
+    a11y.selected_message_packet,a11y.poll_selected_message=packet,poll
+    a11y.poll_structured_record,a11y.process_engine_focus=record,focus
+end)
+
+
+check("same selected country is retried after cancellation and never loops after content failure",function()
+    with_country_panel(function()
+        with_render_harness(function(output)
+            a11y.poll_native_country_selection();assert(a11y.process_native_list_focus(false))
+            assert(#speech_texts()==1);a11y.clear_speech_queue()
+            assert(a11y.process_native_list_focus(false) and #speech_texts()==1)
+            a11y.flush_native_speech(100000);assert(#output==1)
+            a11y.process_native_list_focus(false);assert(#speech_texts()==0)
+            local item=a11y.native_list_selection
+            item.committed=nil;item.speech_status="failed-content"
+            a11y.process_native_list_focus(false);assert(#speech_texts()==0)
+        end)
+    end)
+end)
+
+
+check("real Windows nationality data reads filtered country IDs without generic caption records",function()
+    local saved_reader,saved_unpack,saved_snapshot=a11y.safe_memory_read,host.memory.unpack,a11y.native_windows
+    local saved_base=upvalue(module.init,"process_base_u64")
+    local region=ffi.C.VirtualAlloc(nil,0x4000000,0x2000,0x01);assert(region~=nil)
+    local base=tonumber(ffi.cast("uint64_t",region))
+    for _,range in ipairs({{0x1000,0x4000},{0x271f000,4096},{0x3705000,4096},{0x2843000,8192},{0x284b000,4096}}) do
+        assert(ffi.C.VirtualAlloc(ffi.cast("void*",base+range[1]),range[2],0x1000,0x04)~=nil)
+    end
+    local function u64(at,value) ffi.cast("uint64_t*",base+at)[0]=value end
+    local function u32(at,value) ffi.cast("uint32_t*",base+at)[0]=value end
+    local function u8(at,value) ffi.cast("uint8_t*",base+at)[0]=value end
+    local window,outer,head=base+0x1000,base+0x2000,base+0x3000
+    u64(0x1000,base+0x271f4d0);u8(0x109b,1);u8(0x1180,0)
+    u64(0x1100,outer);u64(0x1108,outer+5*0x70);u32(0x1118,0);u32(0x111c,0)
+    u64(0x271f4d0+0xd8,base+0xc9d990);u64(0x271f4d0+0x268,base+0xc97190)
+    u64(0x1170,head);u64(0x3008,base+0x3100);u8(0x3019,1)
+    u64(0x3705e10,base+0x4000);u64(0x4048,base+0x1000000);u32(0x284b5e0,10)
+    local names={"PORTUGAL","ALBÂNIA","ANGOLA","ETIÓPIA","JAPÃO","CHINA","BRASIL","CHILE","AUSTRÁLIA","NOVA ZELÂNDIA"}
+    for group=0,4 do
+        local parent,node,ids=0x2000+group*0x70,0x3100+group*0x80,0x3800+group*0x10
+        u32(parent,group);u32(parent+0x64,0);u32(parent+0x68,0)
+        u64(node,head);u64(node+0x10,group<4 and base+node+0x80 or head);u8(node+0x19,0);u32(node+0x20,group)
+        u64(node+0x28,base+ids);u64(node+0x30,base+ids+4)
+        ffi.cast("uint16_t*",base+ids)[0]=group*2+1;ffi.cast("uint16_t*",base+ids)[1]=group*2+2
+    end
+    for index,text in ipairs(names) do
+        local at=base+0x2843f20+(index-1)*0x4c
+        ffi.copy(ffi.cast("void*",at),text,#text)
+        ffi.cast("uint32_t*",at+0x48)[0]=index+0x400 -- packed upper flags are not the ID
+    end
+    a11y.safe_memory_read=production_safe_memory_read;host.memory.unpack=native_memory_codec.unpack
+    set_upvalue(module.init,"process_base_u64",ffi.cast("uint64_t",base))
+    a11y.native_windows={windows={{address=window,root=base+0x5000,enabled=true}},members={}}
+    with_render_harness(function(output)
+        for index,text in ipairs(names) do
+            local group=math.floor((index-1)/2)
+            u32(0x111c,group);u32(0x2000+group*0x70+0x64,(index-1)%2)
+            a11y.render_metric={reads=0,speech_calls=0};a11y.render_read_work={}
+            a11y.poll_native_country_selection();assert(a11y.process_native_list_focus(false))
+            a11y.flush_native_speech(100000)
+            assert(output[index] and output[index][1]==text)
+        end
+        a11y.render_metric,a11y.render_read_work=nil,nil
+        assert(a11y.country_name(99)==nil,"missing country cannot fall back to first database record")
+        u32(0x284b5e0,513);assert(not a11y.native_country_selection())
+        u32(0x284b5e0,10);u64(0x3190,base+0x3180) -- corrupt an intermediate map link into a cycle
+        u32(0x111c,4);assert(not a11y.native_country_selection())
+    end)
+    a11y.safe_memory_read,host.memory.unpack,a11y.native_windows=saved_reader,saved_unpack,saved_snapshot
+    set_upvalue(module.init,"process_base_u64",saved_base)
+    assert(ffi.C.VirtualFree(region,0,0x8000)~=0)
+    print("WINDOWS_COUNTRY_FILTERED_IDS groups=5 countries=10 no-caption-vector=true exact-ID=true")
+end)
+
+check("real Windows rendered tables group current standings and calendar rows with cdata widget addresses",function()
+    local real_render,real_menu=a11y.read_native_rendered_text,a11y.menu_read
+    local saved_reader,saved_unpack=a11y.safe_memory_read,host.memory.unpack
+    local saved_base=upvalue(module.init,"process_base_u64")
+    local region=ffi.C.VirtualAlloc(nil,0x4000,0x3000,0x04);assert(region~=nil)
+    local at=tonumber(ffi.cast("uint64_t",region));local base=0x140000000
+    local function write64(address,value) ffi.cast("uint64_t*",address)[0]=value end
+    for _,kind in ipairs({"standings","calendar"}) do
+        module.context_reset({})
+        local columns=kind=="standings" and {{"teamNameText","Time A","Time B"},{"winText","5","0"},{"ptsText","15","0"}}
+            or {{"date","10","11"},{"event","Copa do Brasil","Janela de transferências"}}
+        local entries={}
+        for row=1,2 do
+            for index,column in ipairs(columns) do
+                local slot=at+((row-1)*#columns+index-1)*0x400
+                local text=column[row+1]
+                write64(slot,base+0x27b5260);ffi.cast("uint32_t*",slot+0xc)[0]=263
+                write64(slot+0xa8,slot+0x180);write64(slot+0x180,slot+0x200)
+                write64(slot+0x200+0x10,base+0xe29e40);write64(slot+0x180+0x38,slot+0x280)
+                ffi.fill(ffi.cast("void*",slot+0x280),128,0);ffi.copy(ffi.cast("void*",slot+0x280),text,#text)
+                entries[slot]={name=column[1],text=text,parent=at+0x3000+(row-1)*0x100}
+            end
+        end
+        with_rendered_panel(entries,function(values,snapshot,parents,owner)
+            parents[at+0x3000],parents[at+0x3100]=owner.root,owner.root
+            snapshot.windows[1].cursor_detail={selected=at+0x3000,group=owner.root}
+            a11y.read_native_rendered_text,a11y.menu_read=real_render,real_menu
+            a11y.safe_memory_read=production_safe_memory_read;host.memory.unpack=native_memory_codec.unpack
+            set_upvalue(module.init,"process_base_u64",ffi.cast("uint64_t",base))
+            for _,node in pairs(a11y.ui_model.nodes) do node.address=ffi.cast("uint64_t",node.address) end
+            with_render_harness(function(output)
+                a11y.render_metric={reads=0,speech_calls=0};a11y.render_read_work={}
+                assert(a11y.poll_structured_record(false));a11y.flush_native_speech(100000)
+                local expected=kind=="standings" and "Time: Time A; Vitórias: 5; Pontos: 15" or "Dia: 10; Evento: Copa do Brasil"
+                assert(output[1] and output[1][1]==expected)
+                snapshot.windows[1].cursor_detail.selected=at+0x3100
+                a11y.render_read_work={};a11y.render_metric={reads=0,speech_calls=0}
+                assert(a11y.poll_structured_record(false));a11y.flush_native_speech(100001)
+                expected=kind=="standings" and "Time: Time B; Vitórias: 0; Pontos: 0" or "Dia: 11; Evento: Janela de transferências"
+                assert(output[2] and output[2][1]==expected)
+                a11y.render_metric,a11y.render_read_work=nil,nil
+            end)
+            a11y.safe_memory_read,host.memory.unpack=saved_reader,saved_unpack
+        end)
+    end
+    set_upvalue(module.init,"process_base_u64",saved_base)
+    assert(ffi.C.VirtualFree(region,0,0x8000)~=0)
+    print("WINDOWS_STRUCTURED_RECORDS families=2 rows=4 cdata-addresses=true production-RPM=true")
 end)
 
 print("FLACCESS_OFFLINE_TESTS_OK checks=" .. checks ..

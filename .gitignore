@@ -25,14 +25,24 @@ capture-*.txt
 .DS_Store
 Thumbs.db
 
-# Generated text-catalog transient files
-textAssets/catalog.sqlite
-textAssets/catalog.sqlite-shm
-textAssets/catalog.sqlite-wal
+# Distributed runtimes remain versioned despite development bin exclusions.
+!modules/FlAccessReader/bin/
+!modules/FlAccessReader/bin/prism.dll
+!modules/FlAccessGameplay/bin/
+!modules/FlAccessGameplay/bin/soft_oal.dll
+!modules/FlAccessGameplay/bin/flaccess_audio_master.dll
+modules/FlAccessReader/FlAccessReader.ini
+modules/FlAccessGameplay/state/*.tsv
 
-# Local test dependencies and evidence
-reference/
+# Private local environments, game captures and backups
+.analysis-deps/
 .test-temp/
 .sider-compat-test/
-tests/voice-evidence/
-tests/capture-*
+local-backups/
+backups/
+reference/
+*.diff
+/NOTEBOOK.md
+/gameplay-*.tsv
+/gameplay-*.json
+/tests/voice-evidence/
