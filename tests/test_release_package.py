@@ -20,29 +20,28 @@ class ReleasePackageTests(unittest.TestCase):
             archive, manifest = release.build(ROOT, directory)
             with zipfile.ZipFile(archive) as z:
                 self.assertEqual(json.loads(z.read('sider/BUILD.json')), manifest)
-                self.assertEqual({p.split('/')[0] for p in z.namelist()}, {'livecpk', 'modules', 'sider'})
-                self.assertEqual(set(manifest['components']), {'FlAccessReader', 'FlAccessGameplay'})
-                for path, source in [('sider/sider.dll', 'sider-core/sider.dll'),
-                                     ('modules/FlAccessReader/bin/prism.dll', 'modules/FlAccessReader/bin/prism.dll'),
-                                     ('modules/FlAccessReader/FlAccessReader.lua', 'modules/FlAccessReader/FlAccessReader.lua'),
-                                     ('modules/FlAccessGameplay/FlAccessGameplay.lua', 'modules/FlAccessGameplay/FlAccessGameplay.lua'),
-                                     ('modules/FlAccessGameplay/bin/flaccess_audio_master.dll', 'modules/FlAccessGameplay/bin/flaccess_audio_master.dll')]:
-                    self.assertEqual(z.read(path), (ROOT / source).read_bytes())
-                for camera_id in range(10):
-                    path = f'modules/FlAccessGameplay/engine/cameraRadars/camera_{camera_id:02d}.ini'
-                    self.assertEqual(z.read(path), (ROOT / path).read_bytes())
-                self.assertIn('modules/FlAccessGameplay/engine/cameraRadars.lua', z.namelist())
-                for asset in (ROOT / 'livecpk').rglob('*'):
-                    if asset.is_file(): self.assertEqual(z.read(asset.relative_to(ROOT).as_posix()), asset.read_bytes())
-                self.assertFalse(any('FLAccess-Audio' in p or 'FLAccess-text' in p or p.endswith('FLAccess.lua') for p in z.namelist()))
+                self.assertEqual({p.split('/')[0] for p in z.namelist()}, {'content', 'modules', 'sider'})
+                self.assertEqual(manifest['version'], '0.2.0')
+                self.assertEqual(len(manifest['components']['modules']), 31)
+                self.assertIn('outros módulos do sider', z.read('sider/RELEASE.pt-BR.md').decode('utf-8').casefold())
+                self.assertEqual(z.read('sider/RELEASE.pt-BR.md'), (ROOT/'docs/RELEASE-0.2.0.pt-BR.md').read_bytes())
+                for entry in manifest['components']['modules']:
+                    name = 'modules/' + entry
+                    self.assertEqual(z.read(name), (ROOT/name).read_bytes())
+                self.assertEqual(z.read('sider/sider.dll'), (ROOT/'sider-core/sider.dll').read_bytes())
                 for name, digest in manifest['sha256'].items():
                     self.assertEqual(hashlib.sha256(z.read(name)).hexdigest(), digest)
-                self.assertFalse(any(name.endswith(('.log', '.exe')) or 'probe' in name for name in z.namelist()))
-            first = archive.read_bytes()
-            release.build(ROOT, directory)
-            self.assertEqual(archive.read_bytes(), first)
-            self.assertEqual((Path(directory) / 'SHA256SUMS.txt').read_text().split()[0],
-                             hashlib.sha256(first).hexdigest())
+                self.assertFalse(any(name.endswith(('.log', '.exe')) or 'probe' in name.lower() for name in z.namelist()))
+                self.assertFalse(any('FlAccessReader/' in p or 'FlAccessGameplay/' in p for p in z.namelist()))
+                for camera in range(10):
+                    self.assertIn(f'content/FlAccess/cameras/camera_{camera:02d}.ini', z.namelist())
+                for dll in ('prism.dll','soft_oal.dll','flaccess_audio_master.dll'):
+                    name='modules/FlAccess/bin/'+dll
+                    self.assertEqual(z.read(name),(ROOT/name).read_bytes())
+            first=archive.read_bytes()
+            release.build(ROOT,directory)
+            self.assertEqual(archive.read_bytes(),first)
+            self.assertEqual((Path(directory)/'SHA256SUMS.txt').read_text().split()[0],hashlib.sha256(first).hexdigest())
 
     def test_packaging_stops_if_either_runtime_dll_is_missing(self):
         with tempfile.TemporaryDirectory() as directory:

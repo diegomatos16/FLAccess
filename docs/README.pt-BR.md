@@ -1,45 +1,48 @@
-# FLAccess 0.1.9
+# FLAccess 0.2.0 — experimental
 
-Leitor experimental de menus para SP Football Life2026/PES2021, sem OCR, usando
-texto e foco nativos. Inclui Gameplay experimental opcional. Requer Windows x64,
-FL_2026.exe compatível e Sider 7.3.3. Compatibilidade FL 27 não estabelecida.
+Compatibilidade experimental com Football Life 27, aprimoramento da navegação e
+exploração, alguns bugs corrigidos, mas mais pendências. Reader 52 / Gameplay 19.
+Leitor e gameplay no mesmo mod, dividido em 31 componentes Sider. Leitor base
+sempre ativo. Usa texto/foco nativos e Prism, sem OCR, no Windows x64.
 
 ## Instalação
 
-Baixe [FlAccess.zip e SHA256SUMS.txt](https://github.com/diegomatos16/FLAccess/releases/tag/v0.1.9).
-Siga o [guia de instalação e migração](../packaging/INSTALL.pt-BR.md). O ZIP tem
-livecpk/modules/sider; copie sider/sider.dll para a raiz do SiderAddons. Não
-substitua o sider.ini inteiro. Use as entradas do snippet e remova entradas antigas
-do FLAccess. Faça backup das preferências, sons e perfis personalizados.
-
-Reader e Gameplay podem ser ativados separadamente. Não requer Python para jogar.
-NVDA ou outro leitor compatível fala pelo Prism; SAPI pode ser usado como fallback.
+Baixe [FlAccess.zip e SHA256SUMS.txt](https://github.com/diegomatos16/FLAccess/releases/tag/v0.2.0)
+e siga a [instalação/migração](../packaging/INSTALL.pt-BR.md). O ZIP contém
+content/modules/sider, incluindo o Sider 7.3.3 compatível e DLLs/licenças.
+Não substitua o sider.ini inteiro. Preserve outros mods, INIs, WAVs e perfis.
+Recursos próprios não usam cpk.root. Não carregar FlAccessReader/FlAccessGameplay
+antigos junto com 0.2.0. Python não é necessário para jogar.
 
 ## Controles
 
-Navegue normalmente pelos controles do jogo. I/análogo DIREITO para cima revisa
-o dado anterior; K/direito para baixo, o próximo. J vai ao primeiro; L repete.
-Um dado completo por passo. Perguntas/mensagens mostram somente seu conteúdo no
-buffer; respostas continuam pela navegação original. Listas e tabelas reconhecidas
-restringem revisão ao registro selecionado. Y/Triângulo abre dados do jogador e
-anuncia título; Ajuda/Voltar ficam fora da revisão dos atributos.
+Navegue pelos controles normais do jogo. I/analógico DIREITO para cima explora
+o campo anterior; K/direito para baixo, o próximo. J vai ao primeiro campo;
+L está sem ação. Repetir foi removido. J/L e direito horizontal para notícias
+ainda não implementados. Um campo completo por passo, com título do grupo ao
+entrar nele quando o componente é reconhecido.
 
-No painel do Reader no Sider,6/7 escolhem a opção,9/0 mudam valor e8 restaura padrão.
-Diagnóstico inicia desligado. Eco de inserção pelo mod permanece desligado;
-exclusão e movimento do cursor podem ter feedback. Eco do próprio leitor é separado.
+Atributos ficam só na exploração; seleção automática mantém nome/situação e os
+registros reconhecidos da classificação. Perguntas/mensagens limitam exploração
+ao conteúdo; respostas usam os controles originais. Y/Triângulo abre dados do
+jogador nos fluxos suportados.
 
-Gameplay não cria novos comandos. Segue partida/jogador local e usa efeitos
-HRTF/OpenAL. Para desativá-lo, remova sua linha lua.module. Para configurações de
-câmera, desarme e WAVs, veja [README Gameplay](../modules/FlAccessGameplay/README.pt-BR.md).
+No painel FLAccess do Sider,6/7 escolhem a opção,9/0 mudam valor e 8 restaura padrão.
+Diagnóstico começa desligado. Eco de inserção do mod começa desligado; exclusão
+e movimento do cursor podem ter feedback. Eco do leitor é separado.
+Configuração unificada: modules/FlAccess/FlAccess.ini. Sons e perfis editáveis em
+content/FlAccess/sounds e content/FlAccess/cameras. Gameplay usa HRTF/OpenAL e
+continua experimental; controles individuais de sons são trabalho futuro.
 
-## Mudanças e limites
+## Pendências
 
-Escalação, substituição, atributos agrupados, treino, áudio/idioma, pausa e revisão
-receberam melhorias. Posições originais/secundárias erradas foram retiradas;
-posição no campo permanece. Estilos e posições reais ficam para futuro.
+Listas de clubes/ligas/jogadores e classificação continuam com relato de lentidão
+grave.52 não tem confirmação real. Também permanecem menu principal duplicado/
+tooltip ausente, submenu Football Life e painéis silenciosos, dados de jogador
+sem agrupamento consistente, Diário/notícias/data e rolagem da Master Liga,
+save/sobrescrita e relatos de áudio após substituição/desarme.
 
-Persistem relatos de lentidão/silêncios, primeiro item, países, mensagens parciais,
-tabelas e tooltips. Correções internas recentes ainda precisam de confirmação real.
-Orientação das câmeras e demais efeitos de gameplay são experimentais; não se
-promete controle completo da partida, autowalk ou leitura de qualquer tela.
-Veja [notas completas](RELEASE-0.1.9.pt-BR.md) e [pendências](LISTA-PROBLEMAS-ATUAL.pt-BR.md).
+Novo relato no FL27: opções dos outros módulos Sider não são mais lidas.
+Não declarar corrigidos esses fluxos apenas porque testes automatizados passam.
+Consulte [notas 0.2.0](RELEASE-0.2.0.pt-BR.md) e a
+[lista detalhada](LISTA-PROBLEMAS-ATUAL.pt-BR.md).

@@ -1,11 +1,35 @@
-; Add inside the existing [sider] section; do not replace other mods.
-; LiveCPK roots contain editable assets; the mod reads its own WAV/TSV files.
-livecpk.enabled = 1
-cpk.root = ".\livecpk\FlAccessReader"
-cpk.root = ".\livecpk\FlAccessGameplay"
+; FLAccess 0.2.0. Load in this order. Base reader is mandatory.
 lua.enabled = 1
 luajit.ext.enabled = 1
 match-stats.enabled = 1
-; Independent mods. Remove only the corresponding lua.module line to disable one.
-lua.module = "FlAccessReader\FlAccessReader.lua"
-lua.module = "FlAccessGameplay\FlAccessGameplay.lua"
+lua.module = "FlAccess\core.lua"
+lua.module = "FlAccess\reader_bootstrap.lua"
+lua.module = "FlAccess\reader_memory_prism.lua"
+lua.module = "FlAccess\reader_text_intents.lua"
+lua.module = "FlAccess\reader_speech_queue.lua"
+lua.module = "FlAccess\reader_semantics.lua"
+lua.module = "FlAccess\reader_groups.lua"
+lua.module = "FlAccess\reader_records.lua"
+lua.module = "FlAccess\reader_review.lua"
+lua.module = "FlAccess\reader_native_tree.lua"
+lua.module = "FlAccess\reader_native_windows.lua"
+lua.module = "FlAccess\reader_presentation.lua"
+lua.module = "FlAccess\reader_players.lua"
+lua.module = "FlAccess\reader_controls.lua"
+lua.module = "FlAccess\reader_lists.lua"
+lua.module = "FlAccess\reader_observations.lua"
+lua.module = "FlAccess\reader_resolver.lua"
+lua.module = "FlAccess\reader_focus.lua"
+lua.module = "FlAccess\reader_frame.lua"
+lua.module = "FlAccess\reader_lifecycle.lua"
+lua.module = "FlAccess\audio_policy.lua"
+lua.module = "FlAccess\match_registry.lua"
+lua.module = "FlAccess\camera.lua"
+lua.module = "FlAccess\gameplay_state.lua"
+lua.module = "FlAccess\gameplay_rules.lua"
+lua.module = "FlAccess\gameplay_memory.lua"
+lua.module = "FlAccess\gameplay_audio.lua"
+lua.module = "FlAccess\gameplay_match.lua"
+lua.module = "FlAccess\gameplay_diagnostics.lua"
+lua.module = "FlAccess\gameplay_render.lua"
+lua.module = "FlAccess\gameplay_lifecycle.lua"

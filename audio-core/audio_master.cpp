@@ -11,6 +11,7 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include <set>
 #include <memory>
 #include <cstring>
 #include "master_policy.h"
@@ -68,6 +69,7 @@ struct Policy {
     flaccess::MasterLevel desired;
     std::vector<std::unique_ptr<Session>> sessions;
     std::wstring target_identity;
+    std::set<std::wstring> native_session_classes;
     ComPtr<IMMDevice> selected_device;
     ComPtr<IAudioSessionManager2> selected_manager;
     GUID grouping=GUID_NULL;
@@ -119,7 +121,16 @@ struct Policy {
         if(FAILED(control->QueryInterface(IID_PPV_ARGS(s->volume.GetAddressOf())))) return nullptr;
         auto event=new Events(this,owner);s->events.Attach(event);
         if(FAILED(control->RegisterAudioSessionNotification(event))) return nullptr;
-        s->native=native;s->target=target;
+        // A recreated instance is native only if its stable session class was
+        // proven before effects started. A new mod stream is not such proof.
+        LPWSTR stable=nullptr;
+        std::wstring stable_id;
+        if(SUCCEEDED(control->GetSessionIdentifier(&stable)) && stable) {
+            stable_id=stable;CoTaskMemFree(stable);
+        }
+        if(native && !stable_id.empty()) native_session_classes.insert(stable_id);
+        const bool recovered=!target && !stable_id.empty() && native_session_classes.count(stable_id)!=0;
+        s->native=native||recovered;s->target=target;
         auto* result=s.get();sessions.push_back(std::move(s));return result;
     }
     void device_name(IMMDevice* device) {
@@ -185,6 +196,23 @@ struct Policy {
             target->SetGroupingParam(&grouping,&EVENT_CONTEXT);
             { std::lock_guard<std::mutex> guard(lock);if(!pending) desired=baseline; }
             have_master=true;
+        }
+        if(have_master && selected_manager) {
+            bool target_present=false,native_present=false;
+            for(auto& session:sessions) {
+                target_present=target_present||session->target;
+                native_present=native_present||session->native;
+            }
+            if(!target_present && native_present) {
+                ComPtr<IAudioSessionControl> target;
+                hr=selected_manager->GetAudioSessionControl(nullptr,0,target.GetAddressOf());
+                if(FAILED(hr)) return hr;
+                ComPtr<IAudioSessionControl2> target2;
+                if(FAILED(hr=target.As(&target2))) return hr;
+                target_identity=identity(target2.Get());
+                if(target_identity.empty() || !add(target2.Get(),false,true)) return E_FAIL;
+                target->SetGroupingParam(&grouping,&EVENT_CONTEXT);
+            }
         }
         return S_OK;
     }

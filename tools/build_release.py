@@ -1,4 +1,4 @@
-"""Build the local three-folder FlAccess.zip: livecpk, modules and sider."""
+"""Build FlAccess.zip: content/modules/sider for0.2.0, legacy layout for older sources."""
 from pathlib import Path
 import argparse
 import hashlib
@@ -14,6 +14,8 @@ from build_reader_module import build as build_reader
 
 def build(root, output=None):
     root = Path(root)
+    if (root / 'modules/FlAccess/components.json').is_file():
+        return build_modular(root, output)
     for prerequisite in ('sider-core/sider.dll', 'modules/FlAccessReader/bin/prism.dll'):
         if not (root / prerequisite).is_file():
             raise ValueError('Missing required runtime: ' + prerequisite)
@@ -94,6 +96,68 @@ def build(root, output=None):
     checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
     (output / 'SHA256SUMS.txt').write_text(f'{checksum}  {archive.name}\n', encoding='ascii')
     return archive, manifest
+
+
+def build_modular(root, output=None):
+    """Package native Sider components. Do not rebuild or overwrite old releases."""
+    root = Path(root)
+    for name in ('sider-core/sider.dll', 'modules/FlAccess/bin/prism.dll',
+                 'modules/FlAccess/bin/soft_oal.dll', 'modules/FlAccess/bin/flaccess_audio_master.dll',
+                 'modules/FlAccess/licenses/LICENSE', 'modules/FlAccess/licenses/NOTICE'):
+        if not (root / name).is_file(): raise ValueError('Missing required runtime: ' + name)
+    components = json.loads((root / 'modules/FlAccess/components.json').read_text(encoding='utf-8'))
+    entries = components['modules']
+    if len(entries) != len(set(entries)) or entries[0] != 'FlAccess/core.lua':
+        raise ValueError('Invalid component order or duplicate module')
+    for name in entries:
+        if not (root / 'modules' / name).is_file(): raise ValueError('Missing component: ' + name)
+    files = {}
+    for directory in ('modules/FlAccess', 'content/FlAccess'):
+        for path in (root / directory).rglob('*'):
+            if path.is_file() and '__pycache__' not in path.parts and path.suffix not in ('.log', '.pyc'):
+                relative = path.relative_to(root).as_posix()
+                if '/state/' in relative and path.name != 'live-layout.txt': continue
+                files[relative] = path
+    files.update({'sider/sider.dll': root / 'sider-core/sider.dll',
+                  'sider/sider.ini.snippet': root / 'packaging/sider.ini.snippet',
+                  'sider/INSTALL.pt-BR.md': root / 'packaging/INSTALL.pt-BR.md',
+                  'sider/INSTALL.en.md': root / 'packaging/INSTALL.en.md',
+                  'sider/RELEASE.pt-BR.md': root / 'docs/RELEASE-0.2.0.pt-BR.md',
+                  'sider/RELEASE.en.md': root / 'docs/RELEASE-0.2.0.en.md',
+                  'sider/ARCHITECTURE.pt-BR.md': root / 'docs/ARQUITETURA-0.2.0.pt-BR.md',
+                  'sider/README.md': root / 'sider-core/README.md'})
+    for path in (root / 'sider-core/licenses').rglob('*'):
+        if path.is_file(): files['sider/licenses/' + path.relative_to(root/'sider-core/licenses').as_posix()] = path
+    payload = {}
+    for name, path in sorted(files.items()):
+        data = path.read_bytes()
+        if not data: raise ValueError('Empty payload: ' + name)
+        if name.endswith('.dll') and data[:2] != b'MZ': raise ValueError('Invalid DLL: ' + name)
+        payload[name] = data
+    try:
+        commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root,
+                                        stderr=subprocess.DEVNULL, text=True).strip()
+    except (OSError, subprocess.CalledProcessError): commit = None
+    bootstrap = (root / 'modules/FlAccess/reader_bootstrap.lua').read_text(encoding='utf-8')
+    build_number = int(re.search(r'\bbuild\s*=\s*(\d+)', bootstrap).group(1))
+    manifest = {'version': components['version'], 'build': build_number, 'source_commit': commit,
+                'components': components, 'prism': json.loads((root/'modules/FlAccess/PRISM-SOURCE.json').read_text()),
+                'sha256': {n:hashlib.sha256(d).hexdigest() for n,d in payload.items()}}
+    payload['sider/BUILD.json'] = (json.dumps(manifest,indent=2)+'\n').encode('utf-8')
+    output = Path(output) if output else root/'release/0.2.0-local'
+    output.mkdir(parents=True,exist_ok=True)
+    archive = output/'FlAccess.zip'
+    with zipfile.ZipFile(archive,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+        for name,data in sorted(payload.items()):
+            info=zipfile.ZipInfo(name);info.compress_type=zipfile.ZIP_DEFLATED;info.external_attr=0o100644 << 16
+            z.writestr(info,data,compresslevel=9)
+    with zipfile.ZipFile(archive) as z:
+        if z.testzip() is not None: raise ValueError('Corrupt installer archive')
+        for name,data in payload.items():
+            if z.read(name)!=data: raise ValueError('Installer differs: '+name)
+    digest=hashlib.sha256(archive.read_bytes()).hexdigest()
+    (output/'SHA256SUMS.txt').write_text(digest+'  FlAccess.zip\n',encoding='ascii')
+    return archive,manifest
 
 
 if __name__ == '__main__':

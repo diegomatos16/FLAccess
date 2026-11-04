@@ -1,9 +1,10 @@
 """Read-only contracts against this installed executable, not simulated UI proof."""
 from pathlib import Path
+import os
 import struct
 import unittest
 
-EXE = Path(__file__).resolve().parents[2] / "FL_2026.exe"
+EXE = Path(os.environ.get("FLACCESS_TEST_EXE", str(Path(__file__).resolve().parents[2] / "FL_2026.exe")))
 
 
 @unittest.skipUnless(EXE.exists(), "local executable unavailable")
@@ -28,6 +29,57 @@ class NativeContracts(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.file.close()
+
+    def test_swf_loader_delegates_only_with_a_live_owned_child(self):
+        self.assertEqual(self.read_rva(0x27b9038+0x88,8),struct.pack('<Q',0x140e53800))
+        self.assertEqual(self.read_rva(0x27b9038+0x28,8),struct.pack('<Q',0x140e537e0))
+        for rva in (0xe53800,0xe537e0):
+            code=self.read_rva(rva,26)
+            self.assertEqual(code[:7],bytes.fromhex('488b8198000000'))
+            self.assertIn(bytes.fromhex('4883783800'),code)
+            self.assertEqual(code[-3:],bytes.fromhex('33c0c3'))
+
+    def test_save_selector_and_agreement_dialog_are_the_typed_native_windows(self):
+        for vt,name,a,b in ((0x2948538,b'SaveDataSelect@savesystem',0x14217c0,0xca1a50),
+                            (0x27bd238,b'DialogAgreement@menusystem',0xe607d0,0xe472b0)):
+            col=struct.unpack('<Q',self.read_rva(vt-8,8))[0]-0x140000000
+            td=struct.unpack('<I',self.read_rva(col+12,4))[0]
+            self.assertIn(name,self.read_rva(td+16,100))
+            self.assertEqual(self.read_rva(vt+0x18,8),struct.pack('<Q',0x140000000+a))
+            self.assertEqual(self.read_rva(vt+0x100,8),struct.pack('<Q',0x140000000+b))
+
+    def test_automatic_carousel_filter_uses_the_real_team_select_common_type(self):
+        vt=0x271c8c8
+        col=struct.unpack('<Q',self.read_rva(vt-8,8))[0]-0x140000000
+        td=struct.unpack('<I',self.read_rva(col+12,4))[0]
+        self.assertIn(b'TeamSelectCommon@',self.read_rva(td+16,100))
+        self.assertEqual(self.read_rva(vt+0x18,8),struct.pack('<Q',0x140000000+0xc93200))
+
+    def test_standings_row_renderer_indexes_the_native_team_vector(self):
+        vt=0x2684408
+        self.assertEqual(self.read_rva(vt+0x18,8),struct.pack('<Q',0x140000000+0xaed5d0))
+        self.assertEqual(self.read_rva(vt+0x130,8),struct.pack('<Q',0x140000000+0xaedf80))
+        self.assertEqual(self.read_rva(0xaedfb6,7),bytes.fromhex('488b8398000000'))
+        self.assertEqual(self.read_rva(0xaedfbd,7),bytes.fromhex('482b8390000000'))
+        self.assertEqual(self.read_rva(0xe3d1c1,6),bytes.fromhex('8b80bc000000'))
+        self.assertEqual(self.read_rva(0xe3d1a9,3),bytes.fromhex('4533c0'))
+
+    def test_current_career_date_copies_the_native_year_month_day_value(self):
+        self.assertEqual(self.read_rva(0x14b6a60,8),bytes.fromhex('488b05a9f32402c3'))
+        self.assertEqual(0x14b6a67+0x224f3a9,0x3705e10)
+        self.assertEqual(self.read_rva(0x15765ee,4),bytes.fromhex('488b5048'))
+        self.assertEqual(self.read_rva(0x15765f2,6),bytes.fromhex('8b82242a6401'))
+        self.assertEqual(self.read_rva(0x15765f8,2),bytes.fromhex('8903'))
+        self.assertEqual(self.read_rva(0x14c92cc,8),bytes.fromhex('6641890245885a02'))
+
+    def test_calendar_cursor_uses_its_typed_controller_and_visible_row_not_outer_cursor(self):
+        self.assertEqual(self.read_rva(0x268bda8+0x18,8),struct.pack('<Q',0x140000000+0xb05640))
+        self.assertEqual(self.read_rva(0xb0120c,6),bytes.fromhex('8b8bfc000000'))
+        self.assertEqual(self.read_rva(0xb01323,6),bytes.fromhex('89b3fc000000'))
+        self.assertEqual(self.read_rva(0xb01296,4),bytes.fromhex('448d460e'))
+
+    def test_record_display_state_does_not_require_input_participation(self):
+        self.assertEqual(self.read_rva(0xe4bb90,12),bytes.fromhex('0fb6410c24073c070f94c0c3'))
 
     def read_rva(self, rva, size):
         for first, length, offset in self.sections:
@@ -81,7 +133,7 @@ class NativeContracts(unittest.TestCase):
         self.assertEqual(self.read_rva(0xE3D91E, 6).hex(), '8b80bc000000')
 
     def test_country_guard_uses_the_real_native_method_slot(self):
-        source = (EXE.parent / 'FLAccess/modules/FlAccessReader/FlAccessReader.lua').read_text(encoding='utf-8')
+        source = (Path(__file__).resolve().parents[1] / 'modules/FlAccess/reader_lists.lua').read_text(encoding='utf-8')
         import re
         guard = re.search(r'menu_read\(vt\+(0x[0-9a-f]+),"u64"\)==base\+0xc97190', source)
         self.assertIsNotNone(guard)
@@ -119,9 +171,9 @@ class NativeContracts(unittest.TestCase):
         self.assertIn(bytes.fromhex('81e1ff010000'), search)  # 9-bit country ID
         # Compare maintained Lua offsets with values encoded by the native
         # consumer; a fixture repeating a wrong constant must not certify it.
-        source = (EXE.parent / 'FLAccess/modules/FlAccessReader/engine/observations.lua').read_text(encoding='utf-8')
+        source = (Path(__file__).resolve().parents[1] / 'modules/FlAccess/reader_lists.lua').read_text(encoding='utf-8')
         import re
-        body = source.split('function a11y.country_name(id)', 1)[1].split('function a11y.native_country_selection()', 1)[0]
+        body = source.split('function shared.a11y.country_name(id)', 1)[1].split('function shared.a11y.native_country_selection()', 1)[0]
         global_offset = int(re.search(r'base\+(0x[0-9a-f]+)', body)[1], 16)
         count_offset = int(re.search(r'database\+(0x[0-9a-f]+),"u32"', body)[1], 16)
         records_offset = int(re.search(r'local first=database\+(0x[0-9a-f]+)', body)[1], 16)

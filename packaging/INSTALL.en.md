@@ -1,33 +1,27 @@
-# Installation — FlAccess.zip — 0.1.9
+# FLAccess 0.2.0 — experimental installation
 
-The archive has three folders: livecpk, modules and sider. FlAccessReader handles
-menus; FlAccessGameplay handles the radar and future in-match announcements.
-Time/score announcements are not implemented by this reorganization.
+One package with native Sider components. Mandatory base reader.
+Back up sider.ini, settings, WAVs and camera profiles. Merge content and modules
+into SiderAddons. Replace only old FLAccess lua.module entries with the 31 lines
+from sider.ini.snippet in their listed order. Do not enable legacy bundles too.
+Remove only the two obsolete FLAccess cpk.root lines. Preserve other mods.
 
-1. Close the game and Sider. Back up sider.ini and sider.dll.
-2. Merge livecpk and modules into SiderAddons, preserving other mods.
-3. Copy sider/sider.dll from the archive to SiderAddons/sider.dll. It belongs in
-   that root, not a sider subfolder. This core targets the documented compatible
-   Sider 7.3.3 only; verify compatibility before installing over another version.
-4. Add sider/sider.ini.snippet entries to the existing [sider] section. Do not
-   replace the entire configuration. The two lua.module entries can be enabled
-   independently.
-5. Remove only old FLAccess.lua, FLAccess_audio.lua, FLAccess_match_registry.lua
-   and FLAccess_gameplay_live.lua entries. Never enable old and new copies together.
-6. To migrate preferences, copy modules/FLAccess.ini to
-   modules/FlAccessReader/FlAccessReader.ini before first use.
-7. Start the game through Sider normally.
+Resources: content/FlAccess/{sounds,text,cameras}. Unified settings:
+modules/FlAccess/FlAccess.ini. Preserve previous read_tooltips/use_text_assets
+and tackle_* values, custom WAVs and camera profiles instead of overwriting
+with package defaults. Developer installation:
+python tools/install_flaccess.py --sider <SiderAddons>
+It creates backups and migrates preferences/resources. Python is not needed
+to play. Close and reopen the game normally to load the update.
 
-Editable unencrypted WAVs: livecpk/FlAccessGameplay/sounds. Replace an existing
-filename and restart the game to reload it. New filenames need event wiring.
-Reader text assets: livecpk/FlAccessReader/text. Modules read their WAV/TSV assets
-directly; LiveCPK itself does not play loose WAV files.
+Preserve the installed compatible Sider core. The sider directory includes
+the same compatible DLL as 0.1.9; target is SiderAddons/sider.dll, in the root.
+Do not replace an unrelated Sider version without checking compatibility.
 
-This release was investigated for FL 2026/FL_2026.exe and compatible Sider
-7.3.3. FL 27 requires a separate compatibility check. Reader0.1.9 (base 42);
-Gameplay experimental 16. Audible ball approval predates
-this layout change; other new gameplay behavior still awaits real listening tests.
-Prism and OpenAL licenses accompany their respective modules.
-
-Back up custom WAVs/INIs before updating: the package includes defaults.
-Do not add separate module entries for internal engine/ files.
+Prism is compiled from its official repository; commit/hash in PRISM-SOURCE.json.
+DLLs and licenses included. Speech remains synchronous in Lua. Per-sound and
+announcement controls are future work. FL2026/Sider 7.3.3 investigated base;
+FL27 compatibility is experimental and partial. Release 0.2.0 uses Reader 52/
+Gameplay 19. Lists still have severe slowdown reports; other Sider module options
+are no longer read on FL27. Read the release notes/known issues before updating.
+Previous published releases remain available.

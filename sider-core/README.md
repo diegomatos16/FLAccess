@@ -1,5 +1,10 @@
 # Accessible Sider core
 
+FLAccess0.2.0 local development preserves this exact core DLL. New components
+are installed under modules/FlAccess and resources under content/FlAccess.
+Only FLAccess entries in sider.ini change. Older paths below record previous
+releases and do not instruct loading legacy bundles with0.2.0.
+
 This directory records the Sider core modification required to expose every
 module's textual overlay to the PES accessibility module.
 

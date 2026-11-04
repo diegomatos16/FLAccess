@@ -1,0 +1,9 @@
+{
+  "repository": "https://github.com/ethindp/prism",
+  "commit": "70731bcb9837c90ff84ce401f244c0c4a8c7134c",
+  "version": "0.18.3",
+  "architecture": "x64",
+  "sha256": "a41e0fdde42b0cf8916ae9e587a2f15f046e96c68421b4e99627ff284fd0add2",
+  "build": "tools/build_prism_source.cmd",
+  "source_modified": false
+}

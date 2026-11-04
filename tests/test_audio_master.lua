@@ -49,5 +49,13 @@ current.status=1;current.native_sessions=0;assert(not m.prepare_output())
 current.native_sessions=1;current.device="";assert(not m.prepare_output())
 ffi.load=real_load
 -- Missing shared core must disable gameplay before opening any backend.
-local gameplay=assert(loadfile(assert(arg[2])))();gameplay.init({flaccess_match_registry={}})
+if arg[3]=="--modular" then
+    local ctx={flaccess_match_registry={},flaccess={gameplay={stage=0}}}
+    for _,name in ipairs({"state","rules","memory","audio","match","diagnostics","render","lifecycle"}) do
+        assert(loadfile(arg[2].."/gameplay_"..name..".lua"))().install(ctx)
+    end
+    ctx.flaccess.gameplay.m.init(ctx)
+else
+    local gameplay=assert(loadfile(assert(arg[2])))();gameplay.init({flaccess_match_registry={}})
+end
 print("PASS shared Lua audio in restricted Sider globals: lazy startup, mandatory binding, readiness, mute/zero, restore, exact game endpoint, no fallback, native errors; fake ABI only")

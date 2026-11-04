@@ -46,3 +46,15 @@ reference/
 /gameplay-*.tsv
 /gameplay-*.json
 /tests/voice-evidence/
+
+# FLAccess 0.2.0 native components and local build artifacts.
+!modules/FlAccess/bin/
+!modules/FlAccess/bin/prism.dll
+!modules/FlAccess/bin/soft_oal.dll
+!modules/FlAccess/bin/flaccess_audio_master.dll
+modules/FlAccess/state/*.tsv
+.build/
+.downloads/
+.prism-latest.json
+
+.test-deps/

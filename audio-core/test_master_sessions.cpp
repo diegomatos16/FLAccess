@@ -7,6 +7,7 @@ struct FakeSession final : IAudioSessionControl2, ISimpleAudioVolume {
     std::atomic<ULONG> refs{1};
     DWORD owner;
     std::wstring id;
+    std::wstring stable_id;
     float level;
     BOOL mute=FALSE;
     AudioSessionState activity=AudioSessionStateActive;
@@ -36,7 +37,12 @@ struct FakeSession final : IAudioSessionControl2, ISimpleAudioVolume {
     HRESULT STDMETHODCALLTYPE UnregisterAudioSessionNotification(IAudioSessionEvents* e) override {
         assert(events==e);events=nullptr;e->Release();return S_OK;
     }
-    HRESULT STDMETHODCALLTYPE GetSessionIdentifier(LPWSTR* out) override {return GetSessionInstanceIdentifier(out);}
+    HRESULT STDMETHODCALLTYPE GetSessionIdentifier(LPWSTR* out) override {
+        if(stable_id.empty()) return GetSessionInstanceIdentifier(out);
+        const auto size=(stable_id.size()+1)*sizeof(wchar_t);
+        *out=static_cast<LPWSTR>(CoTaskMemAlloc(size));if(!*out) return E_OUTOFMEMORY;
+        std::memcpy(*out,stable_id.c_str(),size);return S_OK;
+    }
     HRESULT STDMETHODCALLTYPE GetSessionInstanceIdentifier(LPWSTR* out) override {
         const auto size=(id.size()+1)*sizeof(wchar_t);*out=static_cast<LPWSTR>(CoTaskMemAlloc(size));
         if(!*out) return E_OUTOFMEMORY;
@@ -81,6 +87,14 @@ int main() {
     game->activity=AudioSessionStateExpired;
     p.prune();p.publish(S_OK);assert(p.state.status==0 && p.state.native_sessions==0);
     assert(!game->events && later->events); // A surviving mod stream is not native proof.
+    ComPtr<FakeSession> replacement;
+    replacement.Attach(new FakeSession(pid,L"game-recreated",0.9f));replacement->stable_id=game->id;
+    auto* recovered=p.add(replacement.Get(),false,false);assert(recovered && recovered->native);
+    p.publish(S_OK);assert(p.state.native_sessions==1 && p.state.status==1);
+    assert(SUCCEEDED(p.apply()) && replacement->level==0.7f && !replacement->mute);
+    replacement->activity=AudioSessionStateExpired;p.prune();
+    p.publish(S_OK);assert(p.state.native_sessions==0 && p.state.status==0);
+    // Surviving effects remain insufficient to prove game-audio readiness.
     p.sessions.clear();CloseHandle(p.wake);p.wake=nullptr;
     std::cout << "PASS native session integration: initial level, callbacks, mute, zero, restore, future streams, PID isolation, pruning; fake COM only\n";
 }

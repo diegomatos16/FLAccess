@@ -1,6 +1,14 @@
 -- Contract tests: camera coordinates, native controller identity, pause/replay gates.
 ffi=require("ffi")
-local m=assert(loadfile(assert(arg[1])))()
+local m
+if arg[2]=="--modular" then
+    local ctx={sider_dir="./",flaccess={gameplay={stage=0}}}
+    for _,name in ipairs({"state","rules","memory","audio","match","diagnostics","render","lifecycle"}) do
+        local component=assert(loadfile(arg[1] .. "/gameplay_" .. name .. ".lua"))()
+        component.install(ctx)
+    end
+    m=ctx.flaccess.gameplay.m
+else m=assert(loadfile(assert(arg[1])))() end
 local checks=0
 local function same(a,b)
     for i=1,3 do assert(math.abs(a[i]-b[i])<0.00001) end

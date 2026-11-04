@@ -3,7 +3,9 @@
 local ffi=require("ffi")
 local bit=require("bit")
 local render_mode=arg[2]=="--render"
-local bundled=arg[4]=="--bundle"
+local modular=arg[4]=="--modular"
+local bundled=arg[4]=="--bundle" or modular
+local project=arg[9] or "FLAccess"
 ffi.cdef[[typedef struct {
     void* BaseAddress; void* AllocationBase; unsigned long AllocationProtect;
     unsigned short PartitionId; size_t RegionSize; unsigned long State,Protect,Type;
@@ -46,7 +48,7 @@ local second=block(0x310000,0xa4);second[0x88]=8
 for _,signature in ipairs({{0x41b68c,"\x48\x83\xc1\x04"},{0x87a47d,"\x0f\xb6\x59\x44"},{0x41b6fc,"\x48\x83\xc1\x08"},{0xa627ae,"\x0f\xbe\x80\x54\x02\x00\x00"},{0xa42570,"\x88\x91\x54\x02\x00\x00"},{0xa48a30,"\x83\xfa\x02"},{0x8c4d1e,"\xf3\x0f\x10\xb1\x1c\x06\x00\x00"},{0x923572,"\x48\x8b\x8f\xd8\x07\x00\x00"},{0xa627e8,"\x48\x8b\x41\x18\x8b\x80\x1c\x60\x02\x00"},{0x4589ec,"\x48\x83\xc1\x08"},{0x1b55f40,"\x48\x8b\x05\x81\xab\xc9\x01"},{0x91ed11,"\x48\x8d\x05\xa8\x52\xdd\x02"},{0x440669,"\x48\x8b\x05\x58\x37\x2b\x03"}}) do
     ffi.copy(block(base+signature[1],#signature[2]),signature[2],#signature[2])
 end
-local fixture_chunk=assert(loadfile("FLAccess/tests/match_registry_fixture.lua"))
+local fixture_chunk=assert(loadfile(project .. "/tests/match_registry_fixture.lua"))
 setfenv(fixture_chunk,{ffi=ffi,ipairs=ipairs})
 qword(world,0x258,base+0x25969b8);qword(world,0x270,0x320008)
 local match_info=block(0x320000,8+0x2378)
@@ -116,7 +118,7 @@ if render_mode then
 end
 ffi.load=function(name)
     if name=="kernel32" then return kernel end
-    assert(name:find("modules\\FlAccessGameplay\\bin\\",1,true),"DLL outside Gameplay bin")
+    assert(name:find(modular and "modules\\FlAccess\\bin\\" or "modules\\FlAccessGameplay\\bin\\",1,true),"DLL outside Gameplay bin")
     if name:match("flaccess_audio_master.dll$") then
         assert(bundled)
         return {FLAccessAudio_Start=function() return 1 end,FLAccessAudio_GetState=function(out)
@@ -176,7 +178,7 @@ ffi.load=function(name)
     end},{__index=function(_,key) return openal[key] end})
 end
 local logs={}
-local env={ffi=ffi,bit=bit,math=math,table=table,string=string,pairs=pairs,ipairs=ipairs,
+local env={assert=assert,ffi=ffi,bit=bit,math=math,table=table,string=string,pairs=pairs,ipairs=ipairs,
     tonumber=tonumber,tostring=tostring,error=error,type=type,
     log=function(s) logs[#logs+1]=s end,
     memory={get_process_info=function() return {base=base} end},
@@ -188,22 +190,24 @@ local env={ffi=ffi,bit=bit,math=math,table=table,string=string,pairs=pairs,ipair
                 if (missing_cues or missing_team) and path:match("teamStillWithBall%.wav$") then return nil end
                 if missing_goals and path:match("Goalkeeper%.wav$") then return nil end
                 if missing_cues and (path:match("gotBall%.wav$") or path:match("LostBall%.wav$")) then return nil end
-                assert(path:find("livecpk\\FlAccessGameplay\\sounds\\",1,true),"WAV outside LiveCPK Gameplay assets")
+                assert(path:find(modular and "content\\FlAccess\\sounds\\" or "livecpk\\FlAccessGameplay\\sounds\\",1,true),"WAV outside Gameplay assets")
                 return io.open((arg[5] or "FLAccess/livecpk/FlAccessGameplay/sounds/") .. assert(path:match("([^\\]+%.wav)$")),mode)
             end
             local camera_file=path:match("(camera_%d%d%.ini)$")
             if camera_file then
+                if modular then return io.open(project .. "/content/FlAccess/cameras/" .. camera_file,mode) end
                 local parent=assert(arg[1]:match("^(.*)[/\\][^/\\]+$"))
                 return io.open(parent .. (bundled and "/engine/cameraRadars/" or "/cameraRadars/") .. camera_file,mode)
             end
-            if path:match("FlAccessGameplay%.ini$") then return io.open(arg[8] or "FLAccess/modules/FlAccessGameplay/FlAccessGameplay.ini",mode) end
-            assert(path:find("modules\\FlAccessGameplay\\state\\",1,true),"layout outside Gameplay state")
+            if path:match("FlAccessGameplay%.ini$") or (modular and path:match("FlAccess%.ini$")) then return io.open(arg[8] or "FLAccess/modules/FlAccessGameplay/FlAccessGameplay.ini",mode) end
+            assert(path:find(modular and "modules\\FlAccess\\state\\" or "modules\\FlAccessGameplay\\state\\",1,true),"layout outside Gameplay state")
             assert(path:match("live%-layout.txt$"));return {read=function() return "validated_single_local_player=1" end,close=function() end}
         end
         return {write=function() end,close=function() end}
     end},
 }
-local chunk=assert(loadfile(assert(arg[1])));setfenv(chunk,env);local m=chunk()
+local m
+if not modular then local chunk=assert(loadfile(assert(arg[1])));setfenv(chunk,env);m=chunk() end
 local ctx={sider_dir="test\\",register=function() end,flaccess_audio={
     prepare_output=function()
         master_calls=master_calls+1
@@ -214,7 +218,18 @@ local ctx={sider_dir="test\\",register=function() end,flaccess_audio={
         assert(render_mode);loop_device=openal.alcLoopbackOpenDeviceSOFT(nil);assert(loop_device~=nil);return loop_device
     end,
 }}
-if bundled then ctx.flaccess_audio=nil
+if modular then
+    local function load_component(name,method)
+        local chunk=assert(loadfile(arg[1] .. "/" .. name .. ".lua"));setfenv(chunk,env)
+        local component=chunk();component[method or "init"](ctx)
+    end
+    load_component("core")
+    load_component("audio_policy");load_component("match_registry");load_component("camera")
+    for _,name in ipairs({"state","rules","memory","audio","match","diagnostics","render","lifecycle"}) do
+        load_component("gameplay_" .. name,"install")
+    end
+    m=ctx.flaccess.gameplay.m
+elseif bundled then ctx.flaccess_audio=nil
 else
     local registry_chunk=assert(loadfile(arg[3] or "FLAccess/modules/FlAccessGameplay/engine/registry.lua"))
     setfenv(registry_chunk,env);registry_chunk().init(ctx)
@@ -263,6 +278,16 @@ if render_mode then
     float(player,0x61c,90)
     for i=1,70 do frame() end
     assert(math.abs(ball_point[1]+initial[1])<0.0001 and math.abs(ball_point[3]+initial[3])<0.0001,"stationary body turn changed screen radar")
+    -- Confirmed FL27 Player=8 uses the body, not visual camera rotation.
+    camera_env[0x48]=8;float(player,0x61c,0);frame()
+    assert(math.abs(ball_point[1]-5)<.0001 and math.abs(ball_point[3]+3)<.0001,"Player yaw zero has wrong bearings")
+    float(player,0x61c,90);frame()
+    assert(math.abs(ball_point[1]+3)<.0001 and math.abs(ball_point[3]+5)<.0001,"Player body turn ignored")
+    qword(fixture.entries.CAMERA.data,16,0);frame()
+    assert(math.abs(ball_point[1]+3)<.0001 and math.abs(ball_point[3]+5)<.0001,"Player still depends on view matrix")
+    qword(fixture.entries.CAMERA.data,16,0x240000)
+    float(player,0x61c,0/0);frame();assert(peak<.00001,"invalid Player heading kept directional audio")
+    camera_env[0x48]=5
     float(player,0x61c,0);float(camera,0x0c,1);float(camera,0x30,-1)
     for i=1,70 do frame() end
     assert(side_rms>0.13 and side_peak<0.851,"sideline PCM compensation missing or clipped")
@@ -270,11 +295,11 @@ if render_mode then
     assert(source_looping[source_ids[8]]==0 and source_looping[source_ids[4]]==0 and source_looping[source_ids[5]]==0,"possession cues loop")
     assert(cue_count(4)==0 and cue_count(5)==0,"startup emitted a false possession event")
     local expected=missing_cues and 0 or 1
-    dword(analyze_info,8+0x2601c,2);frame();assert(ball_point[1]==0 and ball_point[2]==0 and ball_point[3]==-1,"confirmed local possession not centered")
+    dword(analyze_info,8+0x2601c,2);frame();assert(ball_point[1]==0 and ball_point[2]==0 and ball_point[3]==0,"confirmed local possession not centered")
     assert(cue_count(4)==expected and cue_count(5)==0,"gain did not emit exactly one gotBall")
     frame();assert(cue_count(4)==expected,"held possession repeated gotBall")
     qword(fixture.entries.MATCH.data,16,0);frame()
-    assert(ball_point[1]==0 and ball_point[3]==-1,"ownership still depends on MATCH")
+    assert(ball_point[1]==0 and ball_point[3]==0,"ownership still depends on MATCH")
     qword(fixture.entries.MATCH.data,16,0x320000)
     dword(analyze_info,8+0x2601c,13);frame();assert(math.abs(ball_point[1])>1,"opponent possession incorrectly centered")
     assert(cue_count(5)==expected,"loss did not emit exactly one LostBall")
@@ -295,7 +320,7 @@ if render_mode then
     openal.alGetSourcef(source_ids[1],0x100a,camera_gain);assert(camera_gain[0]==0,"unknown camera left directional ball audible")
     local camera_before_got=cue_count(4)
     qword(fixture.entries.CAMERA.data,16,0);dword(analyze_info,8+0x2601c,2);frame()
-    assert(cue_count(4)==camera_before_got+expected and ball_point[3]==-1,"missing camera suppressed GotBall or own-ball center")
+    assert(cue_count(4)==camera_before_got+expected and ball_point[3]==0,"missing camera suppressed GotBall or own-ball center")
     qword(fixture.entries.CAMERA.data,16,0x240000)
     camera_env[0x48]=6;ctx.flaccess_camera_radars.profiles[6].depth_scale="invalid"
     dword(analyze_info,8+0x2601c,13);frame()
@@ -382,6 +407,12 @@ if render_mode then
         if not missing_cues then
             assert(maximum>0.0001,"isolated possession WAV rendered silence")
             local status=ffi.new("int[1]");openal.alGetSourcei(source_ids[index],0x1010,status)
+            -- Render to completion offline; cue durations differ between
+            -- real WAV assets. This advances PCM, never sleeps in wall time.
+            for _=1,120 do
+                if status[0]==0x1014 then break end
+                frame();openal.alGetSourcei(source_ids[index],0x1010,status)
+            end
             assert(status[0]==0x1014,"possession WAV did not finish naturally")
         else assert(maximum<0.00001,"missing optional cues generated audio") end
         return maximum
@@ -463,6 +494,12 @@ if render_mode then
     float(ball,0x10,15);float(ball,0x18,8);silence_radar=false;frame()
     print(string.format("PASS experimental tackle proximity loop PCM=%.6f: repeat, direction, hysteresis, high/loose/friendly/unknown exclusion, mute/pause/reset%s",tackle_peak,missing_tackle and "; WAV absent preserves radar" or ""))
     print(string.format("PASS full radar render: real WAV/HRTF, both sidelines isolated, normalized PCM rms=%.4f peak=%.4f, native keeper identity/unknown, master mute/zero/resume; final PCM peak=%.6f; offline, no audible output",side_rms,side_peak,peak))
+    -- A stopped spatial loop must recover after valid playback resumes, but
+    -- an already playing loop and one-shot cues must not restart each frame.
+    openal.alSourceStop(source_ids[1]);local count=source_plays[source_ids[1]] or 0
+    frame();local state=ffi.new("int[1]");openal.alGetSourcei(source_ids[1],0x1010,state)
+    assert(state[0]==0x1012 and (source_plays[source_ids[1]] or 0)==count+1,"stopped radar loop did not recover")
+    frame();assert((source_plays[source_ids[1]] or 0)==count+1,"playing loop restarted every frame")
     openal.alcDestroyContext(loop_context);openal.alcCloseDevice(loop_device)
 end
 ffi.load=real_load

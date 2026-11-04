@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0 - 2026-11-04 — experimental
+
+- Compatibilidade experimental com Football Life 27; aprimoramento da navegação e exploração, alguns bugs corrigidos, mas mais pendências.
+- Leitor e gameplay unificados em 31 módulos nativos Sider, leitor base sempre ativo; recursos em content/FlAccess.
+- Listas/agrupamentos separados, um campo por passo, título do grupo no primeiro campo e atributos apenas na exploração; repetir removido.
+- Ajustes em seleção, tooltips, classificação, data ML, slots/perguntas de save, câmeras e recuperação do áudio; Prism 0.18.3 de fonte oficial.
+- Confirmados: Configurações sem sufixo hexadecimal e itens Sim/Não do diálogo. Demais relatos mantidos abertos quando não confirmados.
+- Listas ainda lentas até 51; desempenho 52 sem confirmação. Nova pendência: opções de outros módulos Sider sem leitura no FL27.
+- Notas completas em docs/RELEASE-0.2.0.pt-BR.md. Base Reader 52/Gameplay 19; testes internos não substituem validação no jogo.
+
 ## 0.1.9 - 2026-10-30
 
 - Melhorias na escalação, alvo de substituição, nomes/valores de Ajuda e repetição de jogador/situação.

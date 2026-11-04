@@ -1,45 +1,35 @@
-# Instalação — FlAccess.zip — 0.1.9
+# Instalação — FLAccess 0.2.0 — experimental
 
-O ZIP contém três pastas: `livecpk`, `modules` e `sider`.
-Há dois mods independentes: **FlAccessReader** (menus) e **FlAccessGameplay**
-(radar e informações da partida). Novas leituras de tempo/placar ainda não foram
-implementadas. Gameplay é experimental e pode ser desativado separadamente.
+Pacote único, com leitor e gameplay divididos em componentes Sider.
+Três pastas: content, modules, sider. Leitor base sempre ativo.
 
-1. Feche o jogo e o Sider. Faça backup do seu sider.ini e sider.dll.
-2. Extraia FlAccess.zip. Copie `livecpk` e `modules` para dentro do SiderAddons,
-   mesclando as pastas e preservando os demais mods.
-3. A pasta `sider` do ZIP contém o núcleo compatível. Copie `sider/sider.dll` para
-   `SiderAddons/sider.dll`. A DLL precisa ficar nessa raiz, não em SiderAddons/sider.
-   Esta DLL é para o Sider 7.3.3 compatível documentado; não instalar sobre outra
-   versão sem verificar compatibilidade.
-4. Dentro do bloco [sider] existente, acrescente as entradas de
-   `sider/sider.ini.snippet`. Não substitua o sider.ini inteiro. São duas entradas
-   lua.module: FlAccessReader.lua e FlAccessGameplay.lua. Cada uma pode ser ativada
-   ou desativada separadamente.
-5. Na migração, remova apenas as entradas antigas FLAccess.lua, FLAccess_audio.lua,
-   FLAccess_match_registry.lua e FLAccess_gameplay_live.lua. Não carregar versões
-   antigas junto das novas. Preserve os demais módulos instalados.
-6. Para manter preferências antigas, copie modules/FLAccess.ini para
-   modules/FlAccessReader/FlAccessReader.ini antes do primeiro uso.
-7. Inicie o jogo normalmente pelo Sider.
+1. Feche o jogo antes de carregar atualização. Faça backup do sider.ini,
+   INIs, WAVs e perfis de câmera personalizados.
+2. Mescle content e modules no SiderAddons, preservando demais mods.
+3. Preserve Sider 7.3.3 compatível já instalado. Pasta sider do ZIP conserva
+   a mesma DLL da 0.1.9. Em instalação sem essa base, destino da DLL é
+   SiderAddons/sider.dll, na raiz. Não trocar outra versão sem verificar.
+4. Na seção [sider], substitua somente entradas FLAccess antigas pelas 31
+   linhas lua.module do sider.ini.snippet, na ordem fornecida. Não carregar
+   também FlAccessReader/FlAccessReader.lua ou FlAccessGameplay/FlAccessGameplay.lua.
+5. Remova somente cpk.root antigos de FlAccessReader e FlAccessGameplay.
+   Recursos próprios são lidos diretamente de content/FlAccess.
+6. Preserve valores read_tooltips, use_text_assets e tackle_* anteriores em
+   modules/FlAccess/FlAccess.ini. Não sobrescreva preferências com padrões do ZIP.
+7. Copie WAVs personalizados para content/FlAccess/sounds; perfis camera_00.ini
+   até 09 para content/FlAccess/cameras. Catálogos ficam em content/FlAccess/text.
+8. Inicie pelo Sider normalmente. Painel único FLAccess; controles preservados.
 
-## Sons e assets
+No checkout: python tools/install_flaccess.py --sider <caminho-SiderAddons>.
+Script registra backup e migra configurações/recursos; Python não é necessário
+para jogar. Diretórios antigos ficam como backup, com entradas desativadas.
 
-Sons WAV abertos ficam em `livecpk/FlAccessGameplay/sounds`. Você pode trocar os
-arquivos diretamente ali; mantendo o nome, reabrir o jogo garante recarga. Um nome
-novo precisa ser ligado a um evento pelo motor. Os textos do Reader ficam em
-`livecpk/FlAccessReader/text`. DLLs/código ficam em modules; logs não são assets.
-Os módulos leem esses WAVs/TSVs diretamente: LiveCPK não toca WAVs automaticamente.
+DLLs em modules/FlAccess/bin; licenças em licenses e COPYING.OpenAL.
+Prism compilado do repositório oficial; commit/hash em PRISM-SOURCE.json.
+Comunicação de voz continua síncrona em Lua, sem novo processo ou DLL de fala.
+Controles individuais de sons e avisos são futuros; não entram nesta mudança.
 
-## Compatibilidade e estado
-
-A base foi investigada no FL 2026/FL_2026.exe com Sider 7.3.3. A estrutura pode ser
-reutilizada no futuro, mas FL 27 precisa de verificação de executável, Sider e
-assinaturas. Não instalar DLL de núcleo incompatível supondo que o nome do ZIP
-assegura suporte. Reader0.1.9 (base 42); Gameplay experimental 16. Bola aprovada
-antes da reorganização; laterais, orientação e posse ainda aguardam audição real.
-
-Prism e OpenAL acompanham suas licenças nas pastas dos respectivos módulos.
-
-Antes de atualizar, faça backup dos WAVs e INIs personalizados: o pacote traz padrões.
-Não adicione entradas separadas para arquivos internos de engine/.
+Base investigada FL2026/Sider 7.3.3; compatibilidade FL27 experimental e parcial.
+Publicação 0.2.0 baseada em Reader 52/Gameplay 19. Listas continuam com relato de
+lentidão e há opções de outros módulos Sider sem leitura no FL27. Consulte as
+notas/pendências da versão antes de atualizar. Publicações anteriores preservadas.
