@@ -28,8 +28,10 @@ function m.prepare_output()
     end
     local device=ffi.string(s.device_name)
     if device=="" then report("game audio device unavailable");return nil,"game-device-unavailable" end
-    report("app master linked; game PID=" .. tostring(tonumber(s.process_id)) .. "; device=" .. device)
-    return {device=device,volume=tonumber(s.volume),muted=s.muted~=0}
+    local volume,muted=tonumber(s.volume),s.muted~=0
+    report(string.format("app master linked; game PID=%d; device=%s; volume=%.3f; mute=%s; native=%d; linked=%d",
+        tonumber(s.process_id),device,volume,tostring(muted),tonumber(s.native_sessions),tonumber(s.linked_sessions)))
+    return {device=device,volume=volume,muted=muted}
 end
 function m.open_output(al)
     local state,why=m.prepare_output();if not state then return nil,why end

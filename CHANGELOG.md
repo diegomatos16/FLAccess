@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1 - 2026-11-06
+
+- Revisões até a 0.2.1.35, build 87.
+- Leitura do Plano de Jogo e da Classificação, anúncios de partida e opções de fala e sons.
+- Veja as [notas da versão](docs/RELEASE-0.2.1.pt-BR.md) para os detalhes e limites.
+
 ## 0.2.0 - 2026-11-04 — experimental
 
 - Compatibilidade experimental com Football Life 27; aprimoramento da navegação e exploração, alguns bugs corrigidos, mas mais pendências.

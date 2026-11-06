@@ -1,4 +1,4 @@
-# Instalação — FLAccess 0.2.0 — experimental
+# Instalação — FLAccess 0.2.1 — experimental
 
 Pacote único, com leitor e gameplay divididos em componentes Sider.
 Três pastas: content, modules, sider. Leitor base sempre ativo.
@@ -26,10 +26,4 @@ para jogar. Diretórios antigos ficam como backup, com entradas desativadas.
 
 DLLs em modules/FlAccess/bin; licenças em licenses e COPYING.OpenAL.
 Prism compilado do repositório oficial; commit/hash em PRISM-SOURCE.json.
-Comunicação de voz continua síncrona em Lua, sem novo processo ou DLL de fala.
-Controles individuais de sons e avisos são futuros; não entram nesta mudança.
-
-Base investigada FL2026/Sider 7.3.3; compatibilidade FL27 experimental e parcial.
-Publicação 0.2.0 baseada em Reader 52/Gameplay 19. Listas continuam com relato de
-lentidão e há opções de outros módulos Sider sem leitura no FL27. Consulte as
-notas/pendências da versão antes de atualizar. Publicações anteriores preservadas.
+Compatibilidade experimental com Football Life 27. Consulte as notas em RELEASE.pt-BR.md.

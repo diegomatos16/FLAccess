@@ -49,8 +49,42 @@ end
 shared.a11y.ui_strings = {
     pt = {
         title = "FLAccess %s",
-        menu_reading = "Leitura de menus: ativa",
-        speech_output = "Saída de fala: Prism; leitor de telas quando disponível; SAPI como fallback",
+        menu_category = "Fala e leitura",
+        announcement_category = "Anúncios",
+        controlled_player = "Jogador controlado, %s",
+        sounds_category = "Sons de acessibilidade",
+        diagnostics_category = "Diagnóstico",
+        sound_tackle = "Som de possibilidade de desarme",
+        tackle_volume = "Volume do som de desarme, %d por cento",
+        sound_unavailable = "Opção indisponível nesta sessão",
+        navigate_categories = "6 e 7 navegam pelas categorias",
+        enter_category = "Enter ou 0 abre a categoria",
+        back_category = "Backspace ou 5 volta às categorias.",
+        speech_output = "No modo automático, o leitor de tela tem prioridade. Os ajustes de TTS valem para a voz SAPI",
+        tts_default = "Padrão do Windows",
+        tts_voice = "Voz SAPI, %s",
+        tts_rate = "Velocidade, %d por cento",
+        tts_pitch = "Tom, %d por cento",
+        tts_volume = "Volume da voz, %d por cento",
+        tts_sample = "Esta é uma amostra da voz do FLAccess. Liverpool zero, Barcelona zero.",
+        tts_unavailable = "A amostra de voz SAPI está indisponível.",
+        tts_controls = "5 toca uma amostra. Backspace volta às categorias.",
+        sound_level = "%s, volume %d por cento",
+        sound_toggle = "%s, %s",
+        sound_on = "Ligado",
+        sound_off = "Desligado",
+        ball_speed = "Velocidade do radar da bola, %d por cento",
+        sound_controls = "5 toca uma prévia do som. Backspace volta às categorias.",
+        sound_preview_unavailable = "Prévia do som indisponível.",
+        sound_preview_muted = "Este som está silenciado.",
+        sound_ball = "Som da bola",
+        sound_sidelines = "Som de aproximação das laterais",
+        sound_endline = "Som de aproximação da linha de fundo",
+        sound_own_goal = "Som da goleira do time controlado",
+        sound_opponent_goal = "Som da goleira do time adversário",
+        sound_gotBall = "Som de jogador controlado com a bola",
+        sound_LostBall = "Som de time controlado perdeu a bola",
+        sound_teamStillWithBall = "Som de jogador do time controlado com a bola",
         tooltip_option = "Ler tooltips: %s",
         diagnostic_option = "Modo de diagnóstico: %s",
         yes = "Sim",
@@ -61,7 +95,7 @@ shared.a11y.ui_strings = {
         close_sider = "Espaço: fechar o Sider",
         next_module = "1: próximo módulo do Sider",
         previous_module = "Crase: módulo anterior do Sider",
-        opened = "Sider. FLAccess versão %s. Leitura de menus ativa. Duas opções. %s. 6 e 7 navegam; 9 e 0 alteram; 8 restaura o padrão.",
+        opened = "Sider. FLAccess versão %s. Categoria %s. 6 e 7 navegam. Enter ou 0 abre.",
         closed = "Sider fechado",
         tooltip_changed = "Ler tooltips, %s",
         diagnostic_changed = "Modo de diagnóstico, %s",
@@ -72,8 +106,42 @@ shared.a11y.ui_strings = {
     },
     en = {
         title = "FLAccess %s",
-        menu_reading = "Menu reading: enabled",
-        speech_output = "Speech output: Prism; screen reader when available; SAPI as fallback",
+        menu_category = "Speech and reading",
+        announcement_category = "Announcements",
+        controlled_player = "Controlled player, %s",
+        sounds_category = "Accessibility sounds",
+        diagnostics_category = "Diagnostics",
+        sound_tackle = "Tackle opportunity sound",
+        tackle_volume = "Tackle sound volume, %d percent",
+        sound_unavailable = "Option unavailable in this session",
+        navigate_categories = "6 and 7 browse categories",
+        enter_category = "Enter or 0 opens the category",
+        back_category = "Backspace or 5 returns to categories.",
+        speech_output = "Automatic mode prefers your screen reader. TTS settings apply to the SAPI voice",
+        tts_default = "Windows default",
+        tts_voice = "SAPI voice, %s",
+        tts_rate = "Rate, %d percent",
+        tts_pitch = "Pitch, %d percent",
+        tts_volume = "Voice volume, %d percent",
+        tts_sample = "This is a sample of the FLAccess voice. Liverpool zero, Barcelona zero.",
+        tts_unavailable = "The SAPI voice sample is unavailable.",
+        tts_controls = "5 plays a sample. Backspace returns to categories.",
+        sound_level = "%s, volume %d percent",
+        sound_toggle = "%s, %s",
+        sound_on = "On",
+        sound_off = "Off",
+        ball_speed = "Ball radar speed, %d percent",
+        sound_controls = "5 previews the sound. Backspace returns to categories.",
+        sound_preview_unavailable = "Sound preview unavailable.",
+        sound_preview_muted = "This sound is muted.",
+        sound_ball = "Ball radar",
+        sound_sidelines = "Sidelines",
+        sound_endline = "End line proximity sound",
+        sound_own_goal = "Own goal",
+        sound_opponent_goal = "Opponent goal",
+        sound_gotBall = "Received the ball",
+        sound_LostBall = "Team lost the ball",
+        sound_teamStillWithBall = "Teammate has the ball",
         tooltip_option = "Read tooltips: %s",
         diagnostic_option = "Diagnostic mode: %s",
         yes = "Yes",
@@ -84,7 +152,7 @@ shared.a11y.ui_strings = {
         close_sider = "Space: close Sider",
         next_module = "1: next Sider module",
         previous_module = "Grave accent: previous Sider module",
-        opened = "Sider. FLAccess version %s. Menu reading enabled. Two options. %s. 6 and 7 navigate; 9 and 0 change; 8 restores the default.",
+        opened = "Sider. FLAccess version %s. Category %s. 6 and 7 navigate. Enter or 0 opens.",
         closed = "Sider closed",
         tooltip_changed = "Read tooltips, %s",
         diagnostic_changed = "Diagnostic mode, %s",
@@ -216,12 +284,25 @@ function shared.a11y.load_config()
     end
     for line in file:lines() do
         local name, value = line:match("^%s*([%w_]+)%s*=%s*([%w_%-]+)")
-        if name == "read_tooltips" then
+        local voice=line:match("^%s*tts_voice%s*=%s*(.-)%s*$")
+        if voice then
+            shared.a11y.tts_voice=voice
+        elseif name=="tts_rate" or name=="tts_pitch" or name=="tts_volume" then
+            local number=tonumber(value)
+            if number and number>=0 and number<=100 then shared.a11y[name]=number end
+        elseif name == "read_tooltips" then
             value = value:lower()
             shared.a11y.read_tooltips = value ~= "false" and value ~= "no" and value ~= "0"
         elseif name == "use_text_assets" then
             value = value:lower()
             shared.a11y.use_text_assets = value ~= "false" and value ~= "no" and value ~= "0"
+        elseif name == "possession_interval" then
+            local seconds=tonumber(value)
+            if seconds and seconds>=-1 and seconds<=10 and seconds%1==0 then shared.a11y.possession_interval=seconds end
+        elseif name == "possession_number" then
+            shared.a11y.possession_number=value:lower()=="true"
+        elseif name=="controlled_player" then
+            shared.a11y.controlled_player=value:lower()=="true"
         end
     end
     file:close()
@@ -792,6 +873,10 @@ shared.speak = function(text, interrupt, modal, identity, origin_widget)
     if not text or text == "" or text == "No String" or text == "/" or shared.a11y.unresolved_format(text) then
         return
     end
+    if origin_widget and (text=="OK" or text=="OK, item selecionado" or text=="OK, botão selecionado"
+            or text=="OK, item selected" or text=="OK, button selected")
+            and not (identity and identity:sub(1,7)=="review:")
+            and shared.a11y.exhibition_carousel_ok(origin_widget) then return end
     local source_node=origin_widget and shared.a11y.ui_model and shared.a11y.ui_model.nodes[memory.hex(origin_widget)]
     if source_node and (shared.a11y.is_media_caption(source_node) or (shared.a11y.is_menu_description(source_node)
             and not (identity and identity:sub(1,8)=="tooltip:"))) then return end

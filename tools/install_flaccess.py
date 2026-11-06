@@ -94,7 +94,7 @@ def install(root, sider):
         source=root/'modules'/entry;destination=sider/'modules'/entry
         assert source.read_bytes()==destination.read_bytes()
         installed[entry]=hashlib.sha256(destination.read_bytes()).hexdigest()
-    report={'version':'0.2.0','sider':str(sider),'backup':str(backup),'modules':installed,
+    report={'version':components['version'],'sider':str(sider),'backup':str(backup),'modules':installed,
             'sider_dll_unchanged':core_hash,'resources_migrated':migrated,
             'prism':json.loads((target/'PRISM-SOURCE.json').read_text())}
     (backup/'INSTALL.json').write_text(json.dumps(report,indent=2)+'\n')

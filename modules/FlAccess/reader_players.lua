@@ -4,6 +4,40 @@ function component.install(ctx)
     assert(ctx.flaccess, "FLAccess core must load first")
     local shared = ctx.flaccess.reader
     assert(shared.stage == 9, "FLAccess reader: missing or reordered component players")
+function shared.a11y.player_search_context()
+    return (shared.a11y.menu_flow_name or ""):match("/MLNegoSearchResultMemberList%.json$")~=nil
+end
+function shared.a11y.player_search_ready()
+    if shared.a11y.search_results_ready then return true end
+    local context=shared.a11y.read_context_state()
+    if context.kind=="dialog" and (context.structural_question or context.structural_event) then return true end
+    local snapshot=shared.a11y.native_windows
+    local base=tonumber(shared.process_base_u64)
+    if not snapshot or not base then return false end
+    for address in pairs(snapshot.selected_members or {}) do
+        if shared.a11y.widget_internal_name(address)=="playerName"
+                and shared.a11y.menu_node_active(address,base)==true
+                and shared.a11y.native_presentation_ready(address)
+                and not shared.a11y.empty_selection_caption(shared.a11y.read_native_rendered_text(address)) then
+            shared.a11y.search_results_ready=true;return true
+        end
+    end
+    return false
+end
+
+function shared.a11y.poll_player_search_loading()
+    if not shared.a11y.player_search_context() then shared.a11y.search_loading_notice=nil;return false end
+    if shared.a11y.player_search_ready() then shared.a11y.search_loading_notice=nil;return false end
+    if not shared.a11y.search_loading_notice then
+        shared.a11y.clear_speech_queue()
+        shared.a11y.search_loading_notice={}
+        local before=shared.a11y.native_speech_last
+        shared.speak(shared.a11y.ui_language=="pt" and "Carregando tela" or "Loading screen",true,true,"search-loading:" .. shared.frame)
+        for i=before+1,shared.a11y.native_speech_last do shared.a11y.native_speech_queue[i].search_loading=shared.a11y.search_loading_notice end
+    end
+    return true
+end
+
 function shared.a11y.player_row_details(node,explicit)
     local result={}
     if not node or node.name~="playerName" or shared.a11y.empty_selection_caption(node.text) then return result end
@@ -14,7 +48,8 @@ function shared.a11y.player_row_details(node,explicit)
                 and shared.a11y.native_presentation_ready(other.address) and not shared.a11y.empty_selection_caption(other.text) then unique=unique+1 end
     end
     if unique~=1 then return result end
-    for _,name in ipairs((explicit or shared.a11y.detail_reads_allowed) and {"allOver","noSetting"} or {"noSetting"}) do
+    local search=shared.a11y.player_search_context()
+    for _,name in ipairs((explicit or shared.a11y.detail_reads_allowed or search) and {"allOver","noSetting"} or {"noSetting"}) do
         local found
         for _,other in pairs(names[name] or {}) do
             if other.name==name and shared.a11y.component_peers(node.address,other.address)
@@ -24,7 +59,8 @@ function shared.a11y.player_row_details(node,explicit)
                 found=other
             end
         end
-        if found and found.text~=node.text then result[#result+1]=found end
+        local placeholder=search and name=="noSetting" and (found and (found.text=="Desativar" or found.text=="Disable" or found.text=="Disabled" or found.text=="Desativado"))
+        if found and not placeholder and found.text~=node.text then result[#result+1]=found end
     end
     return result
 end
@@ -569,13 +605,16 @@ function shared.m.on_roster_rule_boundary(ctx,event_id,registers)
 end
 
 function shared.a11y.prune_roster_limits(snapshot)
-    local registered={}
-    for _,window in ipairs(snapshot.windows or {}) do registered[window.address]=window end
+    local registered
     for address,bound in pairs(shared.a11y.roster_limits or {}) do
-        local window=registered[address]
         -- Construction can record the rule just before manager registration.
         -- Keep that short handoff, not a cache belonging to a closed component.
         if shared.frame-(bound.frame or -10000)>2 then
+            if not registered then
+                registered={}
+                for _,window in ipairs(snapshot.windows or {}) do registered[window.address]=window end
+            end
+            local window=registered[address]
             local flags=shared.a11y.menu_read(bound.root+0xc,"u32")
             local root,impl=shared.a11y.roster_presentation_root(address)
             if not window or window.impl~=bound.impl or impl~=bound.impl or root~=bound.root
@@ -810,12 +849,19 @@ function shared.a11y.process_game_plan_selected_heading(modal_focus_blocked)
     if not text or text == shared.a11y.game_plan_last_announced_heading then
         return false
     end
+    local widget = shared.a11y.game_plan_selected_heading_widget
+    local node = shared.a11y.ui_model and shared.a11y.ui_model.nodes[widget]
+    -- A native pitch selection already publishes this heading and tracks
+    -- transitions between starters and substitutes.
+    if node and shared.a11y.native_caption_selection_identity(node.address) then
+        return false
+    end
     shared.a11y.game_plan_last_announced_heading = text
     local announcement = shared.a11y.game_plan_focus_speech(
-        text, shared.a11y.game_plan_selected_heading_widget)
+        text, widget)
     if announcement then
         shared.a11y.commit_read_selection(announcement,
-            shared.a11y.game_plan_selected_heading_widget or text, "adapter-focus")
+            widget or text, "adapter-focus")
         shared.speak(announcement)
         return true
     end
@@ -908,12 +954,16 @@ function shared.a11y.poll_attribute_input(now_ms)
     -- later visual debounce even though the game had already moved.
     shared.a11y.xinput_next_poll_ms = now_ms + 16
     if shared.a11y.xinput.XInputGetState(0, shared.a11y.xinput_state) ~= 0 then
+        shared.a11y.scoreboard_select_down=nil
         shared.a11y.attribute_right_stick_y = 0
         shared.a11y.lineup_right_stick_x = 0
         return
     end
     local raw = tonumber(shared.a11y.xinput_state[0].Gamepad.sThumbRY)
     local buttons = tonumber(shared.a11y.xinput_state[0].Gamepad.wButtons)
+    local select_down=math.floor(buttons/0x0020)%2==1
+    local select_pressed=select_down and shared.a11y.scoreboard_select_down==false
+    shared.a11y.scoreboard_select_down=select_down
     local y_down = math.floor(buttons / 0x8000) % 2 == 1
     local b_down = math.floor(buttons / 0x2000) % 2 == 1
     local gamepad_buttons = {
@@ -957,6 +1007,7 @@ function shared.a11y.poll_attribute_input(now_ms)
     shared.a11y.attribute_right_stick_y = vertical
     shared.a11y.attribute_y_down = y_down
     shared.a11y.attribute_b_down = b_down
+    return select_pressed
 end
 
 function shared.is_focused(text_id)

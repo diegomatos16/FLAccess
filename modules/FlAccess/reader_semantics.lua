@@ -336,7 +336,7 @@ function shared.a11y.capture_focus_trace(stage)
     for position, node in ipairs(nodes) do
         if position > 80 then break end
         if shared.readable(node.address, 0x180) then
-            local bytes = memory.read(node.address, 0x180)
+            local bytes = shared.a11y.safe_memory_read(node.address, 0x180)
             if bytes and #bytes == 0x180 then
                 local previous = trace.samples[node.identity]
                 local fields = {}
@@ -365,7 +365,7 @@ function shared.a11y.capture_focus_trace(stage)
         if owner and not owners[owner] and owner_count < 16 then
             owners[owner], owner_count = true, owner_count + 1
             if shared.readable(owner, 0x100) then
-                local bytes = memory.read(owner, 0x100)
+                local bytes = shared.a11y.safe_memory_read(owner, 0x100)
                 if bytes and #bytes == 0x100 then
                     local previous, fields = trace.owner_samples[owner], {}
                     for offset = 0, 0xfc, 4 do
@@ -982,6 +982,10 @@ function shared.a11y.selection_result(request)
     if request.text and not request.row then row=nil end
     local label=request.text or (row and row.label) or (node and node.text)
     if not label or shared.a11y.empty_selection_caption(label) or shared.a11y.unresolved_format(label) then return nil end
+    -- A confirmed carousel caption owns selection; its incidental OK node
+    -- must not interrupt the current league/club. Dialog answers are separate.
+    if label=="OK" and request.source~="dialog-answer" and shared.a11y.native_list_has_focus()
+            and shared.a11y.native_list_selection.text~="OK" then return nil end
     local value=row and row.value
     local music=shared.a11y.native_music_packet(node)
     local text=music and music.text or (row and shared.control_speech(row) or shared.a11y.engine_focus_speech(label,node))

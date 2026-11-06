@@ -396,7 +396,7 @@ class NativeContracts(unittest.TestCase):
         self.assertEqual(self.read_rva(0x14C0D50,5).hex(),'0fb64133c3')
 
     def test_window_task_layout_is_identified_by_two_lifecycle_methods(self):
-        for table in (0x2673558,0x2715608,0x261F788,0x27D65C8):
+        for table in (0x2673558,0x2715608,0x261F788,0x27D65C8,0x2675FD0,0x27C0B30):
             self.assertEqual(struct.unpack('<Q',self.read_rva(table+0x50,8))[0],0x140E43510)
             self.assertEqual(struct.unpack('<Q',self.read_rva(table+0x58,8))[0],0x140E43450)
         data=self.read_rva(0x149FC70,0x70)

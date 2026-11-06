@@ -36,6 +36,14 @@ function shared.diagnostics(now,state)
         shared.report(string.format("keeper-source=ANALYZE/INFO data=%s %s",tostring(raw),state.ownership))
     end
     if shared.sources then
+        if shared.audio_connection then
+            shared.al.alcGetIntegerv(shared.device,0x313,1,shared.audio_connection) -- ALC_CONNECTED
+            local connected=shared.audio_connection[0]~=0
+            if connected~=shared.last_audio_connected then
+                shared.report("audio output connected=" .. tostring(connected))
+                shared.last_audio_connected=connected
+            end
+        end
         local gain,playing,offset=ffi.new("float[1]"),ffi.new("int[1]"),ffi.new("float[1]")
         shared.al.alcMakeContextCurrent(shared.context)
         shared.al.alGetSourcef(shared.sources[0],0x100a,gain);shared.al.alGetSourcei(shared.sources[0],0x1010,playing);shared.al.alGetSourcef(shared.sources[0],0x1024,offset)

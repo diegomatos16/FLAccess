@@ -1,4 +1,4 @@
-# FLAccess 0.2.0 — experimental installation
+# FLAccess 0.2.1 — experimental installation
 
 One package with native Sider components. Mandatory base reader.
 Back up sider.ini, settings, WAVs and camera profiles. Merge content and modules
@@ -19,9 +19,4 @@ the same compatible DLL as 0.1.9; target is SiderAddons/sider.dll, in the root.
 Do not replace an unrelated Sider version without checking compatibility.
 
 Prism is compiled from its official repository; commit/hash in PRISM-SOURCE.json.
-DLLs and licenses included. Speech remains synchronous in Lua. Per-sound and
-announcement controls are future work. FL2026/Sider 7.3.3 investigated base;
-FL27 compatibility is experimental and partial. Release 0.2.0 uses Reader 52/
-Gameplay 19. Lists still have severe slowdown reports; other Sider module options
-are no longer read on FL27. Read the release notes/known issues before updating.
-Previous published releases remain available.
+DLLs and licenses included. Football Life 27 support remains experimental. See RELEASE.en.md for current features and known issues.

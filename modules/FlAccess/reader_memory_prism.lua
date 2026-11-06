@@ -25,6 +25,18 @@ function shared.a11y.safe_memory_read(address,size)
 end
 shared.a11y.production_memory_read=shared.a11y.safe_memory_read
 
+-- One synchronous native-read transaction. Values never outlive this call;
+-- nested readers share its scalar/page cache. Sider does not expose pcall.
+function shared.a11y.native_read_phase(fn,...)
+    local previous=shared.a11y.render_read_work
+    if not previous then shared.a11y.render_read_work={} end
+    local function finish(...)
+        if not previous then shared.a11y.render_read_work=nil end
+        return ...
+    end
+    return finish(fn(...))
+end
+
 function shared.a11y.prism_proc(name, ctype)
     local address = ffi.C.GetProcAddress(
         shared.a11y.prism_library, shared.a11y.to_c_string(name))
@@ -54,10 +66,62 @@ function shared.a11y.replace_prism_backend(backend)
     shared.a11y.prism_backend = backend
     local name = prism.backend_name(backend)
     shared.a11y.prism_backend_name = name ~= nil and ffi.string(name) or "unknown"
+    if shared.a11y.prism_backend_name=="SAPI" then shared.a11y.apply_tts(backend) end
     log(string.format(
         "[FLAccess] native-prism-backend=%q",
         shared.a11y.prism_backend_name))
     return true
+end
+
+function shared.a11y.tts_voices()
+    local a11y=shared.a11y
+    if a11y.tts_preview_backend then return a11y.tts_voice_list end
+    if not a11y.initialize_native_prism() then return {} end
+    local prism=a11y.prism_functions
+    if not prism.count_voices or not prism.get_voice_name or not prism.set_voice then return {} end
+    local backend=a11y.create_prism_backend(a11y.prism_sapi_id)
+    if not backend then return {} end
+    a11y.tts_preview_backend=backend
+    local voices,count={},ffi.new("size_t[1]")
+    if prism.count_voices(backend,count)==0 then
+        local name=ffi.new("const char *[1]")
+        for id=0,tonumber(count[0])-1 do
+            if prism.get_voice_name(backend,id,name)==0 and name[0]~=nil then
+                voices[#voices+1]={id=id,name=ffi.string(name[0])}
+            end
+        end
+    end
+    a11y.tts_voice_list=voices
+    if prism.get_voice and prism.get_voice(backend,count)==0 then a11y.tts_default_voice=tonumber(count[0]) end
+    return voices
+end
+
+function shared.a11y.apply_tts(backend)
+    local a11y=shared.a11y
+    local prism=a11y.prism_functions
+    -- During startup the first SAPI backend is selected before preview enumeration.
+    if a11y.tts_voice~="" and not a11y.tts_voice_list then a11y.tts_voices() end
+    if prism.set_voice then
+        local voice_id=a11y.tts_default_voice
+        for _,voice in ipairs(a11y.tts_voice_list or {}) do
+            if voice.name==a11y.tts_voice then voice_id=voice.id;break end
+        end
+        if voice_id then prism.set_voice(backend,voice_id) end
+    end
+    for _,key in ipairs({"rate","pitch","volume"}) do
+        if prism["set_" .. key] then prism["set_" .. key](backend,a11y["tts_" .. key]/100) end
+    end
+end
+
+function shared.a11y.speak_tts_preview(text)
+    local a11y=shared.a11y
+    a11y.tts_voices()
+    local backend=a11y.tts_preview_backend
+    if not backend then return false end
+    a11y.apply_tts(backend)
+    local prism=a11y.prism_functions
+    if prism.backend_stop and a11y.prism_backend then prism.backend_stop(a11y.prism_backend) end
+    return prism.backend_speak(backend,a11y.to_c_string(text),true)==0
 end
 
 function shared.a11y.select_prism_backend(excluded_name)
@@ -118,6 +182,15 @@ function shared.a11y.initialize_native_prism()
     -- interrupting speak when they are unavailable.
     shared.a11y.prism_functions.backend_stop = shared.a11y.prism_proc(
         "prism_backend_stop", "FLACCESS_PRISM_BACKEND_STOP")
+    for _,key in ipairs({"rate","pitch","volume","voice","count_voices","get_voice_name","get_voice"}) do
+        local suffix=key
+        local signature="int (__cdecl *)(void *, float)"
+        if key=="voice" then signature="int (__cdecl *)(void *, size_t)"
+        elseif key=="count_voices" or key=="get_voice" then signature="int (__cdecl *)(void *, size_t *)"
+        elseif key=="get_voice_name" then signature="int (__cdecl *)(void *, size_t, const char **)" end
+        if key=="rate" or key=="pitch" or key=="volume" or key=="voice" then suffix="set_" .. key end
+        shared.a11y.prism_functions[suffix]=shared.a11y.prism_proc("prism_backend_" .. suffix,signature)
+    end
     local version_string = shared.a11y.prism_proc("prism_version_string", "FLACCESS_PRISM_VERSION_STRING")
     if version_string then
         log("[FLAccess] native-prism-version=" .. ffi.string(version_string()))

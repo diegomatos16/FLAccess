@@ -401,7 +401,42 @@ end
 function shared.m.on_ui_text_set(ctx, event_id, registers)
     local widget=tonumber(shared.read_u64(registers.rcx))
     local raw=shared.a11y.read_msvc_string(shared.read_u64(registers.rdx),true)
-    if raw~=nil then shared.a11y.on_observed_ui_text(widget,shared.clean_text(raw),raw,registers) end
+    if raw~=nil then
+        local text=shared.clean_text(raw)
+        local known=shared.a11y.ui_model and shared.a11y.ui_model.nodes[memory.hex(widget)]
+        local list_field=known and (known.name=="playerName" or known.name=="teamName"
+            or known.name=="leagueName" or known.name=="allOver" or known.name=="noSetting")
+        if list_field and not shared.a11y.diagnostic_mode and known.text==text and known.raw_text==raw
+                and shared.a11y.native_windows and shared.a11y.ui_node_matches_live(known)
+                and shared.a11y.native_widget_allowed(widget) then
+            -- Native cursor polling owns selection changes. Re-rendering an
+            -- unchanged list cell does not require rebinding its controls.
+            known.last_seen=shared.frame
+            return
+        end
+        shared.a11y.on_observed_ui_text(widget,text,raw,registers)
+    end
+end
+
+-- Text setters run outside display_frame too. Give each synchronous callback
+-- its own scalar cache; never retain register pointers or memory across calls.
+local observe_text_set=shared.m.on_ui_text_set
+function shared.m.on_ui_text_set(ctx,event_id,registers)
+    local previous_work=shared.a11y.render_read_work
+    local previous_metric=shared.a11y.render_metric
+    local started=tonumber(ffi.C.GetTickCount64())
+    if not previous_work then shared.a11y.render_read_work={} end
+    if not previous_metric then shared.a11y.render_metric={reads=0} end
+    observe_text_set(ctx,event_id,registers)
+    local metric=shared.a11y.render_metric
+    local stats=shared.a11y.text_hook_stats or {calls=0,ms=0,reads=0,max_ms=0}
+    local elapsed=tonumber(ffi.C.GetTickCount64())-started
+    stats.calls,stats.ms=stats.calls+1,stats.ms+elapsed
+    stats.max_ms=math.max(stats.max_ms,elapsed)
+    if not previous_metric then stats.reads=stats.reads+(metric and metric.reads or 0) end
+    shared.a11y.text_hook_stats=stats
+    if not previous_work then shared.a11y.render_read_work=nil end
+    if not previous_metric then shared.a11y.render_metric=nil end
 end
 
 -- Existing caption-based adapters remain isolated from native component

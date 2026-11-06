@@ -106,6 +106,7 @@ def build_modular(root, output=None):
                  'modules/FlAccess/licenses/LICENSE', 'modules/FlAccess/licenses/NOTICE'):
         if not (root / name).is_file(): raise ValueError('Missing required runtime: ' + name)
     components = json.loads((root / 'modules/FlAccess/components.json').read_text(encoding='utf-8'))
+    public_version = '.'.join(components['version'].split('.')[:3])
     entries = components['modules']
     if len(entries) != len(set(entries)) or entries[0] != 'FlAccess/core.lua':
         raise ValueError('Invalid component order or duplicate module')
@@ -122,8 +123,8 @@ def build_modular(root, output=None):
                   'sider/sider.ini.snippet': root / 'packaging/sider.ini.snippet',
                   'sider/INSTALL.pt-BR.md': root / 'packaging/INSTALL.pt-BR.md',
                   'sider/INSTALL.en.md': root / 'packaging/INSTALL.en.md',
-                  'sider/RELEASE.pt-BR.md': root / 'docs/RELEASE-0.2.0.pt-BR.md',
-                  'sider/RELEASE.en.md': root / 'docs/RELEASE-0.2.0.en.md',
+                  'sider/RELEASE.pt-BR.md': root / f'docs/RELEASE-{public_version}.pt-BR.md',
+                  'sider/RELEASE.en.md': root / f'docs/RELEASE-{public_version}.en.md',
                   'sider/ARCHITECTURE.pt-BR.md': root / 'docs/ARQUITETURA-0.2.0.pt-BR.md',
                   'sider/README.md': root / 'sider-core/README.md'})
     for path in (root / 'sider-core/licenses').rglob('*'):
@@ -144,7 +145,7 @@ def build_modular(root, output=None):
                 'components': components, 'prism': json.loads((root/'modules/FlAccess/PRISM-SOURCE.json').read_text()),
                 'sha256': {n:hashlib.sha256(d).hexdigest() for n,d in payload.items()}}
     payload['sider/BUILD.json'] = (json.dumps(manifest,indent=2)+'\n').encode('utf-8')
-    output = Path(output) if output else root/'release/0.2.0-local'
+    output = Path(output) if output else root / 'release' / components['version']
     output.mkdir(parents=True,exist_ok=True)
     archive = output/'FlAccess.zip'
     with zipfile.ZipFile(archive,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:

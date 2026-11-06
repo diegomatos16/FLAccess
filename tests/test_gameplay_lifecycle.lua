@@ -130,9 +130,15 @@ ffi.load=function(name)
         end}
     end
     assert(render_mode and name:match("soft_oal.dll$"))
-    return setmetatable({alcCreateContext=function(device)
-        -- Test-only loopback format. Production device/attributes are untouched.
-        loop_context=openal.alcCreateContext(device,ffi.new("int[9]",{0x1992,1,0x1007,48000,0x1990,0x1501,0x1991,0x1406,0}))
+    return setmetatable({alcCreateContext=function(device,attributes)
+        -- Add the test-only loopback format to the production attributes.
+        local loop_attributes=ffi.new("int[?]",13,{0x1990,0x1501,0x1991,0x1406})
+        local index=0
+        while attributes[index]~=0 do
+            loop_attributes[4+index],loop_attributes[5+index]=attributes[index],attributes[index+1]
+            index=index+2
+        end
+        loop_context=openal.alcCreateContext(device,loop_attributes)
         return loop_context
     end,
     alcGetString=function(device,key)
@@ -272,6 +278,21 @@ dword(cursor,4+0x20,2);qword(world,0x180,0x210000)
 m.context_reset(ctx);frame();frame();assert(master_calls==8)
 if render_mode then
     assert(peak>0.00001)
+    if modular then
+        local gameplay=ctx.flaccess.gameplay
+        silence_radar,silence_goals=true,true
+        float(player,0x624,51)
+        local endline_peak=0
+        for _=1,20 do frame();endline_peak=math.max(endline_peak,peak) end
+        assert(endline_peak>0.001 and source_plays[source_ids[11]]==1,"end line alert must play near the end line")
+        gameplay.sound_enabled.endline=false
+        for _=1,75 do frame() end
+        assert(peak<0.00001,"end line toggle must silence the sound")
+        print(string.format("PASS end line proximity PCM %.4f and independent toggle",endline_peak))
+        float(player,0x624,10)
+        silence_radar,silence_goals=false,false
+        frame()
+    end
     local initial=ball_point
     float(camera,0x0c,-1);float(camera,0x30,1);frame()
     assert(math.abs(ball_point[1]+initial[1])<0.0001 and math.abs(ball_point[3]+initial[3])<0.0001,"screen camera turn did not project radar")
@@ -474,6 +495,18 @@ if render_mode then
         assert(tackle_start>0 and cue_count(9)==tackle_start and tackle_peak>0.0001 and playing[0]==0x1012,"tackle WAV did not loop continuously")
         local target=source_points[source_ids[9]];assert(target[1]>0.9,"tackle loop does not follow ball direction")
     else assert(tackle_peak<0.00001 and tackle_start==0,"missing tackle WAV generated audio") end
+    if modular and not missing_tackle then
+        local settings=ctx.flaccess.gameplay.tackle_settings
+        local previous=settings.volume
+        settings.volume=m.tackle_settings("tackle_volume=3").volume
+        assert(settings.volume==3,"maximum tackle gain was not accepted")
+        local boosted=0
+        for _=1,12 do frame();boosted=math.max(boosted,peak) end
+        assert(boosted>tackle_peak*2 and boosted<=1.001,"maximum gain must get louder and stay within the output limit")
+        settings.volume=previous
+        for _=1,12 do frame() end
+        print(string.format("PASS 300%% tackle PCM peak %.4f, normal %.4f",boosted,tackle_peak))
+    end
     float(ball,0x10,12.2);frame()
     openal.alGetSourcei(source_ids[9],0x1010,playing)
     if not missing_tackle then assert(playing[0]==0x1012,"tackle hysteresis failed") end
@@ -500,6 +533,137 @@ if render_mode then
     frame();local state=ffi.new("int[1]");openal.alGetSourcei(source_ids[1],0x1010,state)
     assert(state[0]==0x1012 and (source_plays[source_ids[1]] or 0)==count+1,"stopped radar loop did not recover")
     frame();assert((source_plays[source_ids[1]] or 0)==count+1,"playing loop restarted every frame")
+end
+if modular then
+    local gameplay=ctx.flaccess.gameplay
+    local reader=ctx.flaccess.reader
+    local tone=ffi.new("int16_t[4800]")
+    for i=0,4799 do tone[i]=math.floor(12000*math.sin(2*math.pi*200*i/48000)) end
+    for _,speed in ipairs({25,50,200}) do
+        local stretched,frames=m.stretch_ball(tone,4800,48000,speed)
+        assert(frames==4800*100/speed)
+        local cycles=0
+        for i=1,frames-1 do
+            if stretched[i]>0 and stretched[i-1]<=0 then cycles=cycles+1 end
+        end
+        assert(math.abs(cycles/(frames/48000)-200)<15,"tempo shifted tone frequency")
+    end
+    if render_mode then
+        reader.overlay_visible=true
+        gameplay.ball_speed=25
+        gameplay.sound_preview_request="ball"
+        gameplay.process_sound_preview(ctx)
+        assert(gameplay.loaded_ball_speed==25 and source_plays[source_ids[10]]==1)
+        reader.overlay_visible=false
+        gameplay.process_sound_preview(ctx)
+        assert(not gameplay.preview_active)
+        gameplay.ball_speed=100
+    end
+    local roster_home,roster_away=block(0x7a0000,0x30),block(0x7b0000,0x30)
+    qword(block(0x201978,0x30),0,0x7a0000)
+    qword(regions[#regions].data,0x28,0x7b0000)
+    dword(roster_home,4+2*4,12)
+    dword(roster_away,0,1)
+    dword(roster_away,4+2*4,23)
+    qword(block(base+0x3705e10,8),0,0x7c0000)
+    qword(block(0x7c0050,8),0,0x800000)
+    local function player_record(side,slot,id,name)
+        local record=block(0x800000+0x35960+0x1308+(side*40+slot)*0x188,0x148)
+        dword(record,0x30,id)
+        ffi.copy(record+0x38,name,#name)
+    end
+    player_record(0,12,1212,"Mohamed Salah")
+    player_record(1,23,2323,"Pedri")
+    for side,name in ipairs({"Liverpool","Barcelona"}) do
+        local team=block(0x800000+0x35960+0x138+(side-1)*0x690,0x428)
+        dword(team,0,(side+100)*0x4000)
+        ffi.copy(team+4,name,#name)
+        team[0x426]=40
+        team[0x29a+23*2]=8
+    end
+    gameplay.match_names_supported=true
+    gameplay.shirt_number_supported=true
+    reader.a11y={possession_interval=5,ui_language="pt",native_speech_last=0,native_speech_queue={}}
+    reader.speak=function(text,interrupt)
+        local queue=reader.a11y
+        queue.native_speech_last=queue.native_speech_last+1
+        queue.native_speech_queue[queue.native_speech_last]={text=text,interrupt=interrupt}
+    end
+    m.context_reset(ctx)
+    dword(analyze_info,8+0x2601c,2)
+    have_stats=true;score[0x20]=0;score[0x22]=1
+    frame()
+    local queue=reader.a11y.native_speech_queue
+    assert(queue[1] and queue[1].text=="Mohamed Salah")
+    dword(analyze_info,8+0x2601c,13)
+    frame();assert(#queue==1)
+    reader.a11y.possession_number=true
+    tick=tick+5000;frame();assert(queue[2].text=="Pedri, camisa 8")
+    tick=tick+5000;frame();assert(#queue==2)
+    dword(analyze_info,8+0x2601c,255)
+    tick=tick+5000;frame();assert(#queue==2)
+    dword(analyze_info,8+0x2601c,2)
+    tick=tick+100;frame();assert(#queue==3 and queue[3].text:find("Mohamed Salah",1,true))
+    reader.a11y.possession_interval=1
+    dword(analyze_info,8+0x2601c,13)
+    tick=tick+900;frame();assert(#queue==3)
+    tick=tick+100;frame();assert(#queue==4 and queue[4].text:find("Pedri",1,true))
+    reader.a11y.possession_interval=0
+    dword(analyze_info,8+0x2601c,2)
+    tick=tick+5000;frame();assert(#queue==4)
+    env.match.stats=function()return {ptr=ffi.cast("void*",0x300000),clock_minutes=42,home_score=0,away_score=1} end
+    ctx.home_team,ctx.away_team=101,102
+    assert(m.announce_scoreboard(ctx) and queue[5].text=="42 minutos. Liverpool 0, Barcelona 1.")
+    ctx.away_team=103
+    assert(not m.announce_scoreboard(ctx) and #queue==5)
+    reader.a11y.possession_interval=-1
+    reader.a11y.possession_number=false
+    frame();assert(queue[6].text=="Mohamed Salah" and queue[6].interrupt)
+    dword(analyze_info,8+0x2601c,13)
+    frame();assert(queue[7].text=="Pedri" and queue[7].interrupt)
+    frame();assert(#queue==7)
+    reader.a11y.controlled_player=true
+    local simultaneous={actor=2,keeper=2,possession_known=true}
+    assert(gameplay.poll_controlled_player(ctx,tick,true,simultaneous))
+    gameplay.poll_ball_holder(ctx,tick,true,simultaneous,true)
+    assert(#queue==8 and queue[8].text=="Mohamed Salah" and queue[8].controlled_actor==2)
+    assert(not gameplay.poll_controlled_player(ctx,tick,true,simultaneous))
+    if render_mode then
+        assert(gameplay.control_earcon_pending(queue[8],tick),"control cue did not start before speech")
+        local pcm=ffi.new("float[8192]")
+        for _=1,4 do openal.alcRenderSamplesSOFT(loop_device,pcm,4096) end
+        assert(not gameplay.control_earcon_pending(queue[8],tick+100),"cue must release the announcement after playback")
+        assert(source_plays[source_ids[12]]==1,"control cue must play once")
+    end
+    ctx.away_team=102
+    score[0x20]=1
+    assert(not m.announce_scoreboard(ctx))
+    assert(m.announce_scoreboard(ctx,"pause-test") and queue[9].pause_header=="pause-test")
+    score[0x20]=0
+    for position=0,10 do
+        dword(roster_home,4+position*4,position)
+        dword(roster_away,4+position*4,position)
+    end
+    player_record(0,1,1011,"Alexander-Arnold")
+    player_record(1,1,2011,"Gavi")
+    local function sample_substitutions(playing)
+        tick=tick+125;gameplay.poll_substitutions(ctx,tick,playing)
+    end
+    sample_substitutions(true);sample_substitutions(true)
+    assert(#queue==9,"initial lineup is not a substitution")
+    dword(roster_home,4,2);dword(roster_home,12,0)
+    sample_substitutions(true);sample_substitutions(true)
+    assert(#queue==9,"changing formation is not a substitution")
+    dword(roster_home,8,12);dword(roster_away,8,23)
+    sample_substitutions(false);assert(#queue==9)
+    sample_substitutions(true);sample_substitutions(true)
+    assert(queue[10].text=="Liverpool. Sai Alexander-Arnold. Entra Mohamed Salah.")
+    assert(queue[11].text=="Barcelona. Sai Gavi. Entra Pedri.")
+    sample_substitutions(true);assert(#queue==11,"unchanged lineup must not repeat")
+    print("PASS match announcements: live lineup, interval, unchanged/loose ball, off, home-first scoreboard and team identity")
+end
+if loop_device then
+    openal.alcMakeContextCurrent(nil)
     openal.alcDestroyContext(loop_context);openal.alcCloseDevice(loop_device)
 end
 ffi.load=real_load

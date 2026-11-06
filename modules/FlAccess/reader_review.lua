@@ -117,7 +117,9 @@ end
 
 function shared.a11y.content_review_allowed(origin)
     local node=shared.a11y.ui_model and shared.a11y.ui_model.nodes[origin.key]
-    return node and node.identity==origin.identity and node.text==origin.text
+    local primary=shared.a11y.current_review_window()
+    return node and (not primary or #shared.a11y.review_nodes_in_window({node},primary)>0)
+        and node.identity==origin.identity and node.text==origin.text
         and origin.owner==shared.a11y.native_owner_token() and shared.a11y.native_presentation_ready(node.address)
         and shared.a11y.ui_node_matches_live(node) and shared.a11y.read_native_rendered_text(node.address)==origin.text
 end
@@ -213,11 +215,59 @@ function shared.a11y.buffer_entries()
     return entries,review
 end
 
+function shared.a11y.competition_fixture()
+    local snapshot=shared.a11y.native_windows
+    local base=tonumber(shared.process_base_u64)
+    local primary=shared.a11y.primary_input_window()
+    if not snapshot or not base or not primary or shared.a11y.keyboard_window
+            or shared.a11y.read_context_state().kind=="dialog"
+            or shared.a11y.menu_read(primary.address,"u64")~=base+0x271b738
+            or shared.a11y.menu_read(base+0x271b738+0x18,"u64")~=base+0xc8ffb0 then return end
+
+    local panel
+    for _,window in ipairs(snapshot.windows) do
+        if window.slot==primary.slot and window.enabled and window.vtable==base+0x267cc48
+                and shared.a11y.menu_read(window.address,"u64")==window.vtable
+                and shared.a11y.menu_read(window.vtable+0x18,"u64")==base+0xadcb10
+                and shared.a11y.group_window_live(window) then
+            if panel then return end
+            panel=window
+        end
+    end
+    if not panel then return end
+
+    -- The native panel writes identical copies for different layouts.
+    local roles={teamName="teams",teamName_copy_0="teams",teamName_copy_1="teams",
+        compeSchedule="round",compeSchedule_copy_0="round",compeSchedule_copy_1="round"}
+    local values={}
+    for _,root in ipairs(panel.owned_roots or {}) do
+        local scope={address=panel.address,root=root,enabled=true}
+        local fields=shared.a11y.collect_record_nodes(scope,root,function(name) return roles[name]~=nil end)
+        for name,items in pairs(fields) do
+            local role=roles[name]
+            for _,item in ipairs(items) do
+                if not shared.a11y.empty_selection_caption(item.text)
+                        and shared.a11y.group_member_live(item.address,panel,root) then
+                    if values[role] and values[role]~=item.text then return end
+                    values[role]=item.text
+                end
+            end
+        end
+    end
+    if not values.teams then return end
+    local text=values.round and (values.round .. ". " .. values.teams) or values.teams
+    return {text=text,signature=primary.address .. ":" .. panel.address .. ":" .. text}
+end
+
 function shared.a11y.collect_buffer_entries()
     -- A review request reads the current rendered panel, including companion
     -- lists, rather than the previous entity's cached captions.
     shared.a11y.poll_native_texts(true)
-    local nodes=shared.a11y.presented_nodes()
+    local primary,ambiguous=shared.a11y.current_review_window()
+    if ambiguous and shared.a11y.player_search_context() and shared.a11y.read_context_state().kind~="dialog" then
+        return {},{identity="ambiguous-player-panel",nodes={},content=true}
+    end
+    local nodes=shared.a11y.review_nodes_in_window(shared.a11y.presented_nodes(),primary)
     local context = shared.a11y.read_context_state()
     local message=shared.a11y.selected_message_packet()
     if message then return message.entries,{identity=message.identity,content=true,nodes={},message=message.signature} end
@@ -238,8 +288,10 @@ function shared.a11y.collect_buffer_entries()
         return bodies,{identity="body:" .. tostring(shared.a11y.native_owner_token()) .. ":" .. context.generation,content=true,nodes=body_nodes}
     end
     if context.kind~="dialog" then
-        local entity,entity_review=shared.a11y.entity_review_entries(nodes)
-        if entity then return entity,entity_review end
+        if not primary or shared.a11y.native_list_in_window(primary) then
+            local entity,entity_review=shared.a11y.entity_review_entries(nodes)
+            if entity then return entity,entity_review end
+        end
         local record=shared.a11y.structured_record_packet()
         if record then return record.entries,{identity=record.identity,nodes={},groups=record.groups,record=record.signature,content=true} end
         local players,review=shared.a11y.player_list_review_entries(nodes)
@@ -248,7 +300,8 @@ function shared.a11y.collect_buffer_entries()
     local result, seen = {}, {}
     local review={content=true,identity="content:" .. tostring(shared.a11y.native_owner_token()) .. ":" .. context.generation,nodes={}}
     local function add(text,node,force)
-        if text and text ~= "" and not seen[text] and (force or not shared.a11y.review_chrome(text,node)) then
+        local scoped=not primary or not node or #shared.a11y.review_nodes_in_window({node},primary)>0
+        if scoped and text and text ~= "" and not seen[text] and (force or not shared.a11y.review_chrome(text,node)) then
             result[#result + 1], seen[text] = text, true
             review.nodes[#result]=node
         end
@@ -259,7 +312,15 @@ function shared.a11y.collect_buffer_entries()
         add(context.question,nil,true)
         return result,review
     end
-    add(context.title)
+    local fixture=shared.a11y.competition_fixture()
+    if fixture then
+        add(fixture.text,nil,true)
+        review.competition_fixture=fixture.signature
+        review.identity=review.identity .. ":fixture=" .. fixture.signature
+    end
+    local title_node
+    if primary then for _,node in ipairs(nodes)do if node.text==context.title then title_node=node;break end end end
+    if not primary or title_node then add(context.title,title_node) end
     add(context.question,nil,true)
     local selection=context.selection
     if selection and (not selection.origin or shared.a11y.speech_origin_allowed(selection.origin)) then
@@ -271,7 +332,8 @@ function shared.a11y.collect_buffer_entries()
     end
     for _, item in ipairs(shared.a11y.dashboard_texts or {}) do
         local node=shared.a11y.ui_model and shared.a11y.ui_model.nodes[memory.hex(item.address)]
-        if #result < 80 and shared.a11y.native_widget_allowed(item.address)
+        local scoped=not primary or #shared.a11y.review_nodes_in_window({node or {address=item.address}},primary)>0
+        if scoped and #result < 80 and shared.a11y.native_widget_allowed(item.address)
                 and (not item.owner or item.owner==shared.a11y.native_owner_token())
                 and (not item.identity or (node and node.identity==item.identity and node.text==item.text)) then add(item.text,node) end
     end
@@ -315,7 +377,7 @@ function shared.a11y.native_window_selected_index(window,base)
             -- e3d1a9 passes index0 to e4d1c0. Additional kind-16 nodes do
             -- not make the game's ordered first selector ambiguous.
             if not selectors or #selectors==0 then return nil end
-            return shared.a11y.menu_read(selectors[1]+0xbc,"u32")
+            return shared.a11y.menu_read(selectors[1]+0xbc,"u32"),selectors[1]
         end
     end
     return shared.a11y.menu_read(impl+0xd8,"u32")
@@ -522,28 +584,126 @@ function shared.a11y.visualization_player_record()
     return {object=object,player_id=id,name=target.name or name}
 end
 
-function shared.a11y.visualization_packet()
+-- Multiple owned roots can expose the same physical fields. Merge those
+-- references once; distinct competing values remain unresolved.
+function shared.a11y.merge_visualization_fields(packet,rows,root)
+    packet.roots=packet.roots or {}
+    packet.roots[root]=true
+    local pairs_seen,labels={},{}
+    for _,field in ipairs(packet.fields) do
+        local pair=tostring(field.label.address) .. ":" .. tostring(field.value.address)
+        pairs_seen[pair]=true
+        labels[tostring(field.group_title or "") .. ":" .. field.label.text]=pair
+    end
+    for _,field in ipairs(rows) do
+        local pair=tostring(field.label.address) .. ":" .. tostring(field.value.address)
+        local label=tostring(field.group_title or "") .. ":" .. field.label.text
+        if not pairs_seen[pair] then
+            if labels[label] and labels[label]~=pair then return false end
+            packet.fields[#packet.fields+1]=field;pairs_seen[pair]=true;labels[label]=pair
+        end
+    end
+    return true
+end
+
+-- Inspect only already captured ownership and names. No new native reads,
+-- no player text dumps. Bounded, change-only, requested by exploration.
+function shared.a11y.trace_exploration_scope(snapshot,primary,ambiguous,information)
+    local parts={"primary=" .. tostring(primary and primary.address),
+        "ambiguous=" .. tostring(ambiguous),"information=" .. tostring(information and information.window)}
+    for index,window in ipairs(snapshot.windows or {}) do
+        if index>12 then break end
+        local d=window.cursor_detail or {}
+        local names,fields,players={},0,0
+        for address,member in pairs(snapshot.members or {}) do
+            local belongs=false
+            for _,owner in ipairs(member.owners or {}) do if owner.address==window.address then belongs=true;break end end
+            if belongs then
+                local node=shared.a11y.ui_model and shared.a11y.ui_model.nodes[memory.hex(address)]
+                local name=node and node.name
+                if name then
+                    names[name]=(names[name] or 0)+1
+                    if name=="playerName" then players=players+1 end
+                    if name:find("height",1,true) or name:find("weight",1,true)
+                            or name=="abilityNumber" or name=="setName" then fields=fields+1 end
+                end
+            end
+        end
+        local ordered={};for name,count in pairs(names) do ordered[#ordered+1]=name .. "=" .. count end
+        table.sort(ordered)
+        while #ordered>32 do table.remove(ordered) end
+        parts[#parts+1]=string.format("window=%s root=%s enabled=%s cursor=%s selected=%s players=%d attribute-nodes=%d names=%s",
+            tostring(window.address),tostring(window.root),tostring(window.enabled),tostring(d.status),
+            tostring(d.selected),players,fields,table.concat(ordered,","))
+    end
+    local signature=table.concat(parts," | ")
+    if signature~=shared.a11y.exploration_trace_last and (shared.a11y.exploration_trace_count or 0)<48 then
+        shared.a11y.exploration_trace_last=signature
+        shared.a11y.exploration_trace_count=(shared.a11y.exploration_trace_count or 0)+1
+        log("[FLAccess] exploration-scope " .. signature)
+    end
+end
+
+function shared.a11y.visualization_packet(explicit)
+    local tracing=shared.a11y.exploration_trace_requested
+    shared.a11y.exploration_trace_requested=false
     local snapshot=shared.a11y.native_windows
     if not snapshot or shared.a11y.keyboard_window or shared.a11y.read_context_state().kind=="dialog" then return nil end
     local information=shared.a11y.native_information_context()
+    local primary,ambiguous=shared.a11y.primary_input_window()
+    if tracing then shared.a11y.trace_exploration_scope(snapshot,primary,ambiguous,information) end
+    if ambiguous and not information and shared.a11y.player_search_context() then return nil end
     local found
-    for _,window in ipairs(snapshot.windows or {}) do
+    for _,captured_window in ipairs(snapshot.windows or {}) do
+        local window=captured_window
+        local associated=explicit and not window.enabled and shared.a11y.associated_group_window(window,primary)
+        if associated then
+            window={};for key,value in pairs(captured_window) do window[key]=value end
+            window.review_input,window.native_root=primary,captured_window.root
+        end
         local detail=window.cursor_detail
-        if window.enabled and (not information or information.window==window.address)
-                and (information or not detail or detail.status=="no-cursor" or detail.status=="unknown-delegate") then
+        local player_row=false
+        if explicit and detail and detail.selected then
+            for _,node in pairs(shared.a11y.ui_model and shared.a11y.ui_model.names.playerName or {}) do
+                if shared.a11y.record_contains(node,window,detail.selected) then player_row=true;break end
+            end
+        end
+        if (window.enabled or associated) and (associated or not primary or primary.address==window.address or information and information.window==window.address)
+                and (not information or information.window==window.address)
+                and (associated or information or not detail or detail.status=="no-cursor" or detail.status=="unknown-delegate"
+                    or (shared.a11y.player_search_context() and shared.a11y.search_results_ready
+                        and not shared.a11y.native_list_in_window(window))
+                    or (explicit and primary and primary.address==window.address and not player_row
+                        and not shared.a11y.native_list_in_window(window))) then
             for _,root in ipairs(information and {window.root} or window.owned_roots or {window.root}) do
-                local rows=shared.a11y.read_group_fields(window,root)
-                if #rows>0 then
-                    if found and (found.window~=window.address or found.root~=root) then return nil end
-                    found={window=window.address,root=root,fields=rows,
-                        identity=(shared.a11y.native_owner_token() or "") .. ":fields:" .. window.address .. ":" .. root,
+                local rows,status=shared.a11y.read_group_fields(window,root)
+                if tracing then
+                    local reason=window.address .. ":" .. root .. ":" .. #rows .. ":" .. tostring(status and status.recognized)
+                        .. ":" .. tostring(status and status.ambiguous) .. ":player-row=" .. tostring(player_row)
+                    if reason~=shared.a11y.exploration_result_last and (shared.a11y.exploration_result_count or 0)<48 then
+                        shared.a11y.exploration_result_last=reason
+                        shared.a11y.exploration_result_count=(shared.a11y.exploration_result_count or 0)+1
+                        log("[FLAccess] exploration-result window:root:fields:recognized:ambiguous=" .. reason)
+                    end
+                end
+                if #rows>0 or (explicit and status and status.recognized and not player_row) then
+                    if found and found.window~=window.address then return nil end
+                    found=found or {window=window.address,root=root,fields={},kind=information and "player" or "fields",
+                        identity=(shared.a11y.native_owner_token() or "") .. ":fields:" .. window.address
+                            .. (associated and ":input=" .. primary.address or ""),
                         generation=shared.a11y.read_context_state().generation}
+                    if status and status.entity then
+                        if found.entity and found.entity~=status.entity then return nil end
+                        found.entity=status.entity
+                    end
+                    if not shared.a11y.merge_visualization_fields(found,rows,root) then return nil end
                 end
             end
         end
     end
+    if found and found.entity then found.identity=found.identity .. ":entity=" .. found.entity end
     if not found and information then
-        found={window=information.window,root=information.root,fields={},identity="information:" .. information.identity,
+        found={window=information.window,root=information.root,fields={},kind="player",identity="information:" .. information.identity,
             generation=shared.a11y.read_context_state().generation}
     end
     if found and (information or (found.fields[1] and found.fields[1].key=="height_item"
@@ -563,7 +723,7 @@ function shared.a11y.append_visualization_attributes(packet)
     if style then packet.fields[#packet.fields+1]={key="style",
         text=(shared.a11y.ui_language=="pt" and "Estilo de jogo: " or "Playing style: ") .. style} end
     if not shared.readable(record.object,0x30) then return end
-    local bytes=memory.read(record.object,0x30)
+    local bytes=shared.a11y.safe_memory_read(record.object,0x30)
     if not bytes or #bytes~=0x30 then return end
     local attributes,plausible={},0
     for index,spec in ipairs(shared.a11y.player_attribute_specs) do
@@ -576,7 +736,7 @@ function shared.a11y.append_visualization_attributes(packet)
 end
 
 function shared.a11y.visualization_allowed(origin)
-    local packet=shared.a11y.visualization_packet()
+    local packet=shared.a11y.visualization_packet(true)
     if not packet or packet.identity~=origin.identity or packet.generation~=origin.generation then return false end
     for _,field in ipairs(packet.fields) do
         if field.key==origin.key then return field.text==origin.text
@@ -587,7 +747,8 @@ end
 
 function shared.a11y.read_visualization(action)
     shared.a11y.poll_native_texts(true)
-    local packet=shared.a11y.visualization_packet()
+    shared.a11y.exploration_trace_requested=true
+    local packet=shared.a11y.visualization_packet(true)
     if not packet then shared.a11y.visualization_review=nil;return false end
     local state=shared.a11y.visualization_review
     if not state or state.identity~=packet.identity or state.generation~=packet.generation then
@@ -595,7 +756,10 @@ function shared.a11y.read_visualization(action)
     end
     local count=#packet.fields
     if count==0 then
-        shared.speak(shared.a11y.ui_language=="pt" and "Atributos ainda indisponíveis." or "Attributes unavailable.",true,true,
+        local unavailable=packet.kind=="fields"
+            and (shared.a11y.ui_language=="pt" and "Campos ainda não associados." or "Fields not associated yet.")
+            or (shared.a11y.ui_language=="pt" and "Atributos ainda indisponíveis." or "Attributes unavailable.")
+        shared.speak(unavailable,true,true,
             "visualization:" .. packet.identity .. ":unavailable")
         return true
     end
@@ -607,12 +771,12 @@ function shared.a11y.read_visualization(action)
     local field=packet.fields[state.index]
     local before=shared.a11y.native_speech_last
     shared.modal_focus_hold_until_ms=0;shared.a11y.title_pending_first_item=nil;shared.a11y.deferred_modal_announcement=nil
-    local spoken=shared.a11y.group_field_speech(state,field.text,{key=field.group_key,title=field.group_title},action=="first")
+    local spoken=shared.a11y.group_field_speech({review_group=state.review_group},field.text,{key=field.group_key,title=field.group_title},action=="first")
     -- Read-only fields need no input focus. The packet validator rechecks the
     -- shown values, native owner and graph before delivery.
     shared.speak(spoken,true,true,"visualization:" .. packet.identity .. ":" .. state.sequence)
     local origin={identity=packet.identity,generation=packet.generation,key=field.key,text=field.text,
-        group_title=field.group_title,group_key=field.group_key}
+        group_title=field.group_title,group_key=field.group_key,state=state}
     for index=before+1,shared.a11y.native_speech_last do shared.a11y.native_speech_queue[index].visualization=origin end
     return true
 end
@@ -648,6 +812,11 @@ function shared.a11y.read_buffer(action,quiet_empty)
     if review and review.ml_date and context.cursor==1 then
         for index=before+1,shared.a11y.native_speech_last do
             shared.a11y.native_speech_queue[index].ml_date={signature=review.ml_date.signature}
+        end
+    end
+    if review and review.competition_fixture and context.cursor==(review.ml_date and 2 or 1) then
+        for index=before+1,shared.a11y.native_speech_last do
+            shared.a11y.native_speech_queue[index].competition_fixture=review.competition_fixture
         end
     end
     if review and review.message then
@@ -702,6 +871,11 @@ function shared.a11y.capture_pending_modal_button(key, entry, offset, edge)
         and (not previous or previous.text ~= entry.text or fresh)
     shared.a11y.pending_modal_button_text = eligible and entry.text or nil
     return eligible and true or false
+end
+
+local read_buffer_unbatched=shared.a11y.read_buffer
+function shared.a11y.read_buffer(...)
+    return shared.a11y.native_read_phase(read_buffer_unbatched,...)
 end
 
 function shared.a11y.buffer_key(vkey)

@@ -70,7 +70,7 @@ function shared.m.tackle_settings(text)
     end
     local enabled=value("tackle_enabled")
     if enabled==0 then settings.enabled=false end
-    for _,rule in ipairs({{"distance",0.5,5},{"exit_distance",0.5,6},{"max_ball_height",0.1,1},{"volume",0,1}}) do
+    for _,rule in ipairs({{"distance",0.5,5},{"exit_distance",0.5,6},{"max_ball_height",0.1,1},{"volume",0,shared.sound_level_max/100}}) do
         local v=value("tackle_" .. rule[1])
         if v and shared.finite(v) and v>=rule[2] and v<=rule[3] then settings[rule[1]]=v end
     end

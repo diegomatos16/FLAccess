@@ -13,6 +13,11 @@ function shared.a11y.tooltip_selection_stamp()
         end
     end
     if #parts==0 then return nil end
+    local result=shared.a11y.read_context_state().selection_result
+    if result and result.widget then
+        parts[#parts+1]="focus:" .. tostring(result.widget) .. ":" .. tostring(result.label or "")
+    end
+    if #parts==0 then return nil end
     table.sort(parts);return table.concat(parts,"|")
 end
 
@@ -33,6 +38,7 @@ function shared.a11y.poll_common_tooltip()
     shared.a11y.tooltip_dirty=false;shared.a11y.tooltip_last_selection=selection
     local snapshot=shared.a11y.native_windows
     local candidates,rank={},-1
+    local nearest
     local input_owners={}
     local result=context.selection_result
     local member=result and snapshot.members and snapshot.members[tonumber(result.widget)]
@@ -52,14 +58,47 @@ function shared.a11y.poll_common_tooltip()
             local structural=name:find("tooltip",1,true) or name:find("description",1,true) or name:find("explanation",1,true)
             local native_help=shared.a11y.native_control_help(node.text,node)
             local current_rank=native_help and 2 or structural and 1 or shared.a11y.text_asset_role(node.text)=="tooltip-or-description" and 0 or -1
-            if current_rank>=0 and current_rank>=rank and shared.a11y.native_presentation_ready(node.address)
-                    and shared.a11y.ui_node_matches_live(node) and shared.a11y.read_native_rendered_text(node.address)==node.text then
-                if current_rank>rank then candidates={};rank=current_rank end
-                candidates[#candidates+1]=node
+            if current_rank>=0 and shared.a11y.native_presentation_ready(node.address)
+                    and shared.a11y.ui_node_matches_live(node) then
+                local current=shared.a11y.read_native_rendered_text(node.address)
+                if current and current~="" then
+                    if current~=node.text then node=shared.a11y.observe_ui_widget(node.address,current) end
+                    local distance=1000
+                    for _,window in ipairs(snapshot.windows or {}) do
+                        local selected=result and tonumber(result.widget) or window.cursor_detail and window.cursor_detail.selected
+                        if window.enabled and selected and input_owners[window.address] then
+                            for _,owner in ipairs(member.owners or {}) do
+                                if owner.enabled and owner.address==window.address then
+                                    local ancestors,at,seen={},tonumber(selected),{}
+                                    for depth=0,32 do
+                                        if not at or seen[at] then break end
+                                        seen[at]=true;ancestors[at]=depth;at=owner.parents and owner.parents[at]
+                                    end
+                                    at=tonumber(node.address);seen={}
+                                    for depth=0,32 do
+                                        if not at or seen[at] then break end
+                                        seen[at]=true
+                                        if ancestors[at] then distance=math.min(distance,ancestors[at]+depth);break end
+                                        at=owner.parents and owner.parents[at]
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    if not nearest or distance<nearest or (distance==nearest and current_rank>rank) then
+                        candidates={};rank=current_rank;nearest=distance
+                    end
+                    if distance==nearest and current_rank==rank then candidates[#candidates+1]=node end
+                end
             end
         end
     end
     if #candidates==0 then return end
+    -- Equal unrelated descriptions are ambiguous, never a combined tooltip.
+    local unique={}
+    for _,node in ipairs(candidates) do unique[node.text]=true end
+    local count=0;for _ in pairs(unique) do count=count+1 end
+    if count>1 then return end
     table.sort(candidates,function(a,b) return a.sequence<b.sequence end)
     local parts,texts,seen={}, {}, {}
     local owner=shared.a11y.native_owner_token()
@@ -94,25 +133,88 @@ function shared.a11y.finish_render_work()
     local stats=shared.a11y.render_stats or {frames=0,ms=0,max_ms=0,reads=0,speech_ms=0,speech_calls=0,focus_ms=0}
     stats.frames,stats.ms,stats.reads=stats.frames+1,stats.ms+elapsed,stats.reads+metric.reads
     stats.max_ms=math.max(stats.max_ms,elapsed)
+    stats.queue_replaced=(stats.queue_replaced or 0)+(metric.queue_replaced or 0)
+    stats.aux_skipped=(stats.aux_skipped or 0)+(metric.aux_skipped or 0)
     stats.focus_ms=stats.focus_ms+(metric.focus_ms or 0)
     stats.speech_ms=stats.speech_ms+(metric.speech_ms or 0)
     stats.speech_calls=stats.speech_calls+(metric.speech_calls or 0)
     stats.window_refresh=stats.window_refresh or {}
     local refresh=metric.window_refresh or "none"
     stats.window_refresh[refresh]=(stats.window_refresh[refresh] or 0)+1
+    stats.window_costs=stats.window_costs or {}
+    local cost=stats.window_costs[refresh] or {count=0,ms=0,max=0}
+    local windows_ms=metric.windows_ms or 0
+    cost.count,cost.ms,cost.max=cost.count+1,cost.ms+windows_ms,math.max(cost.max,windows_ms)
+    stats.window_costs[refresh]=cost
     for _,name in ipairs({"windows_ms","texts_ms","presentation_ms","capture_ms"}) do
         stats[name]=(stats[name] or 0)+(metric[name] or 0)
     end
     shared.a11y.render_stats=stats
     if stats.frames>=600 then
+        shared.a11y.flush_targeted_profile()
         log(string.format("[FLAccess] reader-work frames=%d mean-ms=%.3f max-ms=%d memory-copies-per-frame=%.1f speech-ms=%.3f speech-calls=%d focus-ms=%.3f windows-ms=%.3f texts-ms=%.3f presentation-ms=%.3f capture-ms=%.3f",
             stats.frames,stats.ms/stats.frames,stats.max_ms,stats.reads/stats.frames,stats.speech_ms/stats.frames,stats.speech_calls,stats.focus_ms/stats.frames,
             stats.windows_ms/stats.frames,stats.texts_ms/stats.frames,stats.presentation_ms/stats.frames,stats.capture_ms/stats.frames))
+        local hooks=shared.a11y.text_hook_stats
+        if hooks then
+            log(string.format("[FLAccess] text-hook calls=%d total-ms=%d max-ms=%d memory-copies=%d",hooks.calls,hooks.ms,hooks.max_ms,hooks.reads))
+            shared.a11y.text_hook_stats=nil
+        end
+        local focus_hooks=shared.a11y.focus_hook_stats
+        if focus_hooks then
+            log(string.format("[FLAccess] focus-hook calls=%d total-ms=%d max-ms=%d memory-copies=%d",focus_hooks.calls,focus_hooks.ms,focus_hooks.max_ms,focus_hooks.reads))
+            shared.a11y.focus_hook_stats=nil
+        end
+        log("[FLAccess] speech-queue superseded-navigation=" .. tostring(stats.queue_replaced))
+        log("[FLAccess] text-observations passive=" .. tostring(shared.a11y.passive_text_observations or 0)
+            .. " active=" .. tostring(shared.a11y.active_text_observations or 0))
+        shared.a11y.passive_text_observations,shared.a11y.active_text_observations=0,0
+        if shared.a11y.selection_diagnostic then
+            log("[FLAccess] reader-diagnostic selection-only=true auxiliaries-skipped=" .. stats.aux_skipped)
+        end
         shared.a11y.render_stats=nil
         local refreshes={}
         for reason,count in pairs(stats.window_refresh) do refreshes[#refreshes+1]=reason .. "=" .. count end
         table.sort(refreshes)
         log("[FLAccess] window-refresh " .. table.concat(refreshes," "))
+        local costs={}
+        for reason,cost in pairs(stats.window_costs) do
+            costs[#costs+1]=string.format("%s:mean=%.3fms,max=%dms,n=%d",reason,cost.ms/cost.count,cost.max,cost.count)
+        end
+        table.sort(costs)
+        log("[FLAccess] window-cost " .. table.concat(costs," "))
+    end
+end
+
+-- Diagnostic only: aggregate inclusive cost, never log once per native node.
+function shared.a11y.flush_targeted_profile()
+    local stats=shared.a11y.targeted_profile or {}
+    local names={};for name in pairs(stats) do names[#names+1]=name end
+    table.sort(names)
+    for _,name in ipairs(names) do
+        local item=stats[name]
+        log(string.format("[FLAccess] targeted-cost phase=%s calls=%d total-ms=%d max-ms=%d worst-frame=%s memory-copies=%d inclusive=true",
+            name,item.calls,item.ms,item.max,tostring(item.worst_frame),item.reads))
+    end
+    shared.a11y.targeted_profile={}
+end
+
+function shared.a11y.profile_targeted(name,fn)
+    return function(...)
+        local started=tonumber(ffi.C.GetTickCount64())
+        local metric=shared.a11y.render_metric
+        local reads=metric and metric.reads or 0
+        local function finish(...)
+            local elapsed=tonumber(ffi.C.GetTickCount64())-started
+            local stats=shared.a11y.targeted_profile or {}
+            local item=stats[name] or {calls=0,ms=0,max=0,reads=0}
+            if elapsed>item.max then item.worst_frame=shared.frame end
+            item.calls,item.ms,item.max=item.calls+1,item.ms+elapsed,math.max(item.max,elapsed)
+            if metric then item.reads=item.reads+math.max(0,(metric.reads or 0)-reads) end
+            stats[name]=item;shared.a11y.targeted_profile=stats
+            return ...
+        end
+        return finish(fn(...))
     end
 end
 
@@ -123,6 +225,9 @@ function shared.a11y.profile_reader_phase(name,fn)
 end
 
 function shared.m.display_frame(ctx)
+    local scoreboard_down=shared.user32.GetAsyncKeyState(0x50)<0 -- P
+    local scoreboard_pressed=scoreboard_down and shared.scoreboard_down==false
+    shared.scoreboard_down=scoreboard_down
     shared.a11y.render_read_work={}
     shared.a11y.render_speech_allowed=false
     shared.a11y.render_metric={started=tonumber(ffi.C.GetTickCount64()),reads=0}
@@ -134,6 +239,7 @@ function shared.m.display_frame(ctx)
         shared.start_native_prism(ctx)
     end
     if not shared.game_is_foreground() then
+        shared.a11y.scoreboard_select_down=nil
         shared.game_was_foreground = false
         shared.a11y.nvda_stop_requested = false
         shared.a11y.clear_speech_queue()
@@ -141,9 +247,24 @@ function shared.m.display_frame(ctx)
         return
     end
     shared.a11y.render_speech_allowed=true
+    -- The loading object can survive into an interactive menu. Its presence
+    -- announces a transition but does not prove that input is blocked.
+    local before_loading=shared.a11y.native_speech_last
+    shared.a11y.poll_loading(tonumber(ffi.C.GetTickCount64()))
+    if shared.a11y.native_speech_last>before_loading then
+        shared.a11y.flush_native_speech(tonumber(ffi.C.GetTickCount64()))
+    end
     shared.a11y.profile_reader_phase("windows_ms",shared.a11y.poll_native_windows)
+    local snapshot=shared.a11y.native_windows
+    if snapshot and snapshot.match_menu_building then
+        -- This particular native window is registered before its controls.
+        -- Keep validating the headers; a root change forces full discovery.
+        shared.a11y.finish_render_work()
+        return
+    end
     shared.a11y.poll_native_confirmation()
     shared.a11y.profile_reader_phase("texts_ms",shared.a11y.poll_native_texts)
+    if shared.a11y.poll_player_search_loading() then shared.a11y.finish_render_work();return end
     shared.a11y.poll_native_country_selection()
     shared.a11y.poll_keyboard_input()
     shared.a11y.poll_information_context()
@@ -153,7 +274,6 @@ function shared.m.display_frame(ctx)
     shared.a11y.poll_notice_actions()
     shared.a11y.poll_surface_texts()
     shared.a11y.poll_main_menu_choice()
-    shared.a11y.poll_loading(tonumber(ffi.C.GetTickCount64()))
     shared.a11y.poll_skip_hint()
     shared.a11y.profile_reader_phase("capture_ms",shared.a11y.poll_component_capture)
     if not shared.game_was_foreground then
@@ -169,11 +289,19 @@ function shared.m.display_frame(ctx)
         return
     end
     if shared.overlay_visible or shared.sider_overlay_visible then
+        shared.a11y.scoreboard_select_down=nil
         shared.a11y.finish_render_work()
         return
     end
     local now_ms = tonumber(ffi.C.GetTickCount64())
-    shared.a11y.poll_attribute_input(now_ms)
+    local select_pressed=shared.a11y.poll_attribute_input(now_ms)
+    if (scoreboard_pressed or select_pressed) and not shared.a11y.keyboard_window
+            and shared.a11y.read_context_state().kind~="dialog" then
+        local pause=shared.a11y.native_pause_context()
+        if pause or (scoreboard_pressed and shared.core_context.match_playing) then
+            shared.core_context.gameplay.m.announce_scoreboard(ctx,pause and pause.identity)
+        end
+    end
     shared.a11y.poll_focus_trace()
     shared.a11y.record_game_plan_menu_probe()
     if shared.a11y.game_plan_lineup_due_ms
@@ -319,6 +447,37 @@ function shared.m.display_frame(ctx)
 end
 
 
+    -- Temporary isolation build authorized by the user. Keep native selection,
+    -- dialogs, main choice and explicit exploration; suspend auxiliary polls.
+    shared.a11y.diagnostic_auxiliaries={}
+    for _,name in ipairs({"poll_information_context","poll_presented_texts","poll_notice_actions",
+            "poll_surface_texts","poll_skip_hint","poll_component_capture","poll_focus_trace",
+            "record_game_plan_menu_probe","poll_native_pages","poll_assignment_changes",
+            "poll_common_tooltip","poll_main_navigation_probe","poll_ml_date"}) do
+        local original=assert(shared.a11y[name],"missing diagnostic auxiliary: " .. name)
+        shared.a11y.diagnostic_auxiliaries[name]=original
+        shared.a11y[name]=function(...)
+            if shared.a11y.selection_diagnostic then
+                local metric=shared.a11y.render_metric
+                if metric then metric.aux_skipped=(metric.aux_skipped or 0)+1 end
+                return
+            end
+            return original(...)
+        end
+    end
+
+    for _,name in ipairs({"scan_menu_tree","menu_cursor_texts","read_native_windows_snapshot",
+            "refresh_list_snapshot","capture_window_headers","bind_controlled_player_captions",
+            "poll_native_texts","process_engine_focus","process_native_list_focus",
+            "visualization_packet","collect_group_scope","resolve_group_scope",
+            "flush_native_speech","native_text_index","header_batches_live","read_buffer","structured_record_packet"}) do
+        local original=assert(shared.a11y[name],name)
+        local profiled=shared.a11y.profile_targeted(name,original)
+        shared.a11y[name]=function(...)
+            if shared.a11y.diagnostic_mode or shared.a11y.selection_diagnostic then return profiled(...) end
+            return original(...)
+        end
+    end
     shared.stage = 15
 end
 function component.init(ctx)

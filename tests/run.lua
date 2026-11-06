@@ -65,6 +65,9 @@ local function set_upvalue(fn, wanted, value)
 end
 
 local a11y = upvalue(module.init, "a11y")
+-- Exercise the ordinary feature suite as a regression baseline; the temporary
+-- installed diagnostic mode has its own selection/exploration tests below.
+if modular_state then assert(a11y.selection_diagnostic==false) end
 local production_safe_memory_read=a11y.safe_memory_read
 -- Synthetic pointer fixtures replace only the OS boundary. Separate tests
 -- below execute the real ReadProcessMemory implementation against Windows.
@@ -962,9 +965,14 @@ end)
 check("panel navigation wraps and tooltip toggle persists", function()
     a11y.selected_option = 1
     module.key_down({}, a11y.previous_option_key)
-    assert(a11y.selected_option == 2)
+    if modular_state then
+        assert(module.overlay_on({}):find("---> Diagnóstico <---",1,true))
+    else
+        assert(a11y.selected_option == a11y.option_count)
+    end
     module.key_down({}, a11y.next_option_key)
     assert(a11y.selected_option == 1)
+    if modular_state then module.key_down({},0x0d) end
     local previous_path = a11y.config_path
     a11y.config_path = nil
     module.key_down({}, a11y.next_value_key)
@@ -973,6 +981,44 @@ check("panel navigation wraps and tooltip toggle persists", function()
     assert(a11y.read_tooltips)
     a11y.config_path = previous_path
 end)
+
+if modular_state then
+    check("possession announcement can be changed, disabled and restored in the panel", function()
+        local previous_path=a11y.config_path
+        local ctx={flaccess={gameplay={}}}
+        a11y.config_path=nil
+        local previous_interval,previous_number=a11y.possession_interval,a11y.possession_number
+        a11y.possession_interval,a11y.possession_number=5,false
+        module.key_down(ctx,0x08)
+        module.key_down(ctx,a11y.next_option_key)
+        assert(module.overlay_on(ctx):find("---> Anúncios <---",1,true))
+        module.key_down(ctx,0x0d)
+        assert(module.overlay_on(ctx):find("Jogador com a bola, a cada 5 segundos",1,true))
+        for seconds=4,1,-1 do
+            module.key_down(ctx,a11y.previous_value_key)
+            assert(a11y.possession_interval==seconds)
+        end
+        module.key_down(ctx,a11y.previous_value_key)
+        assert(a11y.possession_interval==0)
+        module.key_down(ctx,a11y.previous_value_key)
+        assert(a11y.possession_interval==-1)
+        assert(a11y.selected_option_text():find("a cada troca",1,true))
+        module.key_down(ctx,a11y.previous_value_key)
+        assert(a11y.possession_interval==10)
+        module.key_down(ctx,a11y.restore_key)
+        assert(a11y.possession_interval==5)
+        module.key_down(ctx,a11y.next_option_key)
+        module.key_down(ctx,a11y.next_value_key)
+        assert(a11y.possession_number)
+        module.key_down(ctx,a11y.restore_key)
+        assert(not a11y.possession_number)
+        a11y.possession_interval,a11y.possession_number=previous_interval,previous_number
+        module.key_down(ctx,0x08)
+        module.key_down(ctx,a11y.previous_option_key)
+        module.key_down(ctx,0x0d)
+        a11y.config_path=previous_path
+    end)
+end
 
 check("disabling tooltips cancels delayed old speech", function()
     set_upvalue(a11y.clear_pending_tooltips,
@@ -2515,7 +2561,7 @@ check("production localization callback cannot announce an unbound future paragr
 end)
 
 check("base release version and local development build remain separate",function()
-    local version, build = modular_state and "0.2.0" or "0.1.9", modular_state and 52 or 42
+    local version, build = modular_state and "0.2.1" or "0.1.9", modular_state and 87 or 42
     assert(upvalue(a11y.start_diagnostic,"VERSION")==version)
     assert(a11y.build==build and a11y.runtime_version==version)
     assert(a11y.overlay_text():find(version,1,true))
@@ -3522,6 +3568,39 @@ check("review recovers the selected club's shown player panel and replaces it on
     end)
 end)
 
+if modular_state then
+check("cup review includes the rendered fixture from its own companion window",function()
+    with_rendered_panel({
+        [0x110000]={name="compeSchedule",text="Fase de grupos",parent=0x900000},
+        [0x120000]={name="teamName",text="Liverpool x Barcelona",parent=0x900000},
+        [0x130000]={name="teamName_copy_0",text="Liverpool x Barcelona",parent=0x900000},
+        [0x140000]={name="teamName",text="Arsenal x Porto",parent=0x910000},
+    },function(values,snapshot,parents)
+        local base=0x140000000
+        local panel=snapshot.windows[1]
+        local primary={address=0x810000,root=0x910000,slot=0,primary=true,enabled=true}
+        snapshot.windows[2]=primary
+        snapshot.members[0x140000].owners={{address=primary.address,root=primary.root,parents=parents,enabled=true}}
+        panel.owned_roots,panel.root,panel.slot={panel.root},0,0
+        panel.vtable=base+0x267cc48
+        local native={
+            [primary.address]=base+0x271b738,[base+0x271b738+0x18]=base+0xc8ffb0,
+            [panel.address]=panel.vtable,[panel.vtable+0x18]=base+0xadcb10,
+            [0x11000c]=7,[0x12000c]=7,[0x13000c]=7,[0x14000c]=7,
+        }
+        local previous_base=upvalue(module.init,"process_base_u64")
+        set_upvalue(module.init,"process_base_u64",ffi.cast("uint64_t",base))
+        a11y.menu_read=function(address) return native[address] end
+        assert(a11y.buffer_entries()[1]=="Fase de grupos. Liverpool x Barcelona")
+        values[0x120000],values[0x130000]="Liverpool x Benfica","Liverpool x Benfica"
+        assert(a11y.buffer_entries()[1]=="Fase de grupos. Liverpool x Benfica")
+        panel.slot=1
+        assert(not a11y.competition_fixture())
+        set_upvalue(module.init,"process_base_u64",previous_base)
+    end)
+end)
+end
+
 check("a descriptive sibling cannot hide the unique item label of the same native component",function()
     with_components({[0x110000]={name="item",text="Componente de escolha",parent=0x210000},
         [0x120000]={name="description_0",text="Detalhe do componente",parent=0x210000}},function(snapshot)
@@ -4019,6 +4098,11 @@ end)
 
 check("restoring diagnostics always disables it from either initial state",function()
     local setter=a11y.set_diagnostic
+    if modular_state then
+        module.key_down({},0x08)
+        module.key_down({},a11y.previous_option_key)
+        module.key_down({},0x0d)
+    end
     a11y.selected_option=2
     a11y.set_diagnostic=function(enabled)
         assert(enabled==false,"restore must not toggle diagnostics on")
@@ -4031,6 +4115,11 @@ check("restoring diagnostics always disables it from either initial state",funct
         assert(not a11y.diagnostic_mode)
     end
     a11y.set_diagnostic=setter
+    if modular_state then
+        module.key_down({},0x08)
+        module.key_down({},a11y.next_option_key)
+        module.key_down({},0x0d)
+    end
     a11y.selected_option=1
 end)
 
@@ -4082,6 +4171,27 @@ check("leaving a game plan cancels delayed work before returning to another comp
     a11y.game_plan_active=true
     assert(not a11y.process_game_plan_selected_heading(false),"old heading must not survive reentry")
 end)
+
+if modular_state then
+check("native pitch caption owns speech over the delayed game plan heading",function()
+    local widget="native-pitch-caption"
+    local original=a11y.native_caption_selection_identity
+    a11y.ui_model.nodes[widget]={address=0x123000}
+    a11y.native_caption_selection_identity=function(address)
+        if address==0x123000 then return "live-pitch" end
+    end
+    a11y.game_plan_selected_heading_widget=widget
+    a11y.game_plan_selected_heading="Jogador novo"
+    a11y.game_plan_selected_heading_due_frame=-1
+    a11y.game_plan_attribute_panel_until_ms=-1
+    a11y.game_plan_main_surface=false
+    local queued=#speech_texts()
+    assert(not a11y.process_game_plan_selected_heading(false))
+    assert(a11y.game_plan_selected_heading_due_frame==nil and #speech_texts()==queued)
+    a11y.native_caption_selection_identity=original
+    a11y.ui_model.nodes[widget]=nil
+end)
+end
 
 check("duplicate field names keep bindings proven in independent native components",function()
     with_components({[0x110000]={name="field_item",text="Campo A",parent=0x210000},
@@ -4487,6 +4597,34 @@ check("native command bar contributes its actual text pairs without becoming a s
         assert(snapshot.command_bar and snapshot.command_bar.pairs[1].caption==0xa40000)
         assert(#snapshot.command_bar.pairs==7 and snapshot.command_bar.pairs[1].icon==0xa30000)
         assert(snapshot.members[0xa40000].active and not snapshot.selected_members[0xa40000])
+        if modular_state then
+            local checks={}
+            local bar=assert(a11y.read_native_command_bar(base,checks))
+            assert(not checks.incomplete and #checks>60 and bar.pairs[1].caption==0xa40000)
+            local batches=assert(a11y.compile_header_batches(checks))
+            local saved_read,saved_unpack=a11y.safe_memory_read,host.memory.unpack
+            local types={u64="uint64_t",u32="uint32_t",u8="uint8_t"}
+            host.memory.unpack=function(kind,bytes)return ffi.cast("const "..types[kind].."*",bytes)[0] end
+            local reads=0
+            a11y.safe_memory_read=function(address,size)
+                reads=reads+1
+                local bytes=ffi.new("uint8_t[?]",size)
+                for _,check in ipairs(checks) do
+                    local offset=check.address-address
+                    if offset>=0 and offset+ffi.sizeof(types[check.kind])<=size then
+                        ffi.cast(types[check.kind].."*",bytes+offset)[0]=memory[check.address]
+                    end
+                end
+                return ffi.string(bytes,size)
+            end
+            assert(a11y.header_batches_live(batches) and reads<#checks)
+            print("GUIDE_VALIDATION scalar-checks=" .. #checks .. " batched-copies=" .. reads)
+            local caption_link=0xb00100+7*0x100+0x40
+            memory[caption_link]=0xd00200
+            assert(not a11y.header_batches_live(batches),"a replaced caption must invalidate the guide proof")
+            memory[caption_link]=0xa40000
+            a11y.safe_memory_read,host.memory.unpack=saved_read,saved_unpack
+        end
         memory[0xa001b9]=1
         assert(not a11y.read_native_windows(base).command_bar)
         memory[0xa001b9]=0;memory[0xa1000c]=3
@@ -6868,7 +7006,7 @@ check("selected message retries queue replacement instead of becoming permanentl
     end)
 end)
 
-check("loading requires native singleton and three seconds then speaks once per lifecycle",function()
+check("loading requires native singleton and speaks once per lifecycle",function()
     with_native_windows(function(memory,base)
         local saved_base=upvalue(module.init,"process_base_u64")
         set_upvalue(module.init,"process_base_u64",ffi.cast("uint64_t",base))
@@ -6876,7 +7014,7 @@ check("loading requires native singleton and three seconds then speaks once per 
             a11y.poll_loading(0);a11y.poll_loading(10000);assert(#speech_texts()==0)
             memory[base+0x36f9a68]=0x3000000;memory[0x3000000]=base+0x27b55b8
             memory[base+0x27b55b8+8]=base+0xe4a630
-            a11y.poll_loading(10000);a11y.poll_loading(12999);a11y.flush_native_speech(100000);assert(#output==0)
+            a11y.poll_loading(10000);a11y.poll_loading(12999);a11y.flush_native_speech(100000);assert(#output==(modular_state and 1 or 0))
             a11y.poll_loading(13000);a11y.flush_native_speech(100000)
             assert(#output==1 and output[1][1]=="Carregando tela")
             a11y.poll_loading(19000);a11y.flush_native_speech(100000);assert(#output==1)
@@ -6884,7 +7022,7 @@ check("loading requires native singleton and three seconds then speaks once per 
             memory[base+0x36f9a68]=0x3000000;a11y.poll_loading(21000);a11y.poll_loading(24000)
             memory[base+0x36f9a68]=0;a11y.poll_loading(24001)
             memory[base+0x36f9a68]=0x3000000;a11y.poll_loading(24002)
-            a11y.flush_native_speech(100000);assert(#output==1,"new short lifecycle at same address cannot reuse old notice")
+            a11y.flush_native_speech(100000);assert(#output==(modular_state and 2 or 1),"new lifecycle at same address must not reuse old notice")
         end)
         set_upvalue(module.init,"process_base_u64",saved_base)
     end)
@@ -7066,16 +7204,16 @@ check("real Windows scalar blocks batch adjacent reads and recheck protected mem
     assert(region~=nil)
     local at=tonumber(ffi.cast("uint64_t",region))
     local words=ffi.cast("uint32_t*",region)
-    for i=0,15 do words[i]=i+10 end
+    for i=0,1023 do words[i]=i+10 end
     a11y.safe_memory_read=production_safe_memory_read
     host.memory.unpack=native_memory_codec.unpack
     a11y.render_metric={reads=0};a11y.render_read_work={}
-    for i=0,15 do
+    for i=0,1023 do
         local pointer=i%2==0 and ffi.cast("uint64_t",at+i*4) or at+i*4
         assert(a11y.menu_read(pointer,"u32")==i+10)
         assert(a11y.menu_read(ffi.cast("uint64_t",pointer),"u32")==i+10)
     end
-    assert(a11y.render_metric.reads==1,"sixteen actual scalar fields share one safe OS copy")
+    assert(a11y.render_metric.reads==1,"1024 scalar fields across a page share one safe OS copy")
     a11y.render_read_work=nil
     local previous=ffi.new("unsigned long[1]")
     assert(ffi.C.VirtualProtect(region,4096,0x01,previous)~=0)
@@ -7083,7 +7221,7 @@ check("real Windows scalar blocks batch adjacent reads and recheck protected mem
     a11y.render_metric,a11y.render_read_work=nil,nil
     assert(ffi.C.VirtualFree(region,0,0x8000)~=0)
     a11y.safe_memory_read,host.memory.unpack=old_reader,old_unpack
-    print("WINDOWS_SCALAR_COPIES fields=16 copies=1 next-phase=PAGE_NOACCESS-rejected")
+    print("WINDOWS_SCALAR_COPIES fields=1024 copies=1 next-phase=PAGE_NOACCESS-rejected")
 end)
 
 check("rootless ancillary tasks do not invalidate rooted focus but a rootless primary still owns its screen",function()
@@ -7923,6 +8061,17 @@ check("typed carousel defers surrounding cards but explicit exploration keeps th
         a11y.menu_read=function(at)
             if at==owner.address then return base+0x271c8c8 end
             if at==base+0x271c8c8+0x18 then return base+0xc93200 end
+            if at==0x980000 then return base+0x26833e8 end
+            if at==base+0x26833e8+0x18 then return base+0xaeb1e0 end
+        end
+        if modular_state then
+            snapshot.windows[2]={address=0x980000,root=0,enabled=true}
+            speak("OK, item selecionado",true,nil,nil,0x110000)
+            assert(#speech_texts()==0,"incidental friendly carousel OK")
+            speak("OK",true,true,"review:explicit",0x110000)
+            assert(#speech_texts()==1,"explicit exploration can still read OK")
+            snapshot.windows[2]=nil
+            assert(not a11y.exhibition_carousel_ok(0x110000),"other team selectors preserve OK")
         end
         local carousel=assert(a11y.automatic_carousel_focus())
         assert(a11y.carousel_automatic_node(0x110000,carousel))
@@ -8078,7 +8227,7 @@ check("native standings selection reaches every club while outer cursor remains 
             [base+0x2684408+0x130]=base+0xaedf80,[owner.address+0x90]=0xf10000,[owner.address+0x98]=0xf10050,
             [0xd000a0]=0,[0xd000a8]=0xe20000,[0xd000b0]=0xe20018,[0xe20000]=0,
             [owner.root+0x170]=0xe00000,[owner.root+0x178]=0xe00008,[0xe00000]=0x210000,
-            [0x210170]=0xe10000,[0x210178]=0xe100a0,[0xf000bc]=0}
+            [0x210170]=0xe10000,[0x210178]=0xe100a0,[0xf000bc]=0,[0xf000c0]=0}
         for i=0,19 do mem[0xe10000+i*8]=0x300000+i*0x1000;parents[0x300000+i*0x1000]=0x210000 end
         a11y.menu_read=function(at)return mem[at]end
         a11y.holder_kind_nodes=function(holder,kind)
@@ -8093,11 +8242,20 @@ check("native standings selection reaches every club while outer cursor remains 
                 assert(#output==i,"partial new selection must not interrupt speech")
                 set_upvalue(module.display_frame,"frame",5001+i*2)
                 assert(a11y.poll_structured_record(false));a11y.flush_native_speech(100000+i)
-                assert(output[i+1][1]=="Time: Time " .. (i+1) .. "; Posição: " .. (i+1) .. "; Pontos: " .. (20-i))
+                local prefix=modular_state and ("Time " .. (i+1) .. ". ") or ("Time: Time " .. (i+1) .. "; ")
+                assert(output[i+1][1]==prefix .. "Posição: " .. (i+1) .. "; Pontos: " .. (20-i))
             end
             mem[0xf000bc]=5;a11y.read_buffer("first")
             mem[0xf000bc]=19;a11y.flush_native_speech(100100);assert(#output==20,"obsolete row cannot survive scrolling")
             local fields=a11y.buffer_entries();assert(fields[1]=="Time: Time 20")
+            if modular_state then
+                local focus,item=a11y.native_list_has_focus,a11y.native_list_selection
+                a11y.native_list_has_focus=function() return true end
+                a11y.native_list_selection={name="teamName",text="Time 20"}
+                local packet=assert(a11y.structured_record_packet())
+                assert(packet.native_standings and packet.entries[1]=="Time: Time 20")
+                a11y.native_list_has_focus,a11y.native_list_selection=focus,item
+            end
             mem[0xf000bc]=20
             local packet=assert(a11y.structured_record_packet());assert(packet.unresolved and #packet.entries==0)
             mem[0xf000bc]=19;values[0x500200+19*0x1000]="7"
@@ -8107,6 +8265,53 @@ check("native standings selection reaches every club while outer cursor remains 
             assert(#output==20,"changing columns must not publish half-updated records")
             set_upvalue(module.display_frame,"frame",5202);a11y.poll_structured_record(false);a11y.flush_native_speech(100202)
             assert(#output==21 and output[21][1]:find("Pontos: 8",1,true))
+            if modular_state then
+                mem[0x210178]=0xe10020 -- Only four rows are physically present.
+                mem[0xf000bc],mem[0xf000c0]=14,11
+                local scrolled=assert(a11y.standings_row_selection(window,base))
+                assert(scrolled.index==14 and scrolled.row==0x303000)
+                mem[0xf000bc],mem[0xf000c0]=18,18
+                assert(a11y.standings_row_selection(window,base).row==0x300000)
+                mem[0xf000c0]=19
+                assert(not a11y.standings_row_selection(window,base))
+
+                -- The active outer group is a different control. One recycled
+                -- presentation row still contains the first team's text.
+                mem[0xd000a0],mem[0xd000d8]=1,0
+                mem[0xf000b4],mem[0xf000b8]=20,4
+                mem[0xf000bc],mem[0xf000c0]=9,9
+                mem[base+0x3705e10]=0x1100000
+                mem[0x1100048],mem[0x1100078]=0x2000000,0x4000000
+                mem[owner.address+0xa8]=11
+                mem[0x2000000+0xd0bcf4]=1
+                mem[0x2000000+0xc12e9c],mem[0x2000000+0xc12e9c+0x80]=11,123
+                mem[0x4000000],mem[0x4000004],mem[0x4000008],mem[0x400000c]=123,0,2026,0
+                local record=0x4004650
+                local rows=record+0x318
+                mem[record],mem[rows+0x3c0]=11,20
+                for i=0,19 do
+                    mem[0xf10000+i*4]=0x4000+i
+                    mem[rows+i*20]=0x4000+i
+                end
+                mem[rows+9*20+4],mem[rows+9*20+8],mem[rows+9*20+12]=10,7+2*256+2^20,6+4096*4
+                mem[0x2000000+0x183789c]=2
+                local team=0x2000000+0xadf4bc+9*0x690
+                mem[team]=0x4009
+                local read_name=a11y.read_native_c_string
+                a11y.read_native_c_string=function(at)
+                    if at==team+4 then return "Clube do meio" end
+                end
+                local selection=assert(a11y.standings_row_selection(window,base))
+                assert(selection.index==9 and selection.source=="standings-data-selector")
+                local current=assert(a11y.structured_record_packet())
+                assert(current.authoritative_standings and current.entries[1]=="Time: Clube do meio")
+                assert(current.entries[2]=="Posição: 10" and current.entries[3]=="Pontos: 7")
+                assert(current.entries[4]=="Saldo de gols: 2" and current.entries[6]=="Empates: 1")
+                set_upvalue(module.display_frame,"frame",5300)
+                assert(a11y.poll_structured_record(false));a11y.flush_native_speech(100300)
+                assert(output[#output][1]:find("Clube do meio. Posição: 10",1,true)==1)
+                a11y.read_native_c_string=read_name
+            end
         end)
         a11y.holder_kind_nodes=kinds;set_upvalue(module.init,"process_base_u64",saved_base)
         set_upvalue(module.display_frame,"frame",saved_frame)
@@ -8261,8 +8466,13 @@ check("stable list refresh avoids full discovery and follows cursor in the same 
         frame(2002);a11y.native_windows=assert(a11y.read_native_windows(base))
         assert(a11y.native_windows.light and not a11y.native_windows.light_same_cursor and full==0)
         assert(a11y.native_windows.selected_members[0x520000] and not a11y.native_windows.selected_members[0x510000])
+        assert(not a11y.native_windows.cursor_members[0x510000]
+            and a11y.cursor_contains(a11y.native_windows,0x510000),"light refresh must reuse background membership without copying it")
         frame(2006);a11y.native_windows=assert(a11y.read_native_windows(base))
-        assert(not a11y.native_windows.light and full==1,"periodic discovery remains bounded")
+        assert(a11y.native_windows.light and full==0,"proven cursor does not require periodic discovery")
+        a11y.native_windows.windows[2].cursor_detail.graph_edges=nil
+        frame(2012);a11y.native_windows=assert(a11y.read_native_windows(base))
+        assert(not a11y.native_windows.light and full==1,"unproven cursor retains periodic discovery")
         a11y.read_native_windows_snapshot=discover
         print("LIST_REFRESH stable-full-scans=0 cursor-change-full-scans=0 periodic-full-scans=" .. full)
     end)
@@ -8314,7 +8524,7 @@ check("background focus redraw storms cannot force global window rediscovery",fu
             a11y.native_windows=assert(a11y.read_native_windows(base))
             assert(a11y.native_windows.selected_members[0x510000],"background focus must not move native selection")
         end
-        assert(full==5,"redraws caused " .. full .. " full discoveries instead of five periodic ones")
+        assert(full==0,"redraws must not rediscover a proven selection graph")
         a11y.read_native_windows_snapshot=discover
         print("REDRAW_STORM focus-events=1200 frames=30 full-discoveries=" .. full)
     end)
@@ -8340,6 +8550,810 @@ check("ownership changes keep unrelated graphs while fresh input flags still rej
         print("OWNER_SWITCH unrelated-graph-rescans=0 closed-owner-and-removed-edge=rejected")
     end)
 end)
+
+if modular_state then
+check("text setter cache is local to callback in the Sider sandbox without pcall",function()
+    local observe=a11y.on_observed_ui_text
+    local old_work,old_metric=a11y.render_read_work,a11y.render_metric
+    a11y.render_read_work,a11y.render_metric=nil,nil
+    local first,calls
+    calls=0
+    a11y.on_observed_ui_text=function()
+        calls=calls+1
+        assert(a11y.render_read_work and a11y.render_metric)
+        if calls==1 then first=a11y.render_read_work
+        else assert(first~=a11y.render_read_work,"callback cache must not survive") end
+    end
+    emit_ui_text(0x110000,"A");emit_ui_text(0x110000,"B")
+    assert(not a11y.render_read_work and not a11y.render_metric)
+    assert(host.pcall==nil,"Sider does not expose protected calls")
+    a11y.on_observed_ui_text=observe
+    a11y.render_read_work,a11y.render_metric=old_work,old_metric
+end)
+end
+
+if modular_state then
+check("proven list polls selection automatically and background only on exploration",function()
+    local saved={}
+    local function replace(name,value) saved[name]=a11y[name];a11y[name]=value end
+    local snapshot=a11y.native_windows
+    a11y.native_windows={members={[0x110000]={active=true},[0x120000]={active=true}},selected_members={[0x110000]=true}}
+    local enabled=a11y.native_windows_enabled;a11y.native_windows_enabled=true
+    replace("automatic_carousel_focus",function() return nil end)
+    replace("native_list_has_focus",function() return true end)
+    replace("read_context_state",function() return {kind="list"} end)
+    replace("native_information_context",function() return nil end)
+    replace("native_presentation_ready",function() return true end)
+    replace("control_for_widget",function() return nil end)
+    replace("on_observed_ui_text",function() end)
+    local reads={}
+    replace("read_native_rendered_text",function(at) reads[at]=true;return "Current","Current",0 end)
+    local keyboard=a11y.keyboard_window;a11y.keyboard_window=nil
+    a11y.poll_native_texts()
+    assert(reads[0x110000] and not reads[0x120000])
+    a11y.poll_native_texts(true)
+    assert(reads[0x120000],"exploration must still collect background details")
+    for name,value in pairs(saved) do a11y[name]=value end
+    a11y.native_windows,a11y.native_windows_enabled,a11y.keyboard_window=snapshot,enabled,keyboard
+end)
+end
+
+if modular_state then
+check("proven list skips periodic discovery but ownership and focus loss still refresh",function()
+    with_fast_list(function(values,base,manager,frame)
+        local focus=a11y.native_list_has_focus
+        local context=a11y.read_context_state
+        local discover=a11y.read_native_windows_snapshot
+        local keyboard=a11y.keyboard_window;a11y.keyboard_window=nil
+        a11y.native_list_has_focus=function() return true end
+        a11y.read_context_state=function() return {kind="list"} end
+        local full=0
+        a11y.read_native_windows_snapshot=function(...) full=full+1;return discover(...) end
+        for n=2001,2060 do
+            frame(n);a11y.native_windows=assert(a11y.read_native_windows(base))
+            assert(a11y.native_windows.light and a11y.native_windows.selection_only)
+        end
+        assert(full==0,"stable proven list must not periodically rediscover all trees")
+        values[manager+0xd0]=(values[manager+0xd0] or 0)+1
+        frame(2061);a11y.native_windows=assert(a11y.read_native_windows(base));assert(full==1)
+        a11y.native_list_has_focus=function() return false end
+        frame(2067);a11y.native_windows=assert(a11y.read_native_windows(base));assert(full==1)
+        for _,window in ipairs(a11y.native_windows.windows)do
+            if window.cursor_detail then window.cursor_detail.graph_edges=nil end
+        end
+        frame(2073);a11y.native_windows=assert(a11y.read_native_windows(base));assert(full==2)
+        a11y.native_list_has_focus,a11y.read_context_state=focus,context
+        a11y.read_native_windows_snapshot,a11y.keyboard_window=discover,keyboard
+    end)
+end)
+end
+
+if modular_state then
+check("delegated repeated label and value pairs stay in their nearest unique component",function()
+    local parents={[11]=10,[12]=10,[21]=20,[22]=20,[10]=100,[20]=100}
+    local function item(name,text,parent,address)
+        return {name=name,text=text,parent=parent,address=address,scope=1,parents=parents}
+    end
+    local fields=a11y.resolve_group_fields({item("label","Força",11,1),item("value","80",12,2),
+        item("label","Velocidade",21,3),item("value","90",22,4)},{allow_shared=true})
+    assert(#fields==2)
+    local found={};for _,field in ipairs(fields) do found[field.text]=true end
+    assert(found["Força: 80"] and found["Velocidade: 90"])
+end)
+check("negotiation descriptions follow selected native component instead of concatenating other options",function()
+    with_rendered_panel({[0x110000]={name="menu_item",text="Próprios jogadores",parent=0x210000},
+        [0x120000]={name="menu_description",text="Negociar com seus próprios jogadores.",parent=0x210000},
+        [0x130000]={name="menu_item",text="Busca avançada",parent=0x220000},
+        [0x140000]={name="menu_description",text="Escolha critérios de pesquisa dos jogadores.",parent=0x220000}},function(values,snapshot)
+        snapshot.windows[1].cursor_detail={selected=0x210000,item_index=0,group_index=0}
+        a11y.read_context.selection_result=nil
+        with_render_harness(function(output)
+            a11y.poll_common_tooltip();a11y.flush_native_speech(100000)
+            assert(#output==1 and output[1][1]==values[0x120000])
+            snapshot.windows[1].cursor_detail={selected=0x220000,item_index=1,group_index=0}
+            a11y.poll_common_tooltip();a11y.flush_native_speech(100000)
+            assert(#output==2 and output[2][1]==values[0x140000])
+        end)
+    end)
+end)
+check("ML standings and journal cards retain titles without merging multiple rows",function()
+    with_rendered_panel({[0x110000]={name="leagueRank_teamName",text="A",parent=0x210000},
+        [0x120000]={name="leagueRank_teamName",text="B",parent=0x210000},
+        [0x130000]={name="leagueRank_point",text="20",parent=0x210000},
+        [0x140000]={name="journal_text_0",text="Notícia atual",parent=0x220000}},function(values,snapshot,parents,window)
+        local names=a11y.collect_record_nodes(window,0x210000)
+        local packet=a11y.compose_record_packet(window,0x210000,names,false)
+        assert(packet and packet.dashboard_card and packet.label=="Classificação" and #packet.entries==0)
+        names=a11y.collect_record_nodes(window,0x220000)
+        packet=a11y.compose_record_packet(window,0x220000,names,false)
+        assert(packet and packet.dashboard_card and packet.label=="Diário")
+    end)
+end)
+end
+
+if modular_state then
+check("record collection is reused only inside the current synchronous phase",function()
+    with_rendered_panel({[0x110000]={name="teamName",text="Atual",parent=0x210000},
+        [0x120000]={name="num_Points",text="20",parent=0x210000}},function(values,snapshot,parents,window)
+        local work=a11y.render_read_work;local read=a11y.read_native_rendered_text
+        local calls=0
+        a11y.read_native_rendered_text=function(...) calls=calls+1;return read(...) end
+        a11y.render_read_work={}
+        local first=a11y.collect_record_nodes(window,0x210000);local count=calls
+        assert(first.teamName and count>0)
+        assert(a11y.collect_record_nodes(window,0x210000)==first and calls==count)
+        a11y.render_read_work={};values[0x120000]="21"
+        local current=a11y.collect_record_nodes(window,0x210000)
+        assert(current.num_Points[1].text=="21" and calls>count)
+        a11y.render_read_work,a11y.read_native_rendered_text=work,read
+    end)
+end)
+end
+
+if modular_state then
+check("search waits for input participation and then automatically enables the initial player summary",function()
+    with_rendered_panel({[0x110000]={name="playerName",text="Mohamed Salah",parent=0x210000},
+        [0x120000]={name="allOver",text="85",parent=0x210000},
+        [0x130000]={name="noSetting",text="Desativar",parent=0x210000}},function(values,snapshot)
+        local flow=a11y.menu_flow_name;local active=a11y.menu_node_active
+        local saved_base=upvalue(module.init,"process_base_u64")
+        set_upvalue(module.init,"process_base_u64",ffi.cast("uint64_t",0x140000000))
+        local loading,ready=a11y.search_loading_notice,a11y.search_results_ready
+        a11y.menu_flow_name="common/script/flow/ML/Negociation/MLNegoSearchResultMemberList.json"
+        a11y.search_loading_notice,a11y.search_results_ready=nil,nil
+        snapshot.selected_members={[0x110000]=true}
+        local accepts_input=false
+        a11y.menu_node_active=function() return accepts_input end
+        with_render_harness(function(output)
+            assert(a11y.poll_player_search_loading())
+            a11y.flush_native_speech(100000)
+            assert(#output==1 and output[1][1]=="Carregando tela")
+            assert(not a11y.speech_entry_allowed({text="Desativar"}))
+            a11y.poll_player_search_loading();a11y.flush_native_speech(100000);assert(#output==1)
+            accepts_input=true
+            assert(not a11y.poll_player_search_loading() and a11y.search_results_ready)
+            local text=a11y.engine_focus_speech("Mohamed Salah",a11y.ui_model.nodes[host.memory.hex(0x110000)])
+            assert(text:find("Força geral: 85",1,true) and not text:find("Desativar",1,true))
+        end)
+        set_upvalue(module.init,"process_base_u64",saved_base)
+        a11y.menu_flow_name,a11y.menu_node_active=flow,active
+        a11y.search_loading_notice,a11y.search_results_ready=loading,ready
+    end)
+end)
+check("search player details can group fields even with an active action cursor",function()
+    with_rendered_panel({[0x110000]={name="height_item",text="Altura (cm)",parent=0x210000},
+        [0x120000]={name="height_value",text="175",parent=0x210000},
+        [0x130000]={name="weight_item",text="Peso (kg)",parent=0x220000},
+        [0x140000]={name="weight_value",text="72",parent=0x220000}},function(values,snapshot,parents,window)
+        local flow,ready=a11y.menu_flow_name,a11y.search_results_ready
+        local focus=a11y.native_list_has_focus;local info=a11y.native_information_context
+        a11y.menu_flow_name="/MLNegoSearchResultMemberList.json";a11y.search_results_ready=true
+        a11y.native_list_has_focus=function()return false end
+        a11y.native_information_context=function()return nil end
+        window.cursor_detail={status="resolved",selected=0x230000}
+        local packet=a11y.visualization_packet()
+        assert(packet and #packet.fields>=2)
+        a11y.menu_flow_name,a11y.search_results_ready=flow,ready
+        a11y.native_list_has_focus,a11y.native_information_context=focus,info
+    end)
+end)
+end
+
+if modular_state then
+check("carousel caption suppresses incidental OK without suppressing a real dialog answer",function()
+    with_rendered_panel({[0x110000]={name="text",text="OK",parent=0x210000}},function()
+        local focus,item=a11y.native_list_has_focus,a11y.native_list_selection
+        a11y.native_list_has_focus=function() return true end
+        a11y.native_list_selection={text="Liga selecionada"}
+        assert(not a11y.selection_result({widget=0x110000,text="OK",source="engine-focus"}))
+        a11y.native_list_has_focus=function() return false end
+        assert(a11y.selection_result({widget=0x110000,text="OK",source="engine-focus"}))
+        a11y.native_list_has_focus,a11y.native_list_selection=focus,item
+    end)
+end)
+end
+
+if modular_state then
+check("unchanged list setters skip repeated binding but changed text still reaches observation",function()
+    with_rendered_panel({[0x110000]={name="playerName",text="Atual",parent=0x210000}},function()
+        local observe,live,allowed=a11y.on_observed_ui_text,a11y.ui_node_matches_live,a11y.native_widget_allowed
+        local diagnostic=a11y.diagnostic_mode;a11y.diagnostic_mode=false
+        local node=a11y.ui_model.nodes[host.memory.hex(0x110000)];node.raw_text=node.text
+        local calls=0
+        a11y.on_observed_ui_text=function() calls=calls+1 end
+        a11y.ui_node_matches_live=function()return true end
+        a11y.native_widget_allowed=function()return true end
+        for i=1,1000 do emit_ui_text(0x110000,"Atual") end
+        assert(calls==0,"identical redraws must not rebuild bindings")
+        emit_ui_text(0x110000,"Novo");assert(calls==1)
+        a11y.ui_node_matches_live=function()return false end
+        emit_ui_text(0x110000,"Atual");assert(calls==2,"reused widgets must not be skipped")
+        a11y.on_observed_ui_text,a11y.ui_node_matches_live,a11y.native_widget_allowed=observe,live,allowed
+        a11y.diagnostic_mode=diagnostic
+    end)
+end)
+check("released player records never fall back to direct Sider memory reads",function()
+    local record,style,read=a11y.visualization_player_record,a11y.player_style_text,a11y.safe_memory_read
+    local readable=upvalue(module.init,"readable");local raw=host.memory.read
+    a11y.visualization_player_record=function()return {player_id=1,object=0x123000}end
+    a11y.player_style_text=function()return nil end
+    set_upvalue(module.init,"readable",function()return true end)
+    a11y.safe_memory_read=function()return nil end
+    host.memory.read=function()error("unsafe raw read after widget release")end
+    local packet={identity="current",fields={}}
+    a11y.append_visualization_attributes(packet);assert(#packet.fields==0)
+    a11y.visualization_player_record,a11y.player_style_text,a11y.safe_memory_read=record,style,read
+    set_upvalue(module.init,"readable",readable);host.memory.read=raw
+end)
+end
+
+if modular_state then
+check("native standings route cannot be consumed by generic list caption",function()
+    local saved={}
+    local function replace(name,value)saved[name]=a11y[name];a11y[name]=value end
+    replace("selected_message_packet",function()return nil end)
+    replace("main_menu_choice_active",function()return false end)
+    replace("native_information_context",function()return nil end)
+    replace("active_native_standings",function()return {address=0x100000}end)
+    local records,lists=0,0
+    replace("poll_structured_record",function()records=records+1;return true end)
+    replace("process_native_list_focus",function()lists=lists+1;return true end)
+    assert(a11y.dispatch_native_selection(false,false))
+    assert(records==1 and lists==0)
+    for name,value in pairs(saved)do a11y[name]=value end
+end)
+check("native selector label and value become one exploration field without resource suffix aliases",function()
+    with_native_field(function(snapshot,parents,kinds,base)
+        local read=a11y.read_native_rendered_text
+        local cache=a11y.native_tree_cache;a11y.native_tree_cache=nil
+        a11y.read_native_rendered_text=function(at)
+            local node=a11y.ui_model.nodes[host.memory.hex(at)]
+            return node and node.text
+        end
+        local window=snapshot.windows[1]
+        local fields=a11y.read_group_fields(window,window.root)
+        assert(#fields==1 and fields[1].text=="Campo sem catálogo: Primeiro valor")
+        parents[0x110000]=0x220000
+        assert(#a11y.read_group_fields(window,window.root)==0,"another component cannot supply a label")
+        a11y.read_native_rendered_text,a11y.native_tree_cache=read,cache
+    end)
+end)
+end
+
+if modular_state then
+check("standings adapter uses proven cursor group when Window selection is the captured minus-one sentinel",function()
+    with_fast_list(function(values,base)
+        local window
+        for _,candidate in ipairs(a11y.native_windows.windows)do
+            if candidate.cursor_detail and candidate.cursor_detail.selected then window=candidate;break end
+        end
+        assert(window)
+        local impl=window.impl
+        values[impl+0xa0],values[impl+0xa8],values[impl+0xb0],values[impl+0xd8]=0xffffffff,0,0,0xffffffff
+        values[window.address+0x90],values[window.address+0x98]=0xf10000,0xf10008
+        local kinds=a11y.holder_kind_nodes
+        a11y.holder_kind_nodes=function(at,kind)
+            if at==window.cursor_detail.group+0x98 and kind==0x10 then return {0xf00000} end
+            return kinds(at,kind)
+        end
+        values[0xf000bc],values[0xf000c0]=1,0
+        local selection=assert(a11y.standings_row_selection(window,base))
+        assert(selection.source=="cursor-group-selector" and selection.index==1 and selection.row==0x520000)
+        values[0xf000bc]=0xffffffff
+        assert(not a11y.standings_row_selection(window,base),"unset inner selector must not choose row zero")
+        values[0xf000bc]=0;values[0x800094]=1
+        assert(not a11y.standings_row_selection(window,base),"changed cursor proof must not be reused")
+        a11y.holder_kind_nodes=kinds
+    end)
+end)
+check("group resolution uses captured descriptors without reading live native memory",function()
+    with_native_field(function(snapshot,parents)
+        local read=a11y.read_native_rendered_text;local graph=a11y.native_tree_cache;a11y.native_tree_cache=nil
+        a11y.read_native_rendered_text=function(at)local node=a11y.ui_model.nodes[host.memory.hex(at)];return node and node.text end
+        local window=snapshot.windows[1]
+        local collection=assert(a11y.collect_group_scope(window,window.root))
+        local label,member=a11y.native_field_label,a11y.group_member_live
+        a11y.native_field_label=function()error("resolver must not collect live relations")end
+        a11y.group_member_live=function()error("resolver must not read live edges")end
+        a11y.read_native_rendered_text=function()error("resolver must not read live values")end
+        local fields=a11y.resolve_group_scope(collection)
+        assert(#fields==1 and fields[1].text=="Campo sem catálogo: Primeiro valor")
+        a11y.native_field_label,a11y.group_member_live=label,member
+        a11y.read_native_rendered_text,a11y.native_tree_cache=read,graph
+    end)
+end)
+check("one panel merges duplicate physical fields across roots and rejects competing values",function()
+    local field={label={address=1,text="Altura"},value={address=2,text="175"}}
+    local packet={fields={}}
+    assert(a11y.merge_visualization_fields(packet,{field},10))
+    assert(a11y.merge_visualization_fields(packet,{field},20) and #packet.fields==1)
+    assert(not a11y.merge_visualization_fields(packet,{{label={address=1,text="Altura"},value={address=3,text="180"}}},30))
+end)
+end
+
+if modular_state then
+check("shared native cursor path avoids full discovery while scrolling without a list caption",function()
+    local function scenario(disable)
+        local total=0
+        with_fast_list(function(values,base,manager,frame)
+            local prove,focus,context=a11y.proven_snapshot_cursor,a11y.native_list_has_focus,a11y.read_context_state
+            local discover=a11y.read_native_windows_snapshot
+            if disable then a11y.proven_snapshot_cursor=function()return false end end
+            a11y.native_list_has_focus=function()return false end
+            a11y.read_context_state=function()return {kind="list"}end
+            a11y.read_native_windows_snapshot=function(...)total=total+1;return discover(...)end
+            for step=1,120 do
+                values[0x800094]=step%2
+                frame(2000+step);a11y.native_windows=assert(a11y.read_native_windows(base))
+                local current=step%2==0 and 0x510000 or 0x520000
+                assert(a11y.native_windows.selected_members[current],"current selection must survive continuous navigation")
+            end
+            a11y.proven_snapshot_cursor,a11y.native_list_has_focus,a11y.read_context_state=prove,focus,context
+            a11y.read_native_windows_snapshot=discover
+        end)
+        return total
+    end
+    local before,after=scenario(true),scenario(false)
+    assert(before==20 and after==0,"periodic full discoveries: " .. before .. " versus " .. after)
+    print("LIST_NAVIGATION frames=120 full-before=" .. before .. " full-after=" .. after)
+end)
+end
+
+if modular_state then
+check("temporary diagnostic mode bypasses auxiliary collection and keeps explicit grouped exploration",function()
+    local mode=a11y.selection_diagnostic;local date=a11y.native_ml_date
+    local calls=0;a11y.native_ml_date=function()calls=calls+1;return nil end
+    a11y.selection_diagnostic=true;a11y.poll_ml_date();assert(calls==0)
+    a11y.selection_diagnostic=false;a11y.poll_ml_date();assert(calls==1)
+    a11y.native_ml_date=date;a11y.selection_diagnostic=true
+    with_rendered_panel({[0x110000]={name="height_item",text="Altura (cm)",parent=0x210000},
+        [0x120000]={name="height_value",text="175",parent=0x210000}},function()
+        with_render_harness(function(output)
+            assert(a11y.read_visualization("next"));a11y.flush_native_speech(100000)
+            assert(output[1][1]=="Altura: 1,75 metros")
+        end)
+    end)
+    a11y.selection_diagnostic=mode
+end)
+check("temporary diagnostic mode keeps native selection speech",function()
+    local mode=a11y.selection_diagnostic;a11y.selection_diagnostic=true
+    with_rendered_panel({[0x110000]={name="text",text="Seleção atual",parent=0x210000}},function(values,snapshot)
+        snapshot.selected_members={[0x110000]=true};snapshot.cursor_members=snapshot.selected_members
+        with_focus_memory({},function(tick)
+            tick(120);tick(123)
+            with_render_harness(function(output)
+                a11y.flush_native_speech(100000)
+                assert(#output==1 and output[1][1]=="Seleção atual")
+            end)
+        end)
+    end)
+    a11y.selection_diagnostic=mode
+end)
+end
+
+if modular_state then
+check("foreground player panel excludes the result list retained behind it",function()
+    with_rendered_panel({[0x110000]={name="height_item",text="Altura (cm)",parent=0x210000},
+        [0x120000]={name="height_value",text="175",parent=0x210000},
+        [0x130000]={name="playerName",text="Ibrahim Salah",parent=0x220000}},function(values,snapshot,parents,window)
+        local flow,ready=a11y.menu_flow_name,a11y.search_results_ready
+        local focus,item,info=a11y.native_list_has_focus,a11y.native_list_selection,a11y.native_information_context
+        local oldinfo=a11y.native_tree_cache;a11y.native_tree_cache=nil
+        snapshot.windows[1].primary=true;snapshot.windows[1].priority=1
+        snapshot.windows[1].cursor_detail={status="resolved",selected=0x230000}
+        local background={address=0x990000,root=0x880000,enabled=true,primary=false,priority=1}
+        snapshot.windows[#snapshot.windows+1]=background
+        snapshot.members[0x130000].owners={{address=background.address,root=background.root,enabled=true,parents={[0x130000]=background.root}}}
+        a11y.menu_flow_name="/MLNegoSearchResultMemberList.json";a11y.search_results_ready=true
+        a11y.native_list_has_focus=function()return true end
+        a11y.native_list_selection={widget=0x130000,text="Ibrahim Salah"}
+        a11y.native_information_context=function()return nil end
+        local nodes=a11y.review_nodes_in_window({a11y.ui_model.nodes[host.memory.hex(0x110000)],
+            a11y.ui_model.nodes[host.memory.hex(0x130000)]},a11y.current_review_window())
+        assert(#nodes==1 and nodes[1].address==0x110000)
+        assert(not a11y.native_list_in_window(window))
+        local packet=assert(a11y.visualization_packet())
+        assert(#packet.fields==1 and packet.fields[1].text=="Altura: 1,75 metros")
+        local old=a11y.ui_model.nodes[host.memory.hex(0x130000)]
+        assert(not a11y.content_review_allowed({key=old.key,identity=old.identity,text=old.text,owner=a11y.native_owner_token()}))
+        a11y.menu_flow_name,a11y.search_results_ready=flow,ready
+        a11y.native_list_has_focus,a11y.native_list_selection,a11y.native_information_context=focus,item,info
+        a11y.native_tree_cache=oldinfo
+    end)
+end)
+check("off-selection redraws keep model text without rebinding every list entry",function()
+    with_rendered_panel({[0x110000]={name="field_item",text="Selecionado",parent=0x210000},
+        [0x120000]={name="other_item",text="Outro",parent=0x220000}},function(values,snapshot)
+        snapshot.selection_only=true;snapshot.selected_members={[0x110000]=true}
+        local question=a11y.capture_question_panel;local count=0
+        a11y.capture_question_panel=function(...)count=count+1;return question(...)end
+        emit_ui_text(0x120000,"Novo texto do fundo")
+        assert(a11y.ui_model.nodes[host.memory.hex(0x120000)].text=="Novo texto do fundo")
+        assert(count==0,"background repaint must stay passive")
+        emit_ui_text(0x110000,"Seleção nova");assert(count>0,"current selection still needs full semantics")
+        a11y.capture_question_panel=question
+    end)
+end)
+end
+
+if modular_state then
+check("foreground scope uses the highest input priority and rejects a real tie",function()
+    local snapshot=a11y.native_windows
+    a11y.native_windows={windows={{address=1,enabled=true,primary=true,priority=0},
+        {address=2,enabled=true,primary=true,priority=0},{address=3,enabled=true,primary=true,priority=2}}}
+    assert(a11y.primary_input_window().address==3)
+    a11y.native_windows.windows[2].priority=2
+    local window,ambiguous=a11y.primary_input_window()
+    assert(not window and ambiguous)
+    a11y.native_windows=snapshot
+end)
+end
+
+if modular_state then
+check("generic patterns group future panels through real exploration with numeric field order",function()
+    with_rendered_panel({[0x110000]={name="title",text="Informações",parent=0x900000},
+        [0x120000]={name="leagueLabel",text="Liga",parent=0x210000},
+        [0x130000]={name="leagueValue",text="Liga de teste",parent=0x210000},
+        [0x140000]={name="item_2",text="Passe",parent=0x220000},
+        [0x150000]={name="value_2",text="80",parent=0x220000},
+        [0x160000]={name="item_10",text="Força",parent=0x230000},
+        [0x170000]={name="value_10",text="66",parent=0x230000},
+        [0x180000]={name="setName",text="Peso (kg)",parent=0x240000},
+        [0x190000]={name="text",text="70",parent=0x240000}},function(values,snapshot)
+        snapshot.windows[1].primary=true;snapshot.windows[1].cursor_detail={status="resolved",selected=0x250000}
+        local item=a11y.native_list_selection;a11y.native_list_selection=nil
+        with_render_harness(function(output)
+            for n=1,4 do assert(a11y.read_visualization("next"));a11y.flush_native_speech(100000+n) end
+            assert(#output==4)
+            assert(output[1][1]=="Informações. Passe: 80")
+            assert(output[2][1]=="Força: 66","2 must precede 10 numerically")
+            local texts={};for _,entry in ipairs(output)do texts[entry[1]]=true end
+            assert(texts["Liga: Liga de teste"] and texts["Peso (kg): 70"])
+        end)
+        a11y.native_list_selection=item
+    end)
+end)
+check("generic component patterns reject mixed competing values and prevent split-value fallback",function()
+    with_rendered_panel({[0x110000]={name="setName",text="Peso",parent=0x210000},
+        [0x120000]={name="text",text="70",parent=0x210000},
+        [0x130000]={name="textWord",text="80",parent=0x210000}},function(values,snapshot)
+        snapshot.windows[1].primary=true;snapshot.windows[1].cursor_detail={status="resolved",selected=0x250000}
+        local item=a11y.native_list_selection;a11y.native_list_selection=nil
+        local packet=assert(a11y.visualization_packet(true));assert(#packet.fields==0)
+        with_render_harness(function(output)
+            assert(a11y.read_visualization("next"));a11y.flush_native_speech(100000)
+            assert(#output==1 and output[1][1]=="Campos ainda não associados.")
+        end)
+        a11y.native_list_selection=item
+    end)
+end)
+check("future pattern registration invalidates grammar cache without changes to collectors",function()
+    assert(not a11y.group_field_pattern("metric_3"))
+    a11y.register_group_pattern({id="test-future-metric",value_pattern="^metric_(%d+)$",labels={"metricLabel_%s"}})
+    assert(a11y.group_field_pattern("metric_3").labels[1]=="metricLabel_3")
+    with_rendered_panel({[0x110000]={name="metricLabel_3",text="Campo futuro",parent=0x210000},
+        [0x120000]={name="metric_3",text="42",parent=0x210000}},function(values,snapshot,parents,window)
+        local fields=a11y.read_group_fields(window,window.root)
+        assert(#fields==1 and fields[1].text=="Campo futuro: 42")
+    end)
+end)
+check("queued field is rejected after native player header changes even when the value stays equal",function()
+    with_rendered_panel({[0x110000]={name="playerName",text="Mohamed Salah",parent=0x900000},
+        [0x120000]={name="weightLabel",text="Peso",parent=0x210000},
+        [0x130000]={name="weightValue",text="70",parent=0x210000}},function(values,snapshot)
+        snapshot.windows[1].primary=true;snapshot.windows[1].cursor_detail={status="resolved",selected=0x250000}
+        local item=a11y.native_list_selection;a11y.native_list_selection=nil
+        with_render_harness(function(output)
+            assert(a11y.read_visualization("next"))
+            values[0x110000]="Ibrahim Salah"
+            a11y.flush_native_speech(100000);assert(#output==0)
+        end)
+        a11y.native_list_selection=item
+    end)
+end)
+end
+
+if modular_state then
+check("current player fields survive background names retained in the same native window root",function()
+    local entries={[0x110000]={name="playerName",text="Mohamed Salah",parent=0x500000},
+        [0x120000]={name="height_item",text="Altura (cm)",parent=0x510000},
+        [0x130000]={name="height_value",text="175",parent=0x510000},
+        [0x140000]={name="weight_item",text="Peso (kg)",parent=0x520000},
+        [0x150000]={name="weight_value",text="70",parent=0x520000},
+        [0x160000]={name="league_item",text="Liga",parent=0x530000},
+        [0x170000]={name="league_value",text="Liga atual",parent=0x530000},
+        [0x180000]={name="teamRole_item",text="Função",parent=0x540000},
+        [0x190000]={name="teamRole_value",text="Titular",parent=0x540000},
+        [0x1a0000]={name="teamRole_item",text="Função",parent=0x610000},
+        [0x1b0000]={name="teamRole_value",text="Reserva antiga",parent=0x610000}}
+    for n=1,15 do entries[0x200000+n*0x1000]={name="playerName",text="Outro Salah " .. n,parent=0x600000} end
+    with_rendered_panel(entries,function(values,snapshot,parents,window)
+        for _,at in ipairs({0x510000,0x520000,0x530000,0x540000})do parents[at]=0x500000 end
+        parents[0x500000],parents[0x600000]=window.root,window.root;parents[0x610000]=0x600000
+        local fields,status=a11y.read_group_fields(window,window.root)
+        assert(#fields==4 and status.entity=="Mohamed Salah" and not status.ambiguous)
+        local texts={};for _,field in ipairs(fields)do texts[field.text]=true end
+        assert(texts["Altura: 1,75 metros"] and texts["Peso: 70 quilos"] and texts["Liga: Liga atual"])
+        assert(texts["Função: Titular"] and not texts["Função: Reserva antiga"])
+    end)
+end)
+check("queue keeps latest pending navigation and skips old expensive validators",function()
+    local allowed=a11y.visualization_allowed;local validations=0
+    a11y.visualization_allowed=function()validations=validations+1;return true end
+    with_render_harness(function(output)
+        for n=1,100 do
+            speak("Clube " .. n,true,true,"review:" .. n)
+            a11y.native_speech_queue[a11y.native_speech_last].visualization={index=n}
+        end
+        a11y.flush_native_speech(100000)
+        assert(#output==1 and output[1][1]=="Clube 100")
+        assert(validations==1,"discarded navigation must not rescan old records")
+    end)
+    a11y.visualization_allowed=allowed
+end)
+check("navigation coalescing preserves current fragments and message entries without rearming old state",function()
+    local state={committed="current",speech_status="queued"}
+    local old={identity="review:old",native_list={state=state}}
+    local group={finished=false}
+    a11y.native_speech_queue={old,{identity="review:new",fragment_group=group},
+        {identity="review:new",fragment_group=group},{identity="message",text="Pergunta"}}
+    a11y.native_speech_first,a11y.native_speech_last=1,4
+    assert(a11y.coalesce_pending_navigation()==1 and old.superseded)
+    assert(not a11y.native_speech_queue[2].superseded and not a11y.native_speech_queue[3].superseded)
+    assert(not a11y.native_speech_queue[4].superseded and not group.finished)
+    a11y.update_speech_state(old,"discarded")
+    assert(state.committed=="current" and state.speech_status=="queued")
+    a11y.native_speech_queue={};a11y.native_speech_first,a11y.native_speech_last=1,0
+end)
+end
+
+if modular_state then
+check("coalesced field exploration still announces the native group title actually delivered",function()
+    with_rendered_panel({[0x110000]={name="title",text="Dados",parent=0x900000},
+        [0x120000]={name="height_item",text="Altura (cm)",parent=0x210000},
+        [0x130000]={name="height_value",text="175",parent=0x210000},
+        [0x140000]={name="weight_item",text="Peso (kg)",parent=0x220000},
+        [0x150000]={name="weight_value",text="70",parent=0x220000}},function()
+        local old=a11y.visualization_review;a11y.visualization_review=nil
+        with_render_harness(function(output)
+            a11y.read_visualization("next");a11y.read_visualization("next")
+            a11y.flush_native_speech(100000)
+            assert(#output==1 and output[1][1]=="Dados. Peso: 70 quilos")
+        end)
+        a11y.visualization_review=old
+    end)
+end)
+check("focus callback batches memory only for its own invocation and releases early returns",function()
+    local work,metric=a11y.render_read_work,a11y.render_metric
+    local read=a11y.menu_read;local base=upvalue(module.init,"process_base_u64")
+    set_upvalue(module.init,"process_base_u64",ffi.cast("uint64_t",0x140000000))
+    a11y.render_read_work,a11y.render_metric=nil,nil
+    local called=0
+    a11y.menu_read=function()called=called+1;assert(a11y.render_read_work and a11y.render_metric);return nil end
+    module.on_ui_focus_event({},0,{rcx=string.rep("\0",8),rdx=string.rep("\0",8)})
+    assert(called>0 and not a11y.render_read_work and not a11y.render_metric)
+    a11y.render_read_work,a11y.render_metric,a11y.menu_read=work,metric,read
+    set_upvalue(module.init,"process_base_u64",base)
+end)
+end
+
+if modular_state then
+check("targeted instrumentation preserves nil results and arguments without protected calls",function()
+    local old=a11y.targeted_profile
+    a11y.targeted_profile={}
+    local calls=0
+    local wrapped=a11y.profile_targeted("test-phase",function(first,second)
+        calls=calls+1;assert(first=="input" and second==false)
+        return nil,"middle",nil,42
+    end)
+    local function verify(...)
+        assert(select("#",...)==4)
+        local a,b,c,d=...
+        assert(a==nil and b=="middle" and c==nil and d==42)
+    end
+    verify(wrapped("input",false))
+    assert(calls==1 and a11y.targeted_profile["test-phase"].calls==1)
+    a11y.flush_targeted_profile();assert(next(a11y.targeted_profile)==nil)
+    a11y.targeted_profile=old
+end)
+check("exploration scope trace uses captured ownership without native memory reads and stays bounded",function()
+    local read=a11y.menu_read
+    local last,count=a11y.exploration_trace_last,a11y.exploration_trace_count
+    a11y.menu_read=function()error("diagnostic must not read native memory")end
+    a11y.exploration_trace_last,a11y.exploration_trace_count=nil,0
+    local window={address=0x110000,root=0x120000,enabled=true,cursor_detail={status="resolved",selected=0x130000}}
+    local snapshot={windows={window},members={}}
+    a11y.trace_exploration_scope(snapshot,window,false,nil)
+    a11y.trace_exploration_scope(snapshot,window,false,nil)
+    assert(a11y.exploration_trace_count==1)
+    for n=1,60 do window.root=n;a11y.trace_exploration_scope(snapshot,window,false,nil) end
+    assert(a11y.exploration_trace_count==48)
+    a11y.menu_read=read
+    a11y.exploration_trace_last,a11y.exploration_trace_count=last,count
+end)
+end
+
+if modular_state then
+check("large native list reuses metadata index and polls only current selection",function()
+    local saved={}
+    local function replace(name,value)saved[name]=a11y[name];a11y[name]=value end
+    local old,enabled,keyboard=a11y.native_windows,a11y.native_windows_enabled,a11y.keyboard_window
+    local snapshot={members={},selected_members={[0x110000]=true},selection_only=true}
+    snapshot.members[0x110000]={active=true}
+    for n=1,5000 do snapshot.members[0x200000+n*16]={active=true} end
+    a11y.native_windows,a11y.native_windows_enabled,a11y.keyboard_window=snapshot,true,nil
+    replace("native_list_has_focus",function()return false end)
+    replace("automatic_carousel_focus",function()return nil end)
+    replace("read_context_state",function()return {kind="list"}end)
+    replace("native_information_context",function()return nil end)
+    replace("control_for_widget",function()return nil end)
+    replace("native_presentation_ready",function()return true end)
+    replace("on_observed_ui_text",function()end)
+    local visits,reads=0,0
+    replace("carousel_automatic_node",function()visits=visits+1;return true end)
+    replace("read_native_rendered_text",function(at)assert(at==0x110000);reads=reads+1;return "Current","Current",0 end)
+    a11y.poll_native_texts();local index=snapshot.text_index
+    for n=1,119 do a11y.poll_native_texts();assert(snapshot.text_index==index) end
+    assert(reads==120 and visits==120,"selection cost must not scale with 5000 background entries")
+    assert(index.others==nil,"automatic selection must not build the background index")
+    local others=a11y.native_text_index(snapshot).others
+    assert(#others==5001,"explicit collection must still find the background")
+    snapshot.selected_members={[0x110000]=true}
+    assert(a11y.native_text_index(snapshot).others==others,"moving selection must reuse the background index")
+    local item=a11y.native_list_selection
+    a11y.native_list_selection={widget=0x110000};snapshot.selected_members={}
+    a11y.native_list_has_focus=function()return true end
+    a11y.poll_native_texts()
+    assert(reads==121 and visits==121,"native list hook must avoid background polling even without cursor captions")
+    replace("active_native_standings",function() return true end)
+    snapshot.selected_members={[0x110000]=true}
+    a11y.poll_native_texts()
+    assert(reads==121 and visits==121,"standings cells belong to the selected-row reader")
+    a11y.native_list_selection=item
+    for name,value in pairs(saved) do a11y[name]=value end
+    a11y.native_windows,a11y.native_windows_enabled,a11y.keyboard_window=old,enabled,keyboard
+    print("LIST_TEXT_INDEX frames=120 background=5000 candidate-visits=" .. visits .. " caption-reads=" .. reads)
+end)
+check("batched ownership checks preserve masks and detect mutations and unreadable memory",function()
+    local source=ffi.new("uint8_t[4096]")
+    local address=0x400000
+    ffi.cast("uint64_t*",source+16)[0]=0x12345678
+    ffi.cast("uint32_t*",source+32)[0]=263
+    local checks={{address=address+16,kind="u64",value=0x12345678},
+        {address=address+32,kind="u32",value=7,mask=7}}
+    for n=1,128 do
+        local offset=64+n*8
+        ffi.cast("uint64_t*",source+offset)[0]=n
+        checks[#checks+1]={address=address+offset,kind="u64",value=n}
+    end
+    local batches=a11y.compile_header_batches(checks);assert(#batches==1)
+    local old=a11y.safe_memory_read;local old_unpack=host.memory.unpack;local reads=0
+    host.memory.unpack=function(kind,bytes)return ffi.cast("const uint32_t*",bytes)[0]end
+    a11y.safe_memory_read=function(at,size)reads=reads+1;return ffi.string(source+(at-address),size)end
+    assert(a11y.header_batches_live(batches) and reads==1)
+    print("HEADER_BATCH checks=" .. #checks .. " protected-copies=" .. reads)
+    ffi.cast("uint32_t*",source+32)[0]=7;assert(a11y.header_batches_live(batches))
+    ffi.cast("uint32_t*",source+32)[0]=6;assert(not a11y.header_batches_live(batches))
+    ffi.cast("uint32_t*",source+32)[0]=7
+    ffi.cast("uint64_t*",source+16)[0]=0x999999;assert(not a11y.header_batches_live(batches))
+    a11y.safe_memory_read=function()return nil end;assert(not a11y.header_batches_live(batches))
+    a11y.safe_memory_read=old;host.memory.unpack=old_unpack
+end)
+check("exploration reads shown parent content behind action child and rejects detached or hidden parent",function()
+    with_rendered_panel({[0x110000]={name="playerName",text="Mohamed Salah",parent=0x900000},
+        [0x120000]={name="height_item",text="Altura (cm)",parent=0x210000},
+        [0x130000]={name="height_value",text="175",parent=0x210000},
+        [0x140000]={name="weight_item",text="Peso (kg)",parent=0x220000},
+        [0x150000]={name="weight_value",text="70",parent=0x220000}},function(values,snapshot,parents,owner)
+        local reader=a11y.menu_read;local oldbase=upvalue(module.init,"process_base_u64")
+        local base=0x140000000;set_upvalue(module.init,"process_base_u64",ffi.cast("uint64_t",base))
+        local cache=a11y.native_tree_cache;a11y.native_tree_cache=nil
+        owner.enabled=false;owner.impl=0xa10000;owner.presentation_root=0x900000
+        snapshot.windows[1]=owner
+        for _,member in pairs(snapshot.members)do member.active=false;member.presented=true;for _,o in ipairs(member.owners)do o.enabled=false end end
+        local input={address=0xa20000,impl=0xa30000,root=0xa40000,enabled=true,primary=true,priority=4,
+            owned_roots={0xa40000},cursor_detail={status="resolved",selected=0xa50000}}
+        snapshot.windows[#snapshot.windows+1]=input
+        local attached,shown=true,true
+        a11y.menu_read=function(at,kind)
+            if at==input.address+0x88 then return input.impl end
+            if at==input.impl+9 then return 1 end
+            if at==input.address or at==owner.address then return base+0x2700000 end
+            if at==base+0x2700050 then return base+0xe43510 end
+            if at==base+0x2700058 then return base+0xe43450 end
+            if at==input.address+0x38 then return attached and owner.address or 0 end
+            if at==owner.address+0x88 then return owner.impl end
+            if at==owner.impl+9 then return 0 end
+            if at==owner.impl+0x98 then return owner.root end
+            if at==owner.impl+0x90 then return owner.presentation_root end
+            if at==owner.root+0xc then return shown and 7 or 0 end
+            for node in pairs(values)do if at==node+0xc then return 7 end end
+            return nil
+        end
+        local packet=assert(a11y.visualization_packet(true))
+        assert(packet.window==owner.address and packet.entity=="Mohamed Salah" and #packet.fields==2)
+        assert(packet.fields[1].text=="Altura: 1,75 metros" and packet.fields[2].text=="Peso: 70 quilos")
+        with_render_harness(function(output)
+            local state=a11y.visualization_review;a11y.visualization_review=nil
+            assert(a11y.read_visualization("first"));a11y.flush_native_speech(100000)
+            assert(#output==1 and output[1][1]=="Altura: 1,75 metros")
+            a11y.visualization_review=state
+        end)
+        attached=false;assert(not a11y.visualization_packet(true),"unrelated background must remain excluded")
+        attached=true;shown=false;assert(not a11y.visualization_packet(true),"hidden parent must remain excluded")
+        a11y.menu_read,a11y.native_tree_cache=reader,cache
+        set_upvalue(module.init,"process_base_u64",oldbase)
+    end)
+end)
+end
+
+if modular_state then
+check("selection dispatch tries native list once and preserves direct engine callers",function()
+    local saved={}
+    local function replace(name,value)saved[name]=a11y[name];a11y[name]=value end
+    replace("selected_message_packet",function()return nil end)
+    replace("main_menu_choice_active",function()return false end)
+    replace("native_information_context",function()return nil end)
+    replace("active_native_standings",function()return nil end)
+    replace("poll_structured_record",function()return false end)
+    replace("engine_focus_candidates",function()return nil end)
+    local attempts=0
+    replace("process_native_list_focus",function()attempts=attempts+1;return false end)
+    assert(not a11y.dispatch_native_selection(false,false) and attempts==1)
+    a11y.process_engine_focus(false);assert(attempts==2)
+    for name,value in pairs(saved)do a11y[name]=value end
+end)
+check("native read transaction preserves returns and discards caches between calls",function()
+    local old=a11y.render_read_work;a11y.render_read_work=nil
+    local first
+    local function probe()
+        first=a11y.render_read_work;assert(first)
+        return a11y.native_read_phase(function()assert(a11y.render_read_work==first);return nil,"ok",nil end)
+    end
+    local function verify(...)assert(select("#",...)==3);local x,y,z=...;assert(x==nil and y=="ok" and z==nil)end
+    verify(a11y.native_read_phase(probe));assert(not a11y.render_read_work)
+    a11y.native_read_phase(function()assert(a11y.render_read_work and a11y.render_read_work~=first)end)
+    assert(not a11y.render_read_work)
+    a11y.render_read_work=old
+end)
+check("speech validators share a bounded read phase which never reaches Prism IPC",function()
+    local validator=a11y.speech_entry_allowed
+    local work=a11y.render_read_work
+    local calls=0
+    with_render_harness(function(output)
+        local backend=a11y.prism_functions.backend_speak
+        a11y.prism_functions.backend_speak=function(...)
+            assert(a11y.render_read_work==nil,"native bytes must be released before Prism")
+            return backend(...)
+        end
+        a11y.speech_entry_allowed=function(entry)
+            calls=calls+1;assert(a11y.render_read_work)
+            return validator(entry)
+        end
+        speak("Teste de fase",true,true,"phase-test")
+        a11y.flush_native_speech(100000)
+        assert(calls==1 and #output==1)
+        a11y.prism_functions.backend_speak=backend
+    end)
+    a11y.speech_entry_allowed,a11y.render_read_work=validator,work
+end)
+check("large same-component field families use parent index without repeated peer scans",function()
+    local items,parent_reads={},0
+    for n=1,200 do
+        local parent=0x400000+n*0x100
+        for _,spec in ipairs({{"setName","Atributo " .. n},{"abilityNumber",tostring(40+n%60)}})do
+            local item={name=spec[1],text=spec[2],address=parent+#items,scope="panel",parents={}}
+            item.node={name=item.name,text=item.text,address=item.address}
+            setmetatable(item,{__index=function(_,key)if key=="parent" then parent_reads=parent_reads+1;return parent end end})
+            items[#items+1]=item
+        end
+    end
+    local fields=a11y.resolve_group_fields(items,{allow_shared=true})
+    assert(#fields==200)
+    assert(parent_reads<5000,"matching immediate siblings must not scan every peer: " .. parent_reads)
+    print("GROUP_PARENT_INDEX fields=" .. #fields .. " parent-lookups=" .. parent_reads)
+end)
+end
 
 print("FLACCESS_OFFLINE_TESTS_OK checks=" .. checks ..
     " pt=" .. a11y.text_asset_counts.pt ..

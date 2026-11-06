@@ -60,22 +60,95 @@ function shared.a11y.carousel_automatic_node(address,carousel)
         or not shared.a11y.record_contains({address=address},carousel.window,carousel.window.root)
 end
 
-function shared.a11y.poll_native_texts(review)
+function shared.a11y.exhibition_carousel_ok(address)
     local snapshot=shared.a11y.native_windows
-    if not shared.a11y.native_windows_enabled or not snapshot or not snapshot.members then return end
-    local carousel=not review and shared.a11y.automatic_carousel_focus()
-    local selected,others={},{}
-    for address,member in pairs(snapshot.members) do
-        if (member.active or member.presented) and shared.a11y.carousel_automatic_node(address,carousel) then
-            others[#others+1]=address
-            if snapshot.selected_members and snapshot.selected_members[address] then selected[#selected+1]=address end
+    local base=tonumber(shared.process_base_u64)
+    local member=base and snapshot and snapshot.members and snapshot.members[tonumber(address)]
+    if not member or not member.active or shared.a11y.read_context_state().kind=="dialog" then return false end
+    local exhibition,carousel
+    for _,window in ipairs(snapshot.windows or {}) do
+        if window.enabled then
+            if shared.a11y.native_dialog_window(window) then return false end
+            local vt=shared.a11y.menu_read(window.address,"u64")
+            if vt==base+0x26833e8 and shared.a11y.menu_read(vt+0x18,"u64")==base+0xaeb1e0 then
+                exhibition=window
+            elseif vt==base+0x271c8c8 and shared.a11y.menu_read(vt+0x18,"u64")==base+0xc93200 then
+                for _,owner in ipairs(member.owners or {}) do
+                    if owner.enabled and owner.address==window.address then carousel=window;break end
+                end
+            end
         end
     end
-    table.sort(selected);table.sort(others)
+    return exhibition and carousel and exhibition.slot==carousel.slot or false
+end
+
+-- Snapshot metadata only. Rebuild on graph/selection replacement, never once
+-- per frame. Live captions and native presentation still get checked at use.
+function shared.a11y.native_text_index(snapshot,selection_only)
+    local previous=snapshot.text_index
+    if previous and previous.members==snapshot.members and previous.selection==snapshot.selected_members
+            and (selection_only or previous.others) then return previous end
+    local index={selected={},members=snapshot.members,selection=snapshot.selected_members}
+    if previous and previous.members==snapshot.members then index.others=previous.others
+    end
+    if not selection_only and not index.others then
+        index.others={}
+        for address,member in pairs(snapshot.members or {}) do
+            if member.active or member.presented then index.others[#index.others+1]=address end
+        end
+        table.sort(index.others)
+    end
+    for address in pairs(snapshot.selected_members or {}) do
+        local member=snapshot.members[address]
+        if member and (member.active or member.presented) then index.selected[#index.selected+1]=address end
+    end
+    table.sort(index.selected)
+    snapshot.text_index=index
+    return index
+end
+
+function shared.a11y.poll_native_texts(review)
+    local snapshot=shared.a11y.native_windows
+    if review and snapshot and snapshot.selection_only then
+        -- Explicit exploration discovers current details, including new children
+        -- not present in the selection graph retained during fast navigation.
+        shared.a11y.window_graph_dirty=true
+        shared.a11y.native_windows_frame=nil
+        shared.a11y.poll_native_windows()
+        snapshot=shared.a11y.native_windows
+    end
+    if not shared.a11y.native_windows_enabled or not snapshot or not snapshot.members then return end
+    local carousel=not review and shared.a11y.automatic_carousel_focus()
+    local automatic=not review and not shared.a11y.keyboard_window
+        and shared.a11y.read_context_state().kind~="dialog"
+    local standings=automatic and shared.a11y.active_native_standings()
+    local list_focus=automatic and not standings and shared.a11y.native_list_has_focus()
+    local list_item=list_focus and shared.a11y.native_list_selection
+    local restrict=automatic and (shared.a11y.selection_diagnostic or snapshot.selection_only or list_focus or standings)
+    local selected,others
+    if standings then
+        selected={}
+    elseif list_item and list_item.widget then
+        selected={list_item.widget}
+    else
+        local index=shared.a11y.native_text_index(snapshot,restrict)
+        selected,others=index.selected,index.others
+    end
+    -- A proven list owns automatic selection. Background values are fetched
+    -- on explicit exploration; command captions remain current automatically.
+    if restrict and (#selected>0 or list_focus or standings) then
+        local context={}
+        for _,pair in ipairs(snapshot.command_bar and snapshot.command_bar.pairs or {}) do
+            if pair.caption and snapshot.members[pair.caption] then context[#context+1]=pair.caption end
+        end
+        others=context
+    elseif not others then
+        others=shared.a11y.native_text_index(snapshot).others
+    end
     local work,seen={},{}
     for index,address in ipairs(selected) do
         if not review and index>24 then break end
-        work[#work+1],seen[address]=address,true
+        if shared.a11y.carousel_automatic_node(address,carousel) then work[#work+1],seen[address]=address,true end
     end
     -- A proven field's value can live inside a delegate outside the cursor's
     -- indexed label subtree. Refresh it together with its selected label.
@@ -89,13 +162,14 @@ function shared.a11y.poll_native_texts(review)
         end
     end
     local cursor=shared.a11y.native_text_scan_cursor or 0
-    for index=1,(review and #others or math.min(24,#others)) do
+    local background_budget=not review and not restrict and #others>128 and #selected>0 and 8 or 24
+    for index=1,(review and #others or math.min(background_budget,#others)) do
         local address=others[(cursor+index-1)%#others+1]
-        if not seen[address] then work[#work+1]=address;seen[address]=true end
+        if not seen[address] and shared.a11y.carousel_automatic_node(address,carousel) then work[#work+1]=address;seen[address]=true end
     end
-    shared.a11y.native_text_scan_cursor=#others>0 and (cursor+24)%#others or 0
+    shared.a11y.native_text_scan_cursor=#others>0 and (cursor+background_budget)%#others or 0
     local player_scope=false
-    if not review then
+    if not review and not standings then
         for address in pairs(snapshot.selected_members or {}) do
             local node=shared.a11y.ui_model and shared.a11y.ui_model.nodes[memory.hex(address)]
             if node and node.name=="playerName" then player_scope=true;break end
@@ -286,6 +360,11 @@ end
 function shared.a11y.poll_presented_texts()
     if shared.a11y.keyboard_window then return end
     local owner=shared.a11y.native_owner_token()
+    local snapshot=shared.a11y.native_windows
+    if snapshot and snapshot.light and shared.a11y.presentation_seen_owner==owner
+            and shared.a11y.read_context_state().kind~="dialog" and shared.a11y.active_native_standings() then
+        return
+    end
     if shared.a11y.presentation_seen_owner==owner and shared.a11y.presentation_seen
             and shared.frame-(shared.a11y.presentation_frame or -10000)<6 then return end
     shared.a11y.presentation_frame=shared.frame
@@ -370,6 +449,7 @@ function shared.a11y.apply_menu_flow(data, name)
     if not metadata or metadata:match('"type"%s*:%s*"(.-)"') ~= "menu" then return false end
     local home = metadata:match('"mark"%s*:%s*"(.-)"') == "home"
     if shared.a11y.menu_flow_name ~= name or shared.a11y.dashboard_review ~= home then
+        shared.a11y.search_loading_notice,shared.a11y.search_results_ready=nil,nil
         shared.a11y.menu_flow_name = name
         shared.a11y.dashboard_review, shared.a11y.dashboard_texts = home, {}
         log("[FLAccess] menu-flow=" .. tostring(name) .. " review=" .. tostring(home))
@@ -676,7 +756,7 @@ function shared.a11y.poll_loading(now)
     if not at then shared.a11y.loading_notice=nil;return end
     local state=shared.a11y.loading_notice
     if not state or state.address~=at then state={address=at,started=now};shared.a11y.loading_notice=state end
-    if not state.announced and now-state.started>=3000 then
+    if not state.announced then
         local before=shared.a11y.native_speech_last
         shared.speak(shared.a11y.ui_language=="pt" and "Carregando tela" or "Loading screen",true,true,"loading:" .. at .. ":" .. state.started)
         for index=before+1,shared.a11y.native_speech_last do shared.a11y.native_speech_queue[index].loading_state=state end
@@ -891,7 +971,9 @@ function shared.a11y.engine_focus_speech(text,node)
     if node and node.name and node.name:lower():find("playername",1,true) then
         spoken=shared.a11y.output_speech_text(spoken)
         for _,detail in ipairs(shared.a11y.player_row_details(node)) do
-            spoken=spoken .. ", " .. detail.text
+            local label=detail.name=="allOver" and shared.a11y.player_search_context()
+                and (shared.a11y.ui_language=="pt" and "Força geral: " or "Overall rating: ") or ""
+            spoken=spoken .. ", " .. label .. detail.text
         end
         local section=shared.a11y.player_component_section(node)
         local prefixes=shared.a11y.ui_language=="pt"

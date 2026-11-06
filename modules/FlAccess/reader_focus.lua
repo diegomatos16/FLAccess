@@ -377,6 +377,11 @@ end
 -- Unknown components retain the compatibility path; no route guesses a label.
 function shared.a11y.dispatch_native_selection(modal_blocked,dialog_active)
     local route,handled="compatibility",false
+    local list_already_tried=false
+    local function try_list()
+        list_already_tried=true
+        return shared.a11y.process_native_list_focus(modal_blocked)
+    end
     if shared.a11y.selected_message_packet() then
         shared.a11y.poll_selected_message();route,handled="selected-message",true
     elseif not dialog_active and shared.a11y.main_menu_choice_active(shared.a11y.main_menu_choice_state) then
@@ -384,11 +389,17 @@ function shared.a11y.dispatch_native_selection(modal_blocked,dialog_active)
         -- compatibility focus announcement would interrupt its own tooltip.
         route,handled="main-menu-choice",true
     elseif not dialog_active and not shared.a11y.native_information_context()
-            and shared.a11y.process_native_list_focus(modal_blocked) then
+            and shared.a11y.active_native_standings() then
+        -- The mapped table owns club selection even while generic list
+        -- renderers retain a caption from the same or a previous row.
+        shared.a11y.poll_structured_record(modal_blocked)
+        route,handled="standings",true
+    elseif not dialog_active and not shared.a11y.native_information_context()
+            and try_list() then
         route,handled="native-list",true
     elseif not dialog_active and shared.a11y.poll_structured_record(modal_blocked) then
         route,handled="structured-record",true
-    elseif shared.a11y.process_engine_focus(modal_blocked) then
+    elseif shared.a11y.process_engine_focus(modal_blocked,list_already_tried) then
         route,handled="native-focus",true
     end
     local identity=tostring(shared.a11y.native_owner_token()) .. ":" .. route
@@ -433,7 +444,10 @@ function shared.scan_current_ui_focus(modal_focus_blocked, dialog_active)
                         or shared.a11y.game_plan_context ==
                             "Basic Tactical Settings"))
                 and shared.readable(entry.address + 0xf0, 0x30) then
-            local bytes = memory.read(entry.address + 0xf0, 0x30)
+            local bytes = shared.a11y.safe_memory_read(entry.address + 0xf0, 0x30)
+            -- Unmapped/released widgets have no focus. Do not let Sider copy
+            -- their address directly into a Lua string after a permission check.
+            if not bytes or #bytes~=0x30 then bytes=string.rep("\0",0x30) end
             local state = shared.ui_focus_state[widget_key] or {}
             local activated = shared.ui_focus_activated[widget_key] or {}
             shared.ui_focus_state[widget_key] = state
@@ -443,8 +457,7 @@ function shared.scan_current_ui_focus(modal_focus_blocked, dialog_active)
                 local value = memory.unpack(
                     "u32", bytes:sub(relative + 1, relative + 4))
                 local native = shared.a11y.native_windows
-                if index == 1 and native and native.cursor_members
-                        and native.cursor_members[tonumber(entry.address)] then
+                if index == 1 and shared.a11y.cursor_contains(native,tonumber(entry.address)) then
                     value = native.selected_members[tonumber(entry.address)] and 1 or 0
                 end
                 if value == 1 and state[index] ~= 1 then
@@ -452,7 +465,7 @@ function shared.scan_current_ui_focus(modal_focus_blocked, dialog_active)
                 end
                 state[index] = value
                 local primary_flag = memory.unpack("u32", bytes:sub(0x15, 0x18)) == 1
-                if native and native.cursor_members and native.cursor_members[tonumber(entry.address)] then
+                if shared.a11y.cursor_contains(native,tonumber(entry.address)) then
                     primary_flag = native.selected_members[tonumber(entry.address)] or false
                 end
                 if value == 1 and not shared.a11y.is_command_legend(widget_key, primary_flag, command_owners) then

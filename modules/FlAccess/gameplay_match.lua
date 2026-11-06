@@ -61,6 +61,162 @@ function shared.possession(actor)
     if not keeper or keeper>=22 then return false,"keeper-index-unavailable",false end
     return keeper==actor,"keeper=" .. tostring(keeper),true,keeper
 end
+
+-- The match HUD resolves live lineup slots through TeamPlayerInfo, then
+-- indexes the two match rosters in the current game data service.
+function shared.match_roster_data()
+    local service=shared.ptr(shared.blob(shared.base+0x3705e10,8),0)
+    return service and shared.ptr(shared.blob(service+0x50,8),0)
+end
+
+local function native_name(bytes)
+    local name=bytes and bytes:match("^([^%z]+)%z")
+    if name and not name:find("%c") and name:find("%S") then return name end
+end
+
+local function roster_player(data,side,slot)
+    local record=data and shared.blob(data+0x35960+0x1308+(side*40+slot)*0x188,0x148)
+    local id=shared.uint(record,0x30)
+    local flags=shared.uint(record,0x144)
+    if not id or id==0 or not flags or flags>=0x80000000 then return end
+    return native_name(record:sub(0x39,0x75)),id
+end
+
+local function team_name(data,side,expected)
+    local bytes=shared.blob(data+0x35960+0x138+side*0x690,0x4a)
+    local encoded=shared.uint(bytes,0)
+    if encoded and tonumber(expected)==math.floor(encoded/0x4000)%0x20000 then
+        return native_name(bytes:sub(5))
+    end
+end
+
+function shared.ball_holder_name(keeper,include_number)
+    if not shared.match_names_supported or not keeper or keeper<0 or keeper>=22 then return end
+    local side=math.floor(keeper/11)
+    local world=shared.ptr(shared.blob(shared.base+shared.GAME_ROOT,8),0)
+    local roster_link=world and world+0x1978+side*0x28
+    local roster=shared.ptr(shared.blob(roster_link,8),0)
+    local lineup=shared.blob(roster,0x30)
+    if shared.uint(lineup,0)~=side then return end
+    local slot=shared.uint(lineup,4+(keeper%11)*4)
+    if not slot or slot>=40 then return end
+    local data=shared.match_roster_data()
+    local name,id=roster_player(data,side,slot)
+    local number
+    if name and include_number and shared.shirt_number_supported then
+        -- The substitution panel uses this roster count and number array for
+        -- playerName_number_str, indexed by the same slot as the name.
+        local team=data+0x35960+0x138+side*0x690
+        local count=shared.blob(team+0x426,1)
+        if count and slot<count:byte(1)%128 then
+            local bytes=shared.blob(team+0x29a+slot*2,2)
+            if bytes then
+                local value=bytes:byte(1)+256*bytes:byte(2)
+                if value>=1 and value<=99 then number=value end
+            end
+        end
+    end
+    if name and shared.blob(roster,0x30)==lineup and shared.ptr(shared.blob(roster_link,8),0)==roster
+            and shared.ptr(shared.blob(shared.base+shared.GAME_ROOT,8),0)==world
+            and shared.match_roster_data()==data then
+        return name,side .. ":" .. id,number
+    end
+end
+
+function shared.m.scoreboard_text(stats,home,away,pt)
+    if not stats or not home or not away then return end
+    local minutes,home_score,away_score=stats.clock_minutes,stats.home_score,stats.away_score
+    for _,value in ipairs({minutes or false,home_score or false,away_score or false}) do
+        if type(value)~="number" or value<0 or value>255 or value%1~=0 then return end
+    end
+    local unit=pt and (minutes==1 and "minuto" or "minutos") or (minutes==1 and "minute" or "minutes")
+    return string.format("%d %s. %s %d, %s %d.",minutes,unit,home,home_score,away,away_score)
+end
+
+function shared.m.announce_scoreboard(ctx,pause)
+    if not shared.match_names_supported then return false end
+    local stats=match.stats()
+    local playing,reason=shared.match_state(stats)
+    if not playing and not (pause and reason=="paused") then return false end
+    local data=shared.match_roster_data()
+    if not data then return false end
+    local home=team_name(data,0,ctx.home_team)
+    local away=team_name(data,1,ctx.away_team)
+    if shared.match_roster_data()~=data then return false end
+    local reader=ctx.flaccess.reader
+    return shared.speak_match(ctx,shared.m.scoreboard_text(stats,home,away,reader.a11y.ui_language=="pt"),true,pause)
+end
+
+function shared.poll_substitutions(ctx,now,playing)
+    local reader=ctx.flaccess.reader
+    if not playing or not shared.match_names_supported or not reader.speak
+            or reader.overlay_visible or reader.sider_overlay_visible
+            or now<(shared.next_substitution_poll or 0) then return end
+    shared.next_substitution_poll=now+125
+    local world=shared.ptr(shared.blob(shared.base+shared.GAME_ROOT,8),0)
+    local data=shared.match_roster_data()
+    if not world or not data then return end
+    if shared.substitution_world~=world or shared.substitution_data~=data then
+        shared.substitution_world,shared.substitution_data=world,data
+        shared.substitution_teams={}
+    end
+    local pt=reader.a11y.ui_language=="pt"
+    for side=0,1 do
+        local link=world+0x1978+side*0x28
+        local roster=shared.ptr(shared.blob(link,8),0)
+        local lineup=shared.blob(roster,0x30)
+        if shared.uint(lineup,0)==side then
+            local state=shared.substitution_teams[side]
+            if not state then state={};shared.substitution_teams[side]=state end
+            if lineup==state.lineup then
+                state.candidate=nil
+            else
+                local slots,count={},0
+                for position=0,10 do
+                    local slot=shared.uint(lineup,4+position*4)
+                    if slot<40 and not slots[slot] then slots[slot]=true;count=count+1
+                    elseif slot~=255 and slot~=4294967295 then count=0;break end
+                end
+                if count>=7 and lineup==state.candidate
+                        and shared.ptr(shared.blob(link,8),0)==roster then
+                    local exits,entries={},{}
+                    if state.slots then
+                        for slot=0,39 do
+                            if state.slots[slot] and not slots[slot] then exits[#exits+1]=slot
+                            elseif slots[slot] and not state.slots[slot] then entries[#entries+1]=slot end
+                        end
+                    end
+                    local accepted=true
+                    if #exits>0 and #exits==#entries then
+                        local out_names,in_names={},{}
+                        for index,slot in ipairs(exits) do
+                            out_names[index]=roster_player(data,side,slot)
+                            in_names[index]=roster_player(data,side,entries[index])
+                            if not out_names[index] or not in_names[index] then accepted=false;break end
+                        end
+                        if accepted then
+                            local expected=side==0 and ctx.home_team or ctx.away_team
+                            local name=team_name(data,side,expected)
+                                or (pt and (side==0 and "Mandante" or "Visitante") or (side==0 and "Home" or "Away"))
+                            local out_prefix=pt and (#exits==1 and "Sai " or "Saem ") or "Off: "
+                            local in_prefix=pt and (#entries==1 and "Entra " or "Entram ") or "On: "
+                            local caption=name .. ". " .. out_prefix .. table.concat(out_names,", ")
+                                .. ". " .. in_prefix .. table.concat(in_names,", ") .. "."
+                            if shared.match_roster_data()==data and shared.blob(roster,0x30)==lineup then
+                                accepted=shared.speak_match(ctx,caption,false)
+                            else
+                                accepted=false
+                            end
+                        end
+                    end
+                    if accepted then state.lineup,state.slots,state.candidate=lineup,slots,nil end
+                else
+                    state.candidate=count>=7 and lineup or nil
+                end
+            end
+        end
+    end
+end
 function shared.m.goal_centers(attack_sign,length)
     if attack_sign~=1 and attack_sign~=-1 then return nil end
     return {-attack_sign*length,0,0},{attack_sign*length,0,0}

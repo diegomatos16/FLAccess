@@ -21,11 +21,13 @@ function shared.a11y.menu_read(address,kind)
     end
     local bytes
     if cache and shared.a11y.safe_memory_read==shared.a11y.production_memory_read then
-        local block=math.floor(address/128)*128
-        if address+size<=block+128 and shared.readable(block,128) then
+        -- One readable OS page per synchronous phase, shared by every scalar
+        -- type. Never crosses a page boundary or survives a frame/Prism call.
+        local block=math.floor(address/4096)*4096
+        if address+size<=block+4096 and shared.readable(block,4096) then
             cache.blocks=cache.blocks or {}
             local data=cache.blocks[block]
-            if data==nil then data=shared.a11y.safe_memory_read(block,128) or false;cache.blocks[block]=data end
+            if data==nil then data=shared.a11y.safe_memory_read(block,4096) or false;cache.blocks[block]=data end
             if data then bytes=data:sub(address-block+1,address-block+size) end
         end
     end
@@ -233,19 +235,42 @@ function shared.a11y.cursor_member_live(address,window)
     return false
 end
 
-function shared.a11y.cached_cursor_subtree(root,cached)
+function shared.a11y.cached_cursor_subtree(root,cached,members_only)
     if not cached or not cached.evidence or cached.evidence.at_capacity or not cached.evidence.edges
             or not (cached.members[root] or cached.parents[root]) then return nil end
-    local members={}
-    for address in pairs(cached.members) do
-        local at,seen=address,{}
-        for _=1,64 do
-            if at==root then members[address]=true;break end
-            if not at or seen[at] then break end
-            seen[at]=true;at=cached.parents[at]
+    -- Index graph once, then visit only this selection's descendants.
+    -- Cached parent maps are immutable; callers receive a copy below.
+    if not cached.children then
+        cached.children={}
+        for child,parent in pairs(cached.parents) do
+            local children=cached.children[parent] or {}
+            cached.children[parent]=children;children[#children+1]=child
         end
     end
-    local parents={};for at,parent in pairs(cached.parents) do parents[at]=parent end
+    local members,seen={},{}
+    local parents=not members_only and {} or nil
+    local queue,depths,cursor={root},{0},1
+    while cursor<=#queue do
+        local at,depth=queue[cursor],depths[cursor];cursor=cursor+1
+        if not seen[at] then
+            seen[at]=true
+            if parents then parents[at]=cached.parents[at] end
+            if cached.members[at] then members[at]=true end
+            if depth<63 then
+                for _,child in ipairs(cached.children[at] or {}) do
+                    queue[#queue+1]=child;depths[#depths+1]=depth+1
+                end
+            end
+        end
+    end
+    if members_only then return members end
+    -- Ownership queries can also walk upward from the selected component.
+    local at=cached.parents[root]
+    for _=1,64 do
+        if not at or parents[at] then break end
+        parents[at]=cached.parents[at]
+        at=parents[at]
+    end
     return members,parents
 end
 
@@ -505,6 +530,15 @@ function shared.a11y.controlled_player_caption(node,snapshot,base)
     return result
 end
 
+function shared.a11y.cursor_contains(snapshot,address)
+    if not snapshot then return false end
+    if snapshot.cursor_members and snapshot.cursor_members[address] then return true end
+    for _,members in ipairs(snapshot.cursor_graphs or {}) do
+        if members[address] then return true end
+    end
+    return false
+end
+
 function shared.a11y.bind_controlled_player_captions(snapshot,base)
     for address in pairs(snapshot.controlled_selections or {}) do
         snapshot.selected_members[address],snapshot.cursor_members[address]=nil,nil
@@ -563,6 +597,24 @@ function shared.m.on_ui_focus_event(ctx,event_id,registers)
     if not entering and not leaving then return end
     if shared.a11y.menu_read(address,"u64") ~= base+0x27b5260 then return end
     shared.a11y.record_engine_focus(address,entering)
+end
+
+-- Native event dispatch also runs outside display_frame. Batch its scalar
+-- reads for this callback only, just as text setters do; Sider has no pcall.
+local observe_focus_event=shared.m.on_ui_focus_event
+function shared.m.on_ui_focus_event(ctx,event_id,registers)
+    local work,metric=shared.a11y.render_read_work,shared.a11y.render_metric
+    local started=tonumber(ffi.C.GetTickCount64())
+    if not work then shared.a11y.render_read_work={} end
+    if not metric then shared.a11y.render_metric={reads=0} end
+    observe_focus_event(ctx,event_id,registers)
+    local stats=shared.a11y.focus_hook_stats or {calls=0,ms=0,max_ms=0,reads=0}
+    local elapsed=tonumber(ffi.C.GetTickCount64())-started
+    stats.calls,stats.ms,stats.max_ms=stats.calls+1,stats.ms+elapsed,math.max(stats.max_ms,elapsed)
+    if not metric then stats.reads=stats.reads+(shared.a11y.render_metric.reads or 0) end
+    shared.a11y.focus_hook_stats=stats
+    if not work then shared.a11y.render_read_work=nil end
+    if not metric then shared.a11y.render_metric=nil end
 end
 
 function shared.a11y.record_engine_focus(address,entering)
@@ -722,8 +774,7 @@ function shared.a11y.engine_focus_candidates()
             or (node.name and node.name:match("_value") and not (row and row.is_control
                 and (row.native_field or row.structural or row.native_slider)))
             or (node.text and (node.text:match("^%d+$") or shared.a11y.empty_selection_caption(node.text)) and not value_member))
-        local cursor_scope=snapshot and snapshot.cursor_members
-        local cursor_allowed=not cursor_scope or not cursor_scope[tonumber(event.address)]
+        local cursor_allowed=not shared.a11y.cursor_contains(snapshot,tonumber(event.address))
             or snapshot.selected_members[tonumber(event.address)]
         if cursor_allowed and node and node.text and node.text ~= "" and not decoration
                 and shared.a11y.ui_node_matches_live(node)
@@ -770,6 +821,8 @@ function shared.a11y.engine_focus_candidates()
             end
             detail=labels==1
         end
+        if node.name=="noSetting" and shared.a11y.player_search_context()
+                and (node.text=="Desativar" or node.text=="Desativado" or node.text=="Disable" or node.text=="Disabled") then detail=true end
         if node.name=="description" or (node.name and node.name:match("^description_%d+$")) then
             local labels=0
             for _,other in ipairs(candidates) do
@@ -832,10 +885,10 @@ function shared.a11y.engine_focus_candidates()
     return candidates
 end
 
-function shared.a11y.process_engine_focus(modal_blocked)
+function shared.a11y.process_engine_focus(modal_blocked,list_already_tried)
     if shared.a11y.native_information_context() and not shared.a11y.keyboard_window
             and shared.a11y.read_context_state().kind~="dialog" then return true end
-    if shared.a11y.process_native_list_focus(modal_blocked) then return true end
+    if not list_already_tried and shared.a11y.process_native_list_focus(modal_blocked) then return true end
     local candidates=shared.a11y.engine_focus_candidates()
     if not candidates then return false end -- Existing adapters remain a fallback.
     if shared.a11y.keyboard_window then return true end
@@ -1316,39 +1369,53 @@ end
 -- Read-only equivalent of e4d1c0: ordered holder+78 tree, value at +40,
 -- filtering the Node kind at +88. Tree order, not pointer/visit order,
 -- defines the index consumed by the game's presentation code.
-function shared.a11y.holder_kind_nodes(holder,kind)
-    local head=shared.a11y.menu_read(holder+0x78,"u64")
-    if not head or head<0x10000 or shared.a11y.menu_read(head+0x19,"u8")~=1 then return nil end
-    local at=shared.a11y.menu_read(head+8,"u64")
+function shared.a11y.holder_kind_nodes(holder,kind,read)
+    read=read or shared.a11y.menu_read
+    local head=read(holder+0x78,"u64")
+    if not head or head<0x10000 or read(head+0x19,"u8")~=1 then return nil end
+    local at=read(head+8,"u64")
     local stack,seen,nodes,count={},{},{},0
     while (at and at~=head) or #stack>0 do
         while at and at~=head do
             if at<0x10000 or seen[at] or count>=256
-                    or shared.a11y.menu_read(at+0x19,"u8")~=0 then return nil end
+                    or read(at+0x19,"u8")~=0 then return nil end
             seen[at],count=true,count+1
             stack[#stack+1]=at
-            at=shared.a11y.menu_read(at,"u64")
+            at=read(at,"u64")
             if not at then return nil end
         end
         at=table.remove(stack)
-        local child=shared.a11y.menu_read(at+0x40,"u64")
-        if child and child>=0x10000 and shared.a11y.menu_read(child+0x88,"u32")==kind then
+        local child=read(at+0x40,"u64")
+        if child and child>=0x10000 and read(child+0x88,"u32")==kind then
             nodes[#nodes+1]=child
         end
-        at=shared.a11y.menu_read(at+0x10,"u64")
+        at=read(at+0x10,"u64")
         if not at then return nil end
     end
     return nodes
 end
 
-function shared.a11y.read_native_command_bar(base)
+function shared.a11y.read_native_command_bar(base,checks)
+    local read=shared.a11y.menu_read
+    if checks then
+        local read_scalar=read
+        read=function(address,kind,mask)
+            local value=read_scalar(address,kind)
+            if value==nil then
+                checks.incomplete=true
+            else
+                checks[#checks+1]={address=address,kind=kind,mask=mask,value=mask and value%(mask+1) or value}
+            end
+            return value
+        end
+    end
     -- e34b60 returns this typed singleton; e346e0 destroys +70 while hidden.
-    local address=shared.a11y.menu_read(base+0x36f98f0,"u64")
-    if not address or shared.a11y.menu_read(address,"u64")~=base+0x27b2668 then return nil end
-    local root=shared.a11y.menu_read(address+0x70,"u64")
-    if not root or shared.a11y.menu_read(root,"u64")~=base+0x27bae88
-            or shared.a11y.menu_read(address+0x1b9,"u8")~=0 then return nil end
-    local flags=shared.a11y.menu_read(root+0xc,"u32")
+    local address=read(base+0x36f98f0,"u64")
+    if not address or read(address,"u64")~=base+0x27b2668 then return nil end
+    local root=read(address+0x70,"u64")
+    if not root or read(root,"u64")~=base+0x27bae88
+            or read(address+0x1b9,"u8")~=0 then return nil end
+    local flags=read(root+0xc,"u32",7)
     -- GuideBar is presentation, not an input window. Its shown/enabled bits
     -- matter here; individual text nodes still pass the propagated-state gate.
     if not flags or flags%8~=7 then return nil end
@@ -1356,11 +1423,11 @@ function shared.a11y.read_native_command_bar(base)
     -- e3594d/e35969 and e35a77/e35a94 resolve the seven displayed
     -- icons at kind 19 indices 0..6 and captions at indices 7..13.
     -- The constructor's +90 arrays contain other templates/placeholders.
-    local texts=shared.a11y.holder_kind_nodes(root+0x98,0x13) or {}
+    local texts=shared.a11y.holder_kind_nodes(root+0x98,0x13,read) or {}
     for index=0,6 do
         local icon,caption=texts[index+1],texts[index+8]
-        if icon and caption and shared.a11y.menu_read(icon,"u64")==base+0x27b5260
-                and shared.a11y.menu_read(caption,"u64")==base+0x27b5260 then
+        if icon and caption and read(icon,"u64")==base+0x27b5260
+                and read(caption,"u64")==base+0x27b5260 then
             pairs[#pairs+1]={icon=icon,caption=caption,index=index}
         end
     end

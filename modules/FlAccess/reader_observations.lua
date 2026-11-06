@@ -36,7 +36,7 @@ function shared.a11y.on_observed_ui_text(widget,text,raw,registers,review)
     observed_node.raw_text=raw or text
     if shared.a11y.unresolved_format(text) then return end
     shared.a11y.poll_native_windows()
-    shared.a11y.record_dashboard_text(observed_node)
+    if not shared.a11y.selection_diagnostic or review then shared.a11y.record_dashboard_text(observed_node) end
     local main_state=shared.a11y.main_menu_choice_state
     local bound_main=observed_node.name=="text_item" and main_state
         and main_state.address==tonumber(widget)
@@ -52,6 +52,23 @@ function shared.a11y.on_observed_ui_text(widget,text,raw,registers,review)
         shared.a11y.capture_structural_control(widget,text)
         return
     end
+    local snapshot=shared.a11y.native_windows
+    local selected=snapshot and snapshot.selected_members or {}
+    local row=shared.a11y.control_for_widget(widget_key)
+    local current_value=row and row.label_widget and selected[tonumber(row.label_widget)]
+    local context=shared.a11y.read_context_state()
+    local name=observed_node.name or ""
+    local contextual=name=="question" or name=="eventMsg" or name=="text_contents"
+        or name=="messageBody" or name=="bodyText" or name=="title" or name=="text_title" or name=="headline"
+    if not review and snapshot and snapshot.selection_only and context.kind~="dialog"
+            and not selected[tonumber(widget)] and not current_value and not contextual then
+        -- Retain the actual text/name for future selection and exploration.
+        -- Off-selection redraws do not rebuild controls or publish focus.
+        shared.a11y.passive_text_observations=(shared.a11y.passive_text_observations or 0)+1
+        return
+    end
+    shared.a11y.active_text_observations=(shared.a11y.active_text_observations or 0)+1
+
     -- Input feedback is owned by the actual native input node. A retained
     -- textWord from the background is not an edit event.
     if observed_node.name == "padIcon" then return end

@@ -107,7 +107,19 @@ function shared.a11y.read_native_windows_snapshot(base)
     end
     shared.a11y.bind_presented_window_contexts(result,base)
     shared.a11y.bind_controlled_player_captions(result,base)
-    result.command_bar=shared.a11y.read_native_command_bar(base)
+    local primary,has_controls
+    for _,window in ipairs(result.windows) do
+        if window.enabled then
+            if #window.owned_roots>0 then has_controls=true end
+            if window.primary and window.vtable==base+0x266b9f0 and window.root==0 then primary=window end
+        end
+    end
+    result.match_menu_building=primary~=nil and not has_controls
+    local guide_checks=shared.a11y.safe_memory_read==shared.a11y.production_memory_read and {} or nil
+    result.command_bar=shared.a11y.read_native_command_bar(base,guide_checks)
+    if result.command_bar and guide_checks and not guide_checks.incomplete and #guide_checks>0 then
+        result.guide_batches=shared.a11y.compile_header_batches(guide_checks)
+    end
     if result.command_bar then
         local bar=result.command_bar
         local cached=shared.a11y.native_tree_cache and shared.a11y.native_tree_cache[bar.root]
@@ -152,11 +164,18 @@ function shared.a11y.read_native_windows(base)
         -- Root-keyed entries retain their six-frame expiry and fresh edge
         -- validation. Only an unresolved changed selection invalidates them.
         if reason=="layout" then shared.a11y.native_tree_cache=nil end
+        if reason=="guide" and shared.a11y.native_tree_cache and shared.a11y.native_windows
+                and shared.a11y.native_windows.command_bar then
+            shared.a11y.native_tree_cache[shared.a11y.native_windows.command_bar.root]=nil
+        end
         shared.a11y.window_graph_dirty=nil
         result=shared.a11y.read_native_windows_snapshot(base)
         if result then
             result.full_frame=shared.frame
             if shared.a11y.capture_window_headers then result.header_checks=shared.a11y.capture_window_headers(result,base) end
+            if shared.a11y.compile_header_batches and shared.a11y.safe_memory_read==shared.a11y.production_memory_read then
+                result.header_batches=shared.a11y.compile_header_batches(result.header_checks)
+            end
         end
     end
     shared.a11y.snapshot_tree_work=nil

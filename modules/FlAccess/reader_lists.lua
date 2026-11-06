@@ -64,25 +64,106 @@ function shared.a11y.list_cursor_unchanged(window,base)
         and (not selected or shared.a11y.menu_read(selected,"u64")==detail.selected_type)
 end
 
+-- Immutable expectations, fresh bytes at every validation. One protected RPM
+-- per touched page/span instead of a scalar call for every manager/header slot.
+function shared.a11y.compile_header_batches(checks)
+    if not checks then return nil end
+    local batches,by_page={},{}
+    local types={u64="uint64_t",u32="uint32_t",i32="int32_t",u16="uint16_t",u8="uint8_t"}
+    for _,check in ipairs(checks) do
+        local ctype=types[check.kind]
+        if not ctype then return nil end
+        local size=ffi.sizeof(ctype)
+        local page=math.floor(check.address/4096)*4096
+        if check.address+size>page+4096 then return nil end
+        local batch=by_page[page]
+        if not batch then batch={first=check.address,last=check.address+size,checks={}};by_page[page]=batch;batches[#batches+1]=batch end
+        batch.first,batch.last=math.min(batch.first,check.address),math.max(batch.last,check.address+size)
+        local bytes=not check.mask and ffi.string(ffi.new(ctype .. "[1]",check.value),size) or nil
+        batch.checks[#batch.checks+1]={address=check.address,size=size,kind=check.kind,mask=check.mask,value=check.value,bytes=bytes}
+    end
+    return batches
+end
+
+function shared.a11y.header_batches_live(batches)
+    for _,batch in ipairs(batches) do
+        local bytes=shared.a11y.safe_memory_read(batch.first,batch.last-batch.first)
+        if not bytes or #bytes~=batch.last-batch.first then return false end
+        for _,check in ipairs(batch.checks) do
+            local at=check.address-batch.first+1
+            local actual=bytes:sub(at,at+check.size-1)
+            if check.mask then
+                local value=tonumber(memory.unpack(check.kind,actual))
+                if not value or value%(check.mask+1)~=check.value then return false end
+            elseif actual~=check.bytes then return false end
+        end
+    end
+    return true
+end
+
+-- Selection authority is structural, independent of whether a translated
+-- caption happened to arrive through a list-render hook.
+function shared.a11y.proven_snapshot_cursor(snapshot,base)
+    if not snapshot or shared.a11y.keyboard_window or shared.a11y.read_context_state().kind=="dialog" then return false end
+    local selected_window
+    for _,window in ipairs(snapshot.windows or {}) do
+        if window.enabled then
+            if shared.a11y.native_dialog_window(window) then return false end
+            local detail=window.cursor_detail
+            if detail and detail.selected and detail.cursor_type==base+0x27c1ac0
+                    and (detail.status=="resolved" or detail.status=="shared-caption")
+                    and detail.graph_edges and detail.proof_root then
+                if selected_window then return false end
+                local cursor=shared.a11y.menu_read(window.root+0x190,"u64")
+                if cursor~=detail.cursor or shared.a11y.menu_read(cursor,"u64")~=detail.cursor_type
+                        or shared.a11y.menu_read(cursor+0x88,"u64")~=detail.parent
+                        or shared.a11y.menu_read(cursor+0x90,"u32")~=detail.group_index
+                        or shared.a11y.menu_child(detail.parent,detail.group_index)~=detail.group then return false end
+                -- Item movement inside this proven group is resolved below.
+                -- A new/missing graph edge still forces full discovery.
+                selected_window=window
+            end
+        end
+    end
+    return selected_window~=nil
+end
+
 function shared.a11y.refresh_list_snapshot(base,previous)
     if not previous or not previous.header_checks or not previous.full_frame then return nil,"initial" end
-    if shared.frame-previous.full_frame>=6 then return nil,"periodic" end
+    local selection_only=not shared.a11y.keyboard_window
+        and shared.a11y.read_context_state().kind~="dialog"
+        and (shared.a11y.proven_snapshot_cursor(previous,base) or shared.a11y.native_list_has_focus())
     if shared.a11y.window_graph_dirty then return nil,"layout" end
+    local period=6
+    -- MatchMenu can be registered while its root is still being built.
+    -- Header validation detects the root publication on the very next frame.
+    for _,window in ipairs(previous.windows) do
+        if window.primary and window.enabled and window.vtable==base+0x266b9f0 then period=24;break end
+    end
+    if not selection_only and shared.frame-previous.full_frame>=period then return nil,"periodic" end
     -- Pitch parameter captions use a separate native selection adapter.
     for _,window in ipairs(previous.windows or {}) do
         if window.enabled and window.vtable==base+0x261e0c8 then return nil,"parameter" end
         if window.enabled then
             for _,root in ipairs(window.owned_roots or {}) do
                 local cached=shared.a11y.native_tree_cache and shared.a11y.native_tree_cache[root]
-                if not cached or shared.frame-cached.frame>=6 then return nil,"periodic" end
+                if not cached or (not selection_only and shared.frame-cached.frame>=period) then return nil,"periodic" end
             end
         end
     end
-    for _,check in ipairs(previous.header_checks) do
+    if previous.header_batches then
+        if not shared.a11y.header_batches_live(previous.header_batches) then return nil,"ownership" end
+    else for _,check in ipairs(previous.header_checks) do
         local value=shared.a11y.menu_read(check.address,check.kind)
         if value==nil or (check.mask and value%(check.mask+1) or value)~=check.value then return nil,"ownership" end
+    end end
+    local bar
+    if previous.guide_batches then
+        if not shared.a11y.header_batches_live(previous.guide_batches) then return nil,"guide" end
+        bar=previous.command_bar
+    else
+        bar=shared.a11y.read_native_command_bar(base)
     end
-    local bar=shared.a11y.read_native_command_bar(base)
     if (bar and bar.address)~=(previous.command_bar and previous.command_bar.address)
             or (bar and bar.root)~=(previous.command_bar and previous.command_bar.root) then return nil,"guide" end
     for _,pair in ipairs(bar and bar.pairs or {}) do
@@ -94,8 +175,10 @@ function shared.a11y.refresh_list_snapshot(base,previous)
     end
     local result={};for key,value in pairs(previous) do result[key]=value end
     result.command_bar,result.light,result.light_same_cursor=bar,true,unchanged
+    result.selection_only=selection_only
     if unchanged then return result end
     result.windows,result.selected_members,result.cursor_members,result.cursor_proofs={},{},{},{}
+    result.cursor_graphs={}
     result.controlled_selections={}
     for _,old in ipairs(previous.windows) do
         local window={};for key,value in pairs(old) do window[key]=value end
@@ -105,6 +188,7 @@ function shared.a11y.refresh_list_snapshot(base,previous)
             if not cached then return nil,"layout" end
             local selected,detail=shared.a11y.menu_cursor_texts(window.root,base,cached)
             window.cursor_detail=detail
+            if not selected and detail and (detail.status=="missing-item" or detail.status=="missing-group") then return nil,"layout" end
             if selected then
                 if not detail.graph_edges then return nil,"layout" end
                 local proof={window=window,root=detail.proof_root,parents=detail.parents,edges=detail.graph_edges}
@@ -114,7 +198,7 @@ function shared.a11y.refresh_list_snapshot(base,previous)
                     result.cursor_proofs[address]=result.cursor_proofs[address] or {}
                     result.cursor_proofs[address][window.address]=proof
                 end
-                for address in pairs(cached.members) do result.cursor_members[address]=true end
+                result.cursor_graphs[#result.cursor_graphs+1]=cached.members
             end
         end
     end
@@ -285,7 +369,7 @@ function shared.a11y.native_list_has_focus()
     local snapshot=shared.a11y.native_windows
     local member=snapshot and snapshot.members and snapshot.members[item.widget]
     if not member or not member.active or not shared.a11y.native_presentation_ready(item.widget) then return false end
-    if snapshot.cursor_members and snapshot.cursor_members[item.widget]
+    if shared.a11y.cursor_contains(snapshot,item.widget)
             and not snapshot.selected_members[item.widget] then return false end
     return (not item.name or shared.a11y.widget_internal_name(item.widget)==item.name)
         and (not item.link or shared.a11y.ui_owner_link(item.widget)==item.link)
@@ -322,7 +406,7 @@ function shared.a11y.process_native_list_focus(modal_blocked)
     local snapshot=shared.a11y.native_windows
     local member=snapshot and snapshot.members and snapshot.members[item.widget]
     if not member or not member.active or not shared.a11y.native_presentation_ready(item.widget) then return false end
-    if snapshot.cursor_members and snapshot.cursor_members[item.widget]
+    if shared.a11y.cursor_contains(snapshot,item.widget)
             and not snapshot.selected_members[item.widget] then return false end
     if (item.name and shared.a11y.widget_internal_name(item.widget)~=item.name)
             or (item.link and shared.a11y.ui_owner_link(item.widget)~=item.link) then

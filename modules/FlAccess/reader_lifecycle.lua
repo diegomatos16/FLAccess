@@ -4,38 +4,92 @@ function component.install(ctx)
     assert(ctx.flaccess, "FLAccess core must load first")
     local shared = ctx.flaccess.reader
     assert(shared.stage == 15, "FLAccess reader: missing or reordered component lifecycle")
-function shared.a11y.overlay_text()
-    local s = shared.a11y.strings()
-    local tooltip = string.format(
-        s.tooltip_option,
-        shared.a11y.read_tooltips and s.yes or s.no)
-    local diagnostic = string.format(
-        s.diagnostic_option,
-        shared.a11y.diagnostic_mode and s.yes or s.no)
-    if shared.a11y.selected_option == 1 then
-        tooltip = "---> " .. tooltip .. " <---"
-    else
-        diagnostic = "---> " .. diagnostic .. " <---"
-    end
-    return table.concat({
-        string.format(s.title, shared.a11y.runtime_version),
-        s.menu_reading,
-        s.speech_output,
-        tooltip,
-        diagnostic,
-        "",
-        s.navigate_options,
-        s.change_option,
-        s.restore_defaults,
-        s.close_sider,
-        s.next_module,
-        s.previous_module,
-    }, "\n")
+local categories={
+    {label="menu_category",options={1,8,9,10,11}},
+    {label="announcement_category",options={3,4,21}},
+    {label="sounds_category",options={32,12,19,33,13,40,20,34,14,35,15,5,6,36,16,38,18,37,17}},
+    {label="diagnostics_category",options={2}},
+}
+local tts_options={[8]="voice",[9]="rate",[10]="pitch",[11]="volume"}
+local sound_options={[12]="ball",[13]="sidelines",[14]="own_goal",[15]="opponent_goal",
+    [16]="gotBall",[17]="LostBall",[18]="teamStillWithBall",[20]="endline"}
+local category_index,category_open=1,false
+
+local function category_controls(s)
+    if category_index==1 then return s.tts_controls end
+    if category_index==3 then return s.sound_controls end
+    return s.back_category
 end
 
-function shared.a11y.selected_option_text()
+function shared.a11y.overlay_text()
+    local s=shared.a11y.strings()
+    local lines={string.format(s.title,shared.a11y.runtime_version)}
+    local function add(text,selected)
+        lines[#lines+1]=selected and ("---> " .. text .. " <---") or text
+    end
+    local category=categories[category_index]
+    if category_open then
+        add(s[category.label])
+        if category_index==1 then add(s.speech_output) end
+        for _,option in ipairs(category.options) do
+            add(shared.a11y.selected_option_text(option),option==shared.a11y.selected_option)
+        end
+        add(s.navigate_options)
+        add(s.change_option)
+        add(s.restore_defaults)
+        add(category_controls(s))
+    else
+        for index,item in ipairs(categories) do add(s[item.label],index==category_index) end
+        add(s.navigate_categories)
+        add(s.enter_category)
+    end
+    add(s.close_sider)
+    add(s.next_module)
+    add(s.previous_module)
+    return table.concat(lines,"\n")
+end
+
+function shared.a11y.possession_option_text()
+    local pt=shared.a11y.ui_language=="pt"
+    local seconds=shared.a11y.possession_interval
+    if seconds==0 then return pt and "Jogador com a bola, desativado." or "Player with the ball off." end
+    if seconds==-1 then return pt and "Jogador com a bola, a cada troca." or "Player with the ball, on every change." end
+    if seconds==1 then return pt and "Jogador com a bola, a cada segundo." or "Player with the ball every second." end
+    return pt and ("Jogador com a bola, a cada " .. seconds .. " segundos.")
+        or ("Player with the ball every " .. seconds .. " seconds.")
+end
+
+function shared.a11y.possession_number_text()
+    if shared.a11y.ui_language=="pt" then
+        return shared.a11y.possession_number and "Jogador com a bola, nome e número da camisa." or "Jogador com a bola, só nome."
+    end
+    return shared.a11y.possession_number and "Player with the ball, name and shirt number." or "Player with the ball, name only."
+end
+
+function shared.a11y.selected_option_text(option)
     local s = shared.a11y.strings()
-    if shared.a11y.selected_option == 2 then
+    option=option or shared.a11y.selected_option
+    local tts=tts_options[option]
+    if tts=="voice" then return string.format(s.tts_voice,shared.a11y.tts_voice~="" and shared.a11y.tts_voice or s.tts_default) end
+    if tts then return string.format(s["tts_" .. tts],shared.a11y["tts_" .. tts]) end
+    local sound=sound_options[option]
+    if sound then return string.format(s.sound_level,s["sound_" .. sound],shared.core_context.gameplay.sound_levels[sound]) end
+    local toggle=sound_options[option-20]
+    if toggle then
+        local enabled=shared.core_context.gameplay.sound_enabled[toggle]~=false
+        return string.format(s.sound_toggle,s["sound_" .. toggle],enabled and s.sound_on or s.sound_off)
+    end
+    if option==19 then return string.format(s.ball_speed,shared.core_context.gameplay.ball_speed) end
+    if option==3 then return shared.a11y.possession_option_text() end
+    if option==4 then return shared.a11y.possession_number_text() end
+    if option==21 then return string.format(s.controlled_player,shared.a11y.controlled_player and s.sound_on or s.sound_off) end
+    if option==5 or option==6 then
+        local settings=shared.core_context.gameplay.tackle_settings
+        if not settings then return s.sound_unavailable end
+        if option==5 then return string.format(s.sound_toggle,s.sound_tackle,settings.enabled and s.sound_on or s.sound_off) end
+        return string.format(s.tackle_volume,math.floor(settings.volume*100+0.5))
+    end
+    if option==2 then
         return string.format(
             s.diagnostic_option,
             shared.a11y.diagnostic_mode and s.yes or s.no)
@@ -50,6 +104,7 @@ function shared.m.overlay_on(ctx)
 end
 
 function shared.m.show(ctx)
+    category_open=false
     shared.overlay_visible = true
     shared.pending_message_text = nil
     shared.pending_message_key = nil
@@ -64,7 +119,7 @@ function shared.m.show(ctx)
     shared.speak(string.format(
         s.opened,
         shared.a11y.runtime_version,
-        shared.a11y.selected_option_text()))
+        s[categories[category_index].label]))
 end
 
 function shared.m.hide(ctx)
@@ -97,17 +152,52 @@ function shared.m.key_down(ctx, vkey)
         shared.sider_overlay_visible = false
         return
     end
-    if vkey == shared.a11y.previous_option_key then
-        shared.a11y.selected_option = shared.a11y.selected_option - 1
-        if shared.a11y.selected_option < 1 then
-            shared.a11y.selected_option = shared.a11y.option_count
+    local category=categories[category_index]
+    if not category_open then
+        if vkey==shared.a11y.previous_option_key or vkey==shared.a11y.next_option_key then
+            local step=vkey==shared.a11y.previous_option_key and -1 or 1
+            category_index=(category_index-1+step)%#categories+1
+            shared.speak(s[categories[category_index].label])
+        elseif vkey==0x0d or vkey==shared.a11y.next_value_key then
+            category_open=true
+            shared.a11y.selected_option=category.options[1]
+            local speech=category_index==1 and (s.speech_output .. ". ") or ""
+            shared.speak(s[category.label] .. ". " .. speech .. shared.a11y.selected_option_text()
+                .. ". " .. s.navigate_options .. ". " .. s.change_option .. ". "
+                .. category_controls(s))
         end
-        shared.speak(shared.a11y.selected_option_text())
         return
-    elseif vkey == shared.a11y.next_option_key then
-        shared.a11y.selected_option = shared.a11y.selected_option + 1
-        if shared.a11y.selected_option > shared.a11y.option_count then
-            shared.a11y.selected_option = 1
+    end
+    if vkey==0x35 and category_index==1 then
+        local before=shared.a11y.native_speech_last
+        shared.speak(s.tts_sample,true,true)
+        if shared.a11y.native_speech_last>before then
+            shared.a11y.native_speech_queue[shared.a11y.native_speech_last].tts_preview=true
+        end
+        return
+    end
+    if vkey==0x35 and category_index==3 then
+        local option=shared.a11y.selected_option
+        shared.core_context.gameplay.sound_preview_request=sound_options[option] or sound_options[option-20]
+            or (option==19 and "ball" or "tackle")
+        return
+    end
+    if vkey==0x08 or vkey==0x35 then
+        if category_index==3 then
+            shared.core_context.gameplay.sound_preview_request=nil
+            shared.core_context.gameplay.sound_preview_stop=true
+        end
+        category_open=false
+        shared.speak(s[category.label] .. ". " .. s.navigate_categories .. ". " .. s.enter_category)
+        return
+    end
+    if vkey == shared.a11y.previous_option_key or vkey == shared.a11y.next_option_key then
+        local step=vkey==shared.a11y.previous_option_key and -1 or 1
+        for index,option in ipairs(category.options) do
+            if option==shared.a11y.selected_option then
+                shared.a11y.selected_option=category.options[(index-1+step)%#category.options+1]
+                break
+            end
         end
         shared.speak(shared.a11y.selected_option_text())
         return
@@ -118,7 +208,61 @@ function shared.m.key_down(ctx, vkey)
         return
     end
 
-    if shared.a11y.selected_option == 2 then
+    local option=shared.a11y.selected_option
+    local tts=tts_options[option]
+    local sound=sound_options[option]
+    local toggle=sound_options[option-20]
+    local step=vkey==shared.a11y.previous_value_key and -1 or 1
+    local reset=vkey==shared.a11y.restore_key
+    if option==21 then
+        local a11y=shared.a11y
+        a11y.controlled_player=not reset and not a11y.controlled_player
+        shared.save_config_values(a11y,"controlled_player",tostring(a11y.controlled_player))
+        shared.speak(a11y.selected_option_text())
+        return
+    end
+    if toggle then
+        local enabled=shared.core_context.gameplay.sound_enabled
+        enabled[toggle]=reset or enabled[toggle]==false
+        shared.save_config_values(shared.a11y,"sound_" .. toggle .. "_enabled",enabled[toggle] and "1" or "0")
+        shared.speak(shared.a11y.selected_option_text())
+        return
+    end
+    if option==19 then
+        local gameplay=shared.core_context.gameplay
+        gameplay.ball_speed=reset and 100 or math.max(25,math.min(200,gameplay.ball_speed+step*25))
+        shared.save_config_values(shared.a11y,"ball_speed",tostring(gameplay.ball_speed))
+        shared.speak(shared.a11y.selected_option_text())
+        return
+    end
+    if tts then
+        local a11y=shared.a11y
+        local key="tts_" .. tts
+        if tts=="voice" then
+            local voices=a11y.tts_voices()
+            local current=0
+            for index,voice in ipairs(voices) do
+                if voice.name==a11y.tts_voice then current=index;break end
+            end
+            local voice=not reset and voices[(current+step)%(#voices+1)]
+            a11y.tts_voice=voice and voice.name or ""
+        else
+            local default=tts=="volume" and 100 or 50
+            a11y[key]=reset and default or math.max(tts=="volume" and 5 or 0,math.min(100,a11y[key]+step*5))
+        end
+        if a11y.prism_backend_name=="SAPI" then a11y.apply_tts(a11y.prism_backend) end
+        shared.save_config_values(a11y,key,tostring(a11y[key]))
+        shared.speak(a11y.selected_option_text())
+        return
+    end
+    if sound then
+        local levels=shared.core_context.gameplay.sound_levels
+        levels[sound]=reset and 100 or math.max(0,math.min(shared.core_context.gameplay.sound_level_max,levels[sound]+step*5))
+        shared.save_config_values(shared.a11y,"sound_" .. sound,tostring(levels[sound]))
+        shared.speak(shared.a11y.selected_option_text())
+        return
+    end
+    if option == 2 then
         local enabled = vkey ~= shared.a11y.restore_key and not shared.a11y.diagnostic_mode
         if not shared.a11y.set_diagnostic(enabled, "Sider panel") then
             shared.speak(s.diagnostic_failed)
@@ -130,6 +274,41 @@ function shared.m.key_down(ctx, vkey)
         if shared.a11y.diagnostic_mode then
             shared.speak(s.diagnostic_file)
         end
+        return
+    end
+    if shared.a11y.selected_option == 3 then
+        local seconds=5
+        if vkey~=shared.a11y.restore_key then
+            local step=vkey==shared.a11y.previous_value_key and -1 or 1
+            seconds=(shared.a11y.possession_interval+step)%12
+            if seconds==11 then seconds=-1 end
+        end
+        shared.a11y.possession_interval=seconds
+        ctx.flaccess.gameplay.next_possession_sample=nil
+        shared.a11y.save_config()
+        shared.speak(shared.a11y.possession_option_text())
+        return
+    end
+    if shared.a11y.selected_option == 4 then
+        shared.a11y.possession_number=vkey~=shared.a11y.restore_key and not shared.a11y.possession_number
+        shared.a11y.save_config()
+        shared.speak(shared.a11y.possession_number_text())
+        return
+    end
+    if shared.a11y.selected_option==5 or shared.a11y.selected_option==6 then
+        local settings=shared.core_context.gameplay.tackle_settings
+        if settings then
+            if shared.a11y.selected_option==5 then
+                settings.enabled=vkey==shared.a11y.restore_key or not settings.enabled
+                shared.save_config_values(shared.a11y,"tackle_enabled",settings.enabled and "1" or "0")
+            else
+                local step=vkey==shared.a11y.previous_value_key and -5 or 5
+                local percent=math.floor(settings.volume*100+0.5)
+                settings.volume=vkey==shared.a11y.restore_key and 0.30 or math.max(0,math.min(shared.core_context.gameplay.sound_level_max,percent+step))/100
+                shared.save_config_values(shared.a11y,"tackle_volume",tostring(settings.volume))
+            end
+        end
+        shared.speak(shared.a11y.selected_option_text())
         return
     end
 
@@ -248,7 +427,7 @@ function shared.m.on_sider_overlay_content(ctx, module_name, text, visible)
 
     -- Our own panel is already announced by m.show, which also preserves
     -- compatibility with an unmodified Sider.
-    if module_name == "FLAccess.lua" then
+    if module_name == "FLAccess.lua" or module_name == "FlAccess\\reader_lifecycle.lua" then
         shared.a11y.sider_overlay_text_by_module[module_name] = text
         shared.a11y.last_sider_overlay_module = module_name
         return
@@ -392,6 +571,7 @@ function shared.m.context_reset(ctx)
     shared.a11y.render_metric,shared.a11y.render_stats=nil,nil
     shared.a11y.render_read_work,shared.a11y.structured_record_announced,shared.a11y.prism_recovery_after=nil,nil,nil
     shared.a11y.loading_notice,shared.a11y.selected_message_announced=nil,nil
+    shared.a11y.search_loading_notice,shared.a11y.search_results_ready=nil,nil
     shared.a11y.main_navigation_probe,shared.a11y.main_navigation_last,shared.a11y.main_navigation_log_count=nil,nil,0
     shared.a11y.main_menu_choice_state,shared.a11y.main_menu_tooltip_choice,shared.a11y.main_menu_delivery=nil,nil,nil
     shared.a11y.assignment_monitor,shared.a11y.assignment_delivered,shared.a11y.assignment_attempt=nil,nil,0
