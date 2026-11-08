@@ -235,6 +235,7 @@ function shared.a11y.competition_fixture()
         end
     end
     if not panel then return end
+    local owner=primary.address .. ":" .. panel.address
 
     -- The native panel writes identical copies for different layouts.
     local roles={teamName="teams",teamName_copy_0="teams",teamName_copy_1="teams",
@@ -248,15 +249,47 @@ function shared.a11y.competition_fixture()
             for _,item in ipairs(items) do
                 if not shared.a11y.empty_selection_caption(item.text)
                         and shared.a11y.group_member_live(item.address,panel,root) then
-                    if values[role] and values[role]~=item.text then return end
+                    if values[role] and values[role]~=item.text then return nil,owner end
                     values[role]=item.text
                 end
             end
         end
     end
-    if not values.teams then return end
+    if not values.teams then return nil,owner end
     local text=values.round and (values.round .. ". " .. values.teams) or values.teams
-    return {text=text,signature=primary.address .. ":" .. panel.address .. ":" .. text}
+    return {text=text,signature=owner .. ":" .. text},owner
+end
+
+function shared.a11y.poll_competition_fixture(now_ms)
+    if shared.core_context and shared.core_context.match_playing then
+        shared.a11y.fixture_notice=nil
+        return
+    end
+    if now_ms<(shared.a11y.fixture_poll_after or 0) then return end
+    shared.a11y.fixture_poll_after=now_ms+125
+    local fixture,owner=shared.a11y.competition_fixture()
+    if not owner then shared.a11y.fixture_notice=nil;return end
+    local state=shared.a11y.fixture_notice
+    if not state or state.owner~=owner then
+        state={owner=owner}
+        shared.a11y.fixture_notice=state
+    end
+    if not fixture then state.observed=nil;return end
+    if state.observed~=fixture.signature then state.observed=fixture.signature;return end
+    if state.signature~=fixture.signature then
+        state={owner=owner,observed=fixture.signature,signature=fixture.signature,status="pending"}
+        shared.a11y.fixture_notice=state
+    end
+    if state.status~="pending" or now_ms<(state.retry_after or 0) then return end
+    local prefix=shared.a11y.ui_language=="pt" and "Próxima partida. " or "Next match. "
+    local before=shared.a11y.native_speech_last
+    shared.speak(prefix .. fixture.text,false,nil,"competition-fixture:" .. fixture.signature)
+    for index=before+1,shared.a11y.native_speech_last do
+        local entry=shared.a11y.native_speech_queue[index]
+        entry.competition_fixture=fixture.signature
+        entry.fixture_notice={state=state}
+        state.status="queued"
+    end
 end
 
 function shared.a11y.collect_buffer_entries()
@@ -867,6 +900,7 @@ function shared.a11y.capture_pending_modal_button(key, entry, offset, edge)
     local eligible = context.question and entry and offset == 0x104
         and key ~= context.message_key and shared.is_modal_button(entry.text)
         and entry.text ~= "Sim" and entry.text ~= "Não"
+        and (entry.text~="OK" or not shared.a11y.ok_caption_only(entry.address))
         and entry.last_seen >= context.started_frame
         and (not previous or previous.text ~= entry.text or fresh)
     shared.a11y.pending_modal_button_text = eligible and entry.text or nil

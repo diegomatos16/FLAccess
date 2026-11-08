@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <time.h>
+#include <algorithm>
 #include <vector>
 #include <string>
 #include <map>
@@ -2721,7 +2722,8 @@ void module_overlay_on(module_t *m, char **text, char **image_path, struct layou
     }
 }
 
-void module_overlay_content(module_t *m, const char *source, const char *text, bool visible)
+void module_overlay_content(module_t *m, const char *source, const char *text, bool visible,
+                            bool help_requested = false)
 {
     if (m->evt_overlay_content != 0) {
         EnterCriticalSection(&_cs);
@@ -2732,7 +2734,8 @@ void module_overlay_content(module_t *m, const char *source, const char *text, b
         lua_pushstring(L, source ? source : "");
         lua_pushstring(L, text ? text : "");
         lua_pushboolean(L, visible);
-        if (lua_pcall(L, 4, 0, 0) != LUA_OK) {
+        lua_pushboolean(L, help_requested);
+        if (lua_pcall(L, 5, 0, 0) != LUA_OK) {
             const char *err = luaL_checkstring(L, -1);
             logu_("[%d] lua ERROR from module_overlay_content: %s\n", GetCurrentThreadId(), err);
             lua_pop(L, 1);
@@ -7831,6 +7834,25 @@ LRESULT CALLBACK sider_keyboard_proc(int code, WPARAM wParam, LPARAM lParam)
 
         if (_overlay_on) {
             //logu_("sider_keyboard_proc: wParam=%p, lParam=%p\n", wParam, lParam);
+            // Ctrl+F1 still reaches the active module as its original F1 shortcut.
+            if (_config->_lua_enabled && wParam == VK_F1 && GetKeyState(VK_CONTROL) >= 0
+                    && _curr_overlay_m != _modules.end()) {
+                module_t *active = *_curr_overlay_m;
+                auto listener = std::find_if(_modules.begin(), _modules.end(),
+                    [](module_t *module) { return module->evt_overlay_content != 0; });
+                if (listener != _modules.end()) {
+                    if ((lParam & 0xc0000000) == 0) {
+                        const char *text = _last_overlay_content_module == active
+                            ? _last_overlay_content_text : "";
+                        char *source = (char*)Utf8::unicodeToUtf8(active->filename->c_str());
+                        for (auto *module : _modules) {
+                            module_overlay_content(module, source, text, true, true);
+                        }
+                        Utf8::free(source);
+                    }
+                    return 1;
+                }
+            }
             // deliver keyboard event to module
             if (_config->_lua_enabled && ((lParam & 0x80000000) == 0)) {
                 if (_curr_overlay_m != _modules.end()) {

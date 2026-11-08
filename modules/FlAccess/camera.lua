@@ -1,4 +1,4 @@
--- Camera/body listener math plus legacy screen projection for unmapped views.
+-- Field-aligned listener math plus legacy screen projection for unmapped views.
 -- CAMERA/INFO contains a view-projection matrix, not an orthonormal listener pose.
 local defaults = {}
 defaults[0] = [=[; Native ID 0; UI name not yet verified. Data only.
@@ -184,6 +184,28 @@ function m.listener_frame(raw,origin,id,body_forward)
     frame.right,frame.up,frame.forward=right,{0,1,0},forward
     frame.listener=true
     return frame
+end
+function m.field_frame(raw,origin,id,attack_sign)
+    if id==7 or id==8 or id==9 then
+        if attack_sign~=1 and attack_sign~=-1 then return nil,"camera-attack-direction-unavailable" end
+        local frame,why=m.listener_frame(nil,origin,id,{attack_sign,0,0})
+        if frame then frame.orientation="field-attack" end
+        return frame,why
+    end
+    if id and id>=1 and id<=6 then
+        local frame,why=m.listener_frame(raw,origin,id)
+        if not frame then return nil,why end
+        -- Screen axes tell us which side of the pitch this view faces.
+        -- Snap to pitch axes so camera tracking cannot rotate the bearings.
+        if math.abs(frame.right[1])<0.5 or math.abs(frame.forward[3])<0.5 then
+            return nil,"camera-lateral-axis-unavailable"
+        end
+        frame.right={frame.right[1]>0 and 1 or -1,0,0}
+        frame.forward={0,0,frame.forward[3]>0 and 1 or -1}
+        frame.orientation="field-lateral"
+        return frame
+    end
+    return m.frame(raw,origin,id)
 end
 function m.project(frame,target)
     if type(frame)~="table" or not vector(target) then return nil end

@@ -391,6 +391,35 @@ function component.install(ctx)
             if #candidates>0 then encountered[name]=true end
             return #candidates==1 and candidates[1] or nil
         end
+        local base=tonumber(shared.process_base_u64)
+        local vt=shared.a11y.menu_read(window.address,"u64")
+        local caption=unique("itemName")
+        if base and vt==base+0x25b84a8 and caption
+                and (caption.text=="Posse de bola" or caption.text=="Possession" or caption.text=="Ball Possession" or caption.text=="Ball possession") then
+            local home,away=unique("valueHome"),unique("valueAway")
+            if shared.a11y.detail_reads_allowed and home and away and not ambiguous then
+                local teams=shared.a11y.collect_record_nodes(window,window.root,function(name)
+                    return name=="teamName_left" or name=="teamName_right"
+                end)
+                local function team(name,fallback)
+                    local items=teams[name]
+                    return items and #items==1 and not shared.a11y.empty_selection_caption(items[1].text)
+                        and items[1].text or fallback
+                end
+                local function percentage(text)
+                    local number=tonumber(text:match("^%s*(%d+)%s*%%?%s*$"))
+                    return number and number<=100 and (number .. "%") or nil
+                end
+                local home_percent,away_percent=percentage(home.text),percentage(away.text)
+                if home_percent and away_percent then
+                    fields[1]=caption.text .. ". " .. team("teamName_left",pt and "Mandante" or "Home")
+                        .. " " .. home_percent .. ". " .. team("teamName_right",pt and "Visitante" or "Away") .. " " .. away_percent
+                end
+            end
+            local identity="match-possession:" .. window.address .. ":" .. window.root .. ":" .. row
+            return {entries=fields,nodes=nodes,identity=identity,signature=identity .. ":" .. (fields[1] or ""),
+                navigation_only=true}
+        end
         local function add(name,label)
             local candidate=unique(name)
             if not candidate or labels[label] or ambiguous then return end
@@ -426,8 +455,6 @@ function component.install(ctx)
         local table_scope=encountered.date and encountered.event
             or encountered.leagueRank_teamName and encountered.leagueRank_point
             or encountered.teamName and encountered.num_Points
-        local vt=shared.a11y.menu_read(window.address,"u64")
-        local base=tonumber(shared.process_base_u64)
         local save=base and vt==base+0x2948538
             and shared.a11y.menu_read(vt+0x18,"u64")==base+0x14217c0
             and shared.a11y.menu_read(vt+0x100,"u64")==base+0xca1a50
@@ -447,7 +474,6 @@ function component.install(ctx)
                 end
             end
         end
-        local caption=unique("itemName")
         local journal=names.journal_text_0 or names.journal_text_1
             or shared.a11y.widget_internal_name(row)=="p_journal"
         local dashboard_standings=names.leagueRank_teamName and names.leagueRank_point
@@ -548,6 +574,7 @@ function component.install(ctx)
     function shared.a11y.poll_structured_record(blocked)
         local packet=shared.a11y.structured_record_packet()
         if not packet then shared.a11y.structured_record_announced=nil;return false end
+        if packet.navigation_only then shared.a11y.structured_record_announced=nil;return true end
         if packet.native_standings and packet.unresolved then
             shared.a11y.standings_observation=nil
             return true

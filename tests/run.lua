@@ -953,6 +953,7 @@ check("overlay flow opens, updates, closes without repeating full panel", functi
     module.on_sider_overlay_content({}, "other.lua", first, true)
     local speech = speech_texts()
     assert(#speech == 1 and speech[1]:find("Audio", 1, true))
+    if modular_state then assert(not speech[1]:find("Keys:",1,true)) end
     module.on_sider_overlay_content({}, "other.lua", second, true)
     speech = speech_texts()
     assert(#speech == 2 and speech[2] == "Music: 5")
@@ -960,17 +961,25 @@ check("overlay flow opens, updates, closes without repeating full panel", functi
     assert(#speech_texts() == 2)
     module.on_sider_overlay_content({}, "other.lua", second, false)
     assert(#speech_texts() == 3)
+    if modular_state then
+        module.on_sider_overlay_content({}, "other.lua", first, true)
+        module.on_sider_overlay_content({}, "third.lua", "Outro painel\nTeclas: [F1] favorita", true)
+        assert(speech_texts()[5]:find("Teclas:",1,true),"module switch must include help")
+        module.on_sider_overlay_content({}, "third.lua", "Outro painel\nTeclas: [F1] favorita", true,true)
+        assert(speech_texts()[6]=="Teclas: [Ctrl+F1] favorita","F1 must read the active module's help and original shortcut")
+        module.on_sider_overlay_content({}, "third.lua", "", false)
+    end
 end)
 
 check("panel navigation wraps and tooltip toggle persists", function()
     a11y.selected_option = 1
-    module.key_down({}, a11y.previous_option_key)
+    module.key_down({}, modular_state and a11y.previous_category_key or a11y.previous_option_key)
     if modular_state then
         assert(module.overlay_on({}):find("---> Diagnóstico <---",1,true))
     else
         assert(a11y.selected_option == a11y.option_count)
     end
-    module.key_down({}, a11y.next_option_key)
+    module.key_down({}, modular_state and a11y.next_category_key or a11y.next_option_key)
     assert(a11y.selected_option == 1)
     if modular_state then module.key_down({},0x0d) end
     local previous_path = a11y.config_path
@@ -990,7 +999,7 @@ if modular_state then
         local previous_interval,previous_number=a11y.possession_interval,a11y.possession_number
         a11y.possession_interval,a11y.possession_number=5,false
         module.key_down(ctx,0x08)
-        module.key_down(ctx,a11y.next_option_key)
+        module.key_down(ctx,a11y.next_category_key)
         assert(module.overlay_on(ctx):find("---> Anúncios <---",1,true))
         module.key_down(ctx,0x0d)
         assert(module.overlay_on(ctx):find("Jogador com a bola, a cada 5 segundos",1,true))
@@ -1014,7 +1023,7 @@ if modular_state then
         assert(not a11y.possession_number)
         a11y.possession_interval,a11y.possession_number=previous_interval,previous_number
         module.key_down(ctx,0x08)
-        module.key_down(ctx,a11y.previous_option_key)
+        module.key_down(ctx,a11y.previous_category_key)
         module.key_down(ctx,0x0d)
         a11y.config_path=previous_path
     end)
@@ -2561,7 +2570,7 @@ check("production localization callback cannot announce an unbound future paragr
 end)
 
 check("base release version and local development build remain separate",function()
-    local version, build = modular_state and "0.2.1" or "0.1.9", modular_state and 87 or 42
+    local version, build = modular_state and "0.2.2" or "0.1.9", modular_state and 98 or 42
     assert(upvalue(a11y.start_diagnostic,"VERSION")==version)
     assert(a11y.build==build and a11y.runtime_version==version)
     assert(a11y.overlay_text():find(version,1,true))
@@ -3594,9 +3603,85 @@ check("cup review includes the rendered fixture from its own companion window",f
         assert(a11y.buffer_entries()[1]=="Fase de grupos. Liverpool x Barcelona")
         values[0x120000],values[0x130000]="Liverpool x Benfica","Liverpool x Benfica"
         assert(a11y.buffer_entries()[1]=="Fase de grupos. Liverpool x Benfica")
+        with_render_harness(function(output)
+            a11y.fixture_notice,a11y.fixture_poll_after=nil,nil
+            a11y.poll_competition_fixture(1000)
+            a11y.poll_competition_fixture(1125);a11y.flush_native_speech(100000)
+            assert(#output==1 and output[1][1]=="Próxima partida. Fase de grupos. Liverpool x Benfica")
+            a11y.poll_competition_fixture(1250);a11y.flush_native_speech(100000)
+            assert(#output==1,"same fixture must not repeat during navigation")
+            values[0x110000],values[0x120000]="Libertadores - Jornada 2","Internacional x Estudiantes"
+            a11y.poll_competition_fixture(1375)
+            a11y.poll_competition_fixture(1500);a11y.flush_native_speech(100000)
+            assert(#output==1,"transitional layout copies do not announce")
+            values[0x130000]=values[0x120000]
+            a11y.poll_competition_fixture(1625)
+            a11y.poll_competition_fixture(1750);a11y.flush_native_speech(100000)
+            assert(#output==2 and output[2][1]=="Próxima partida. Libertadores - Jornada 2. Internacional x Estudiantes")
+            a11y.fixture_notice,a11y.fixture_poll_after=nil,nil
+        end)
         panel.slot=1
         assert(not a11y.competition_fixture())
         set_upvalue(module.init,"process_base_u64",previous_base)
+    end)
+end)
+
+check("native tournament grid speaks the group only when crossing between groups",function()
+    with_rendered_panel({
+        [0x110000]={name="teamName",text="Internacional",parent=0x210000},
+        [0x120000]={name="teamName",text="River Plate",parent=0x220000},
+        [0x130000]={name="teamName",text="Estudiantes",parent=0x230000},
+    },function(_,snapshot)
+        local old_base=upvalue(module.init,"process_base_u64")
+        set_upvalue(module.init,"process_base_u64",ffi.cast("uint64_t",0x140000000))
+        local window=snapshot.windows[1];window.primary=true
+        a11y.menu_read=function(at) if at==window.address then return 0x142722620 end end
+        with_focus_memory({},function(tick)
+            with_render_harness(function(output)
+                local function focus(address,selected,group,item,frame)
+                    window.cursor_detail={selected=selected,group=0x700000+group*256,group_index=group,item_index=item}
+                    snapshot.selected_members={[address]=true};snapshot.cursor_members=snapshot.selected_members
+                    tick(frame)
+                    a11y.flush_native_speech(100000)
+                end
+                focus(0x110000,0x210000,0,0,120)
+                focus(0x120000,0x220000,0,1,121)
+                focus(0x130000,0x230000,4,0,122)
+                focus(0x110000,0x210000,0,0,123)
+                assert(#output==4 and output[1][1]=="Grupo A. Internacional" and output[2][1]=="River Plate"
+                    and output[3][1]=="Grupo E. Estudiantes" and output[4][1]=="Grupo A. Internacional")
+            end)
+        end)
+        set_upvalue(module.init,"process_base_u64",old_base)
+    end)
+end)
+
+check("match possession is silent on entry and both team values are available in review",function()
+    with_rendered_panel({
+        [0x110000]={name="itemName",text="Posse de bola",parent=0x210000},
+        [0x120000]={name="valueHome",text="54",parent=0x210000},
+        [0x130000]={name="valueAway",text="46%",parent=0x210000},
+        [0x140000]={name="teamName_left",text="Internacional",parent=0x900000},
+        [0x150000]={name="teamName_right",text="Estudiantes",parent=0x900000},
+        [0x160000]={name="itemName",text="Chutes",parent=0x220000},
+    },function(_,snapshot)
+        local old_base=upvalue(module.init,"process_base_u64")
+        set_upvalue(module.init,"process_base_u64",ffi.cast("uint64_t",0x140000000))
+        local window=snapshot.windows[1]
+        window.cursor_detail={selected=0x210000}
+        a11y.menu_read=function(at)
+            if at==window.address then return 0x1425b84a8 end
+            if at>=0x11000c and at<=0x16000c then return 7 end
+        end
+        with_render_harness(function(output)
+            assert(a11y.poll_structured_record(false) and #speech_texts()==0)
+            assert(a11y.read_buffer("first"))
+            a11y.flush_native_speech(100000)
+            assert(#output==1 and output[1][1]=="Posse de bola. Internacional 54%. Estudiantes 46%")
+            window.cursor_detail.selected=0x220000
+            assert(a11y.poll_structured_record(false) and speech_texts()[1]=="Chutes")
+        end)
+        set_upvalue(module.init,"process_base_u64",old_base)
     end)
 end)
 end
@@ -4100,7 +4185,7 @@ check("restoring diagnostics always disables it from either initial state",funct
     local setter=a11y.set_diagnostic
     if modular_state then
         module.key_down({},0x08)
-        module.key_down({},a11y.previous_option_key)
+        module.key_down({},a11y.previous_category_key)
         module.key_down({},0x0d)
     end
     a11y.selected_option=2
@@ -4117,7 +4202,7 @@ check("restoring diagnostics always disables it from either initial state",funct
     a11y.set_diagnostic=setter
     if modular_state then
         module.key_down({},0x08)
-        module.key_down({},a11y.next_option_key)
+        module.key_down({},a11y.next_category_key)
         module.key_down({},0x0d)
     end
     a11y.selected_option=1
@@ -4173,6 +4258,18 @@ check("leaving a game plan cancels delayed work before returning to another comp
 end)
 
 if modular_state then
+check("game plan does not enqueue a distance as a player heading",function()
+    local active,context=a11y.game_plan_active,a11y.game_plan_context
+    local heading,due=a11y.game_plan_selected_heading,a11y.game_plan_selected_heading_due_frame
+    a11y.game_plan_active=true
+    a11y.game_plan_context="Escalação/Editar posição"
+    a11y.game_plan_selected_heading,a11y.game_plan_selected_heading_due_frame=nil,nil
+    a11y.observe_compatibility_context("distance-widget","0 m")
+    assert(not a11y.game_plan_selected_heading and not a11y.game_plan_selected_heading_due_frame)
+    a11y.game_plan_active,a11y.game_plan_context=active,context
+    a11y.game_plan_selected_heading,a11y.game_plan_selected_heading_due_frame=heading,due
+end)
+
 check("native pitch caption owns speech over the delayed game plan heading",function()
     local widget="native-pitch-caption"
     local original=a11y.native_caption_selection_identity
@@ -5370,6 +5467,15 @@ check("separate information panel resolves the native player's actual pitch slot
         assert(a11y.player_component_section(node)=="starter")
         assert(a11y.game_plan_player_section(node.text,node.key)=="starter")
         assert(a11y.engine_focus_speech(node.text,node):find("Titular. 24  Nome real",1,true))
+        if modular_state then
+            memory[base+0x915253],memory[base+0x91528d]=0x7504f883,0x7505f883
+            memory[data+0x560+3*16]=4
+            assert(a11y.engine_focus_speech(node.text,node):find("cartão amarelo",1,true))
+            memory[data+0x560+3*16]=5
+            assert(a11y.engine_focus_speech(node.text,node):find("cartão vermelho",1,true))
+            memory[data+0x560+3*16]=0
+            assert(not a11y.engine_focus_speech(node.text,node):find("cartão",1,true))
+        end
         memory[pitch]=base+0x261f788;memory[data+0x1f8+11]=3
         a11y.roster_limits={[pitch]={root=root,impl=0xc00000,side=0,limit=18}}
         assert(a11y.native_player_roster_context(node).section=="reserve")
@@ -6649,6 +6755,18 @@ check("replacement candidate in a scrolled substitute row matches its actual ros
         assert(snapshot.selected_members[0x130000] and not snapshot.selected_members[0x110000])
         local record=assert(a11y.current_player_record(a11y.ui_model.nodes[host.memory.hex(0x130000)]))
         assert(record.slot==17 and record.player_id==2001)
+        if modular_state then
+            memory[data+8]=4
+            local node=a11y.ui_model.nodes[host.memory.hex(0x130000)]
+            local context=assert(a11y.native_player_roster_context(node))
+            assert(context.section=="reserve" and context.slot==17)
+            memory[roster+0x4e8]=11
+            memory[data+0x1f8+23]=6;memory[data+0xbb8]=23
+            refresh()
+            context=assert(a11y.native_player_roster_context(node))
+            assert(context.section=="unselected" and context.slot==23)
+            memory[roster+0x4e8]=5;memory[data+0xbb8]=17
+        end
         memory[roster+0x4e8]=6;refresh()
         assert(not snapshot.selected_members[0x130000],"old descriptor cannot follow a changed scroll offset")
     end)
@@ -8058,16 +8176,20 @@ check("typed carousel defers surrounding cards but explicit exploration keeps th
         snapshot.selected_members={[0x110000]=true,[0x120000]=true,[0x130000]=true}
         snapshot.cursor_members=snapshot.selected_members
         a11y.observe_native_list_selection("Time atual","team:current",0x110000)
+        local host_type,host_method=0x26833e8,0xaeb1e0
         a11y.menu_read=function(at)
             if at==owner.address then return base+0x271c8c8 end
             if at==base+0x271c8c8+0x18 then return base+0xc93200 end
-            if at==0x980000 then return base+0x26833e8 end
-            if at==base+0x26833e8+0x18 then return base+0xaeb1e0 end
+            if at==0x980000 then return base+host_type end
+            if at==base+host_type+0x18 then return base+host_method end
         end
         if modular_state then
             snapshot.windows[2]={address=0x980000,root=0,enabled=true}
             speak("OK, item selecionado",true,nil,nil,0x110000)
             assert(#speech_texts()==0,"incidental friendly carousel OK")
+            host_type,host_method=0x271d470,0xc99560
+            speak("OK",true,nil,nil,0x110000)
+            assert(#speech_texts()==0,"incidental free training carousel OK")
             speak("OK",true,true,"review:explicit",0x110000)
             assert(#speech_texts()==1,"explicit exploration can still read OK")
             snapshot.windows[2]=nil
@@ -8751,6 +8873,29 @@ check("carousel caption suppresses incidental OK without suppressing a real dial
         a11y.native_list_has_focus,a11y.native_list_selection=focus,item
     end)
 end)
+
+check("shared OK caption is silent outside a selectable dialog action",function()
+    with_rendered_panel({
+        [0x110000]={name="ok_text",text="OK",parent=0x210000},
+        [0x120000]={name="text",text="OK",parent=0x220000},
+    },function(_,snapshot)
+        local old_base=upvalue(module.init,"process_base_u64")
+        set_upvalue(module.init,"process_base_u64",ffi.cast("uint64_t",0x140000000))
+        local window=snapshot.windows[1]
+        snapshot.selected_members[0x110000]=true
+        window.cursor_detail={selected=0x210000}
+        snapshot.command_bar={pairs={{caption=0x120000}}}
+        assert(not a11y.selection_result({widget=0x110000,text="OK",source="engine-focus"}))
+        assert(not a11y.selection_result({widget=0x120000,text="OK",source="engine-focus"}))
+        speak("OK, item selecionado",true,nil,nil,0x110000);assert(#speech_texts()==0)
+        local native={[window.address]=0x1427bd238,[0x1427bd250]=0x140e607d0,[0x1427bd338]=0x140e472b0}
+        a11y.menu_read=function(at) return native[at] end
+        assert(a11y.selection_result({widget=0x110000,text="OK",source="dialog-answer"}))
+        snapshot.selected_members[0x110000]=nil
+        assert(not a11y.selection_result({widget=0x110000,text="OK",source="dialog-answer"}))
+        set_upvalue(module.init,"process_base_u64",old_base)
+    end)
+end)
 end
 
 if modular_state then
@@ -9352,6 +9497,49 @@ check("large same-component field families use parent index without repeated pee
     assert(#fields==200)
     assert(parent_reads<5000,"matching immediate siblings must not scan every peer: " .. parent_reads)
     print("GROUP_PARENT_INDEX fields=" .. #fields .. " parent-lookups=" .. parent_reads)
+end)
+check("player radar menu shows counts only in count mode and preserves them",function()
+    local gameplay=modular_state.core_context.gameplay
+    local path=a11y.config_path
+    a11y.config_path=nil
+    module.key_down({},0x08)
+    local function selected(label)
+        return a11y.overlay_text():find("---> " .. label,1,true)
+    end
+    for _=1,5 do
+        if selected("Radar de jogadores") then break end
+        module.key_down({},a11y.next_category_key)
+    end
+    assert(selected("Radar de jogadores"))
+    module.key_down({},0x30)
+    assert(not a11y.overlay_text():find("som 1",1,true),"radar uses fixed sounds")
+    module.key_down({},a11y.next_option_key)
+    assert(selected("Modo do radar, Por distância") and not a11y.overlay_text():find("até 3 jogadores",1,true))
+    module.key_down({},a11y.next_value_key)
+    assert(selected("Modo do radar, Por número de jogadores"))
+    assert(a11y.overlay_text():find("Marcados, até 3 jogadores",1,true))
+    module.key_down({},a11y.next_option_key)
+    assert(selected("Raio do radar"))
+    module.key_down({},a11y.next_option_key)
+    module.key_down({},a11y.next_value_key)
+    assert(gameplay.radar.marked_count==4)
+    module.key_down({},a11y.previous_option_key)
+    module.key_down({},a11y.previous_option_key)
+    module.key_down({},a11y.previous_value_key)
+    assert(gameplay.radar.mode==0 and gameplay.radar.marked_count==4)
+    a11y.selected_option="radar_marked_volume"
+    gameplay.radar.marked_volume=295
+    module.key_down({},0xbb)
+    module.key_down({},0xbb)
+    assert(gameplay.radar.marked_volume==300)
+    module.key_down({},0x74)
+    assert(gameplay.radar.marked_volume==40)
+    a11y.selected_option="speed_marked"
+    module.key_down({},0xbd)
+    assert(gameplay.sound_speeds.marked==75)
+    module.key_down({},0x73)
+    assert(gameplay.sound_preview_request=="marked")
+    a11y.config_path=path
 end)
 end
 

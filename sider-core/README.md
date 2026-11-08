@@ -1,9 +1,7 @@
 # Accessible Sider core
 
-FLAccess0.2.0 local development preserves this exact core DLL. New components
-are installed under modules/FlAccess and resources under content/FlAccess.
-Only FLAccess entries in sider.ini change. Older paths below record previous
-releases and do not instruct loading legacy bundles with0.2.0.
+FLAccess 0.2.2 build 96 uses the compatible Sider 7.3.3 core below for F1 help.
+Components are installed under modules/FlAccess and resources under content/FlAccess.
 
 This directory records the Sider core modification required to expose every
 module's textual overlay to the PES accessibility module.
@@ -13,10 +11,12 @@ module's textual overlay to the PES accessibility module.
 - Base commit: `112627c10c0daec47485a746e1fa6ca7fffc4efc`
 - Modified files: `sider.cpp`, `util.asm`
 - Added Lua event: `overlay_content`
-- Callback signature: `handler(ctx, module_filename, rendered_text, visible)`
+- Callback signature: `handler(ctx, module_filename, rendered_text, visible, help_requested)`
 
-The event is sent only when the active module, rendered text, or overlay
-visibility changes. This prevents a callback on every rendered frame.
+The event is sent when the active module, rendered text, or overlay visibility
+changes. With the overlay open, F1 also sends the current panel with
+`help_requested` set to true. Ctrl+F1 forwards the original F1 shortcut to
+the active module. The extra argument is optional for existing handlers.
 
 `util.asm` also carries the upstream Sider 7.3.4 stack-alignment correction,
 without the unrelated 7.3.4 goal event. It fixes the 0xc0000005 access violation
@@ -29,7 +29,7 @@ repository does not state a redistribution license; this inclusion does not
 assert that upstream granted a new license.
 
 Binary SHA256:
-`57005a0e5977e699c8053293163599508616fd78e044b0f4ccd8ca8e2ccab116`.
+`e9e40f3dca9e17c05eff8f17c52e8e2c2c8e209d18567ff1c52c8c89c027e830`.
 
 The tested binary is versioned here as `sider.dll`. Every future publication must
 include this compatible core and `modules/FlAccessReader/bin/prism.dll` in both

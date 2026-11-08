@@ -568,6 +568,7 @@ function shared.a11y.observe_compatibility_context(widget_key, text)
     end
     local numbered_player_heading = shared.a11y.game_plan_active
         and text:match("^%d+%s+%S") ~= nil
+        and not text:match("^%d+[%d.,]*%s+[mM]$")
     local game_plan_player_heading = numbered_player_heading
         and shared.a11y.game_plan_edit_contexts[shared.a11y.game_plan_context]
     if game_plan_player_heading then

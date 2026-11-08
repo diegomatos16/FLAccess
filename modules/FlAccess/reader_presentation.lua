@@ -60,18 +60,19 @@ function shared.a11y.carousel_automatic_node(address,carousel)
         or not shared.a11y.record_contains({address=address},carousel.window,carousel.window.root)
 end
 
-function shared.a11y.exhibition_carousel_ok(address)
+function shared.a11y.exhibition_carousel_ok(address,name)
     local snapshot=shared.a11y.native_windows
     local base=tonumber(shared.process_base_u64)
     local member=base and snapshot and snapshot.members and snapshot.members[tonumber(address)]
     if not member or not member.active or shared.a11y.read_context_state().kind=="dialog" then return false end
-    local exhibition,carousel
+    local team_select,carousel
     for _,window in ipairs(snapshot.windows or {}) do
         if window.enabled then
             if shared.a11y.native_dialog_window(window) then return false end
             local vt=shared.a11y.menu_read(window.address,"u64")
-            if vt==base+0x26833e8 and shared.a11y.menu_read(vt+0x18,"u64")==base+0xaeb1e0 then
-                exhibition=window
+            if (vt==base+0x26833e8 and shared.a11y.menu_read(vt+0x18,"u64")==base+0xaeb1e0)
+                    or (vt==base+0x271d470 and shared.a11y.menu_read(vt+0x18,"u64")==base+0xc99560) then
+                team_select=window
             elseif vt==base+0x271c8c8 and shared.a11y.menu_read(vt+0x18,"u64")==base+0xc93200 then
                 for _,owner in ipairs(member.owners or {}) do
                     if owner.enabled and owner.address==window.address then carousel=window;break end
@@ -79,7 +80,32 @@ function shared.a11y.exhibition_carousel_ok(address)
             end
         end
     end
-    return exhibition and carousel and exhibition.slot==carousel.slot or false
+    return carousel and (name=="ok_text" or team_select and team_select.slot==carousel.slot) or false
+end
+
+function shared.a11y.ok_caption_only(address)
+    local snapshot=shared.a11y.native_windows
+    address=tonumber(address)
+    local member=address and snapshot and snapshot.members and snapshot.members[address]
+    if not member then return false end
+    for _,pair in ipairs(snapshot.command_bar and snapshot.command_bar.pairs or {}) do
+        if pair.caption==address then return true end
+    end
+    local name=shared.a11y.widget_internal_name(address)
+    if shared.a11y.exhibition_carousel_ok(address,name) then return true end
+    if name~="ok_text" then return false end
+    -- A selector can put its decorative OK inside the whole selected card.
+    -- A dialog's own selected answer remains an action even with this name.
+    if snapshot.selected_members and snapshot.selected_members[address] then
+        local flags=shared.a11y.menu_read(address+0xc,"u32")
+        if flags and flags%8==7 and math.floor(flags/256)%2==1 then return false end
+        for _,window in ipairs(snapshot.windows or {}) do
+            if shared.a11y.native_dialog_window(window) and window.cursor_detail
+                    and shared.a11y.record_contains({address=address},window,window.cursor_detail.selected) then return false end
+        end
+        if shared.a11y.is_structural_answer("OK",memory.hex(address)) then return false end
+    end
+    return true
 end
 
 -- Snapshot metadata only. Rebuild on graph/selection replacement, never once
@@ -975,6 +1001,7 @@ function shared.a11y.engine_focus_speech(text,node)
                 and (shared.a11y.ui_language=="pt" and "Força geral: " or "Overall rating: ") or ""
             spoken=spoken .. ", " .. label .. detail.text
         end
+        spoken=spoken .. shared.a11y.roster_card_speech(shared.a11y.native_player_roster_context(node))
         local section=shared.a11y.player_component_section(node)
         local prefixes=shared.a11y.ui_language=="pt"
             and {starter="Titular. ",reserve="Reserva. ",unselected="Não relacionado. "}

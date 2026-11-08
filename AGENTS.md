@@ -1,3 +1,9 @@
+## Leitura de menus e diálogos
+
+- Antes de implementar ou corrigir uma leitura, procure outros menus, modos e torneios que usam o mesmo componente, evento ou estrutura. Confira o código, as capturas e os logs disponíveis.
+- Aplique a regra no componente compartilhado com evidência de foco e visibilidade. Use exceções por tela somente quando o jogo fornecer estruturas diferentes, e registre quais variantes foram verificadas.
+- Anuncie “OK” quando for uma ação que o jogador pode selecionar ou acionar. Uma legenda de controle, texto decorativo ou texto de fundo pode aparecer no painel sem representar um botão.
+
 ## Publicação0.2.0 autorizada — 04/11/2026
 
 Publicação preparada Reader52/Gameplay19,31módulos, tagv0.2.0. Notas PT/EN e

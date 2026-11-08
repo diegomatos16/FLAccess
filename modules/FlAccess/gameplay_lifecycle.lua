@@ -40,8 +40,7 @@ function shared.poll_ball_holder(ctx,now,playing,state,controlled_announced)
     shared.last_sampled_keeper=keeper
     local name,identity,number=shared.ball_holder_name(keeper or nil,reader.a11y.possession_number)
     if name and identity~=shared.last_announced_holder then
-        local pt=reader.a11y.ui_language=="pt"
-        if number then name=name .. (pt and ", camisa " or ", number ") .. number end
+        if number then name=number .. " " .. name end
         if shared.speak_match(ctx,name,instant and not controlled_announced) then
             shared.last_holder_announcement,shared.last_announced_holder=now,identity
         end
@@ -61,7 +60,7 @@ function shared.poll_controlled_player(ctx,now,playing,state)
         and a11y.possession_interval and a11y.possession_interval~=0
     local name,identity,number=shared.ball_holder_name(actor,same_holder and a11y.possession_number)
     if not name then return end
-    if number then name=name .. (a11y.ui_language=="pt" and ", camisa " or ", number ") .. number end
+    if number then name=number .. " " .. name end
     if shared.speak_match(ctx,name,true) then
         local entry=a11y.native_speech_queue[a11y.native_speech_last]
         entry.controlled_actor=actor
@@ -95,7 +94,8 @@ function shared.m.display_frame(ctx)
     local now=tonumber(shared.kernel.GetTickCount64());local dt=shared.last_frame and (now-shared.last_frame)/1000 or 1/60;shared.last_frame=now
     shared.read_failure=nil
     local stats=match.stats()
-    if not stats then
+    local training=shared.training_mode()
+    if not stats and not training then
         if shared.core_context then shared.core_context.match_playing=false end
         shared.announcement_session,shared.next_possession_sample,shared.last_announced_holder=nil,nil,nil
         shared.last_holder_announcement=nil
@@ -103,24 +103,40 @@ function shared.m.display_frame(ctx)
         if shared.was_match then shared.reset_discovery();shared.was_match=false end
         shared.heading_previous=nil;shared.tackle_previous=nil;shared.possession_previous=nil;shared.mute();shared.transition("no-live-match");shared.busy=false;return
     end
-    shared.was_match=true;shared.discovery_step()
+    shared.was_match=true;shared.discovery_step(training)
     local state,reason=shared.pose()
     if reason=="control-table-unavailable" and shared.status~=reason and shared.read_failure then shared.report("control-read-failed " .. shared.read_failure) end
     shared.diagnostics(now,state);shared.read_layout(now)
-    local playing,why=shared.match_state(stats)
+    local playing,why,session
+    if training then
+        local world
+        world,why=shared.training_state(training)
+        playing=world~=nil and state~=nil
+        session=world and ("training:" .. world)
+    else
+        playing,why=shared.match_state(stats)
+        session=stats.ptr and tonumber(ffi.cast("uintptr_t",stats.ptr))
+    end
     if shared.core_context then shared.core_context.match_playing=playing==true end
-    local session=stats.ptr and tonumber(ffi.cast("uintptr_t",stats.ptr))
     if session~=shared.announcement_session then
+        shared.reset_player_radar()
+        shared.reset_pressure()
+        shared.radar_positions_sample=nil
+        shared.radar_scan_reported=nil
         shared.announcement_session=session
         shared.next_possession_sample,shared.last_announced_holder=nil,nil
         shared.last_holder_announcement=nil
         shared.current_controlled_actor,shared.last_controlled_actor=nil,nil
         shared.substitution_world,shared.next_substitution_poll=nil,nil
+        shared.card_record,shared.card_count,shared.next_card_poll=nil,nil,nil
     end
     local controlled_announced=shared.poll_controlled_player(ctx,now,playing,state)
     shared.poll_ball_holder(ctx,now,playing,state,controlled_announced)
-    shared.poll_substitutions(ctx,now,playing)
-    if now>=shared.next_state_diagnostic then
+    if not training then
+        shared.poll_substitutions(ctx,now,playing)
+        shared.poll_cards(ctx,now)
+    end
+    if not training and now>=shared.next_state_diagnostic then
         shared.next_state_diagnostic=now+1000
         local clock=shared.blob(tonumber(ffi.cast("uintptr_t",stats.ptr)),0x40)
         local second=shared.blob(shared.ptr(clock,0x38),0xa4)
@@ -136,8 +152,8 @@ function shared.m.display_frame(ctx)
         local cue
         shared.possession_previous,cue=shared.m.possession_change(shared.possession_previous,state.actor,state.keeper,state.possession_known)
         -- Consume transitions even while master is muted/unavailable: never replay late.
-        local active,audio_reason=shared.play_pose(state,dt,cue)
-        shared.transition(active and "real-game radar active" or audio_reason)
+        local active,audio_reason=shared.play_pose(state,dt,cue,now)
+        shared.transition(active and (training and "training radar active" or "real-game radar active") or audio_reason)
     end
     shared.busy=false
 end
@@ -178,8 +194,17 @@ function shared.m.init(ctx)
     if configuration then configuration_text=configuration:read(8192);configuration:close() end
     shared.tackle_settings=shared.m.tackle_settings(configuration_text)
     local settings="\n" .. (configuration_text or "")
+    for key in pairs(shared.radar) do
+        local value=tonumber(settings:match("[\r\n]%s*radar_" .. key .. "%s*=%s*([^\r\n;#]+)"))
+        local min,max=shared.radar_bounds(key)
+        if value and value%1==0 and value>=min and value<=max then shared.radar[key]=value end
+    end
     local speed=tonumber(settings:match("[\r\n]%s*ball_speed%s*=%s*([^\r\n;#]+)"))
     if speed and speed>=25 and speed<=200 and speed%25==0 then shared.ball_speed=speed end
+    for key in pairs(shared.sound_speeds) do
+        local value=tonumber(settings:match("[\r\n]%s*sound_speed_" .. key .. "%s*=%s*([^\r\n;#]+)"))
+        if value and value>=25 and value<=200 and value%25==0 then shared.sound_speeds[key]=value end
+    end
     for key in pairs(shared.sound_levels) do
         local value=tonumber(settings:match("[\r\n]%s*sound_" .. key .. "%s*=%s*([^\r\n;#]+)"))
         if value and value>=0 and value<=shared.sound_level_max and value%1==0 then shared.sound_levels[key]=value end
@@ -200,6 +225,10 @@ function shared.m.init(ctx)
     end
     shared.camera_source_supported=shared.blob(shared.base+0x41b68c,4)=="\x48\x83\xc1\x04"
         and shared.blob(shared.base+0x87a47d,4)=="\x0f\xb6\x59\x44"
+    shared.training_mode_supported=shared.blob(shared.base+0x149a470,8)=="\x48\x8b\x05\xc1\xa9\x26\x02\xc3"
+        and shared.blob(shared.base+0x149f4f0,6)=="\x8b\x81\xf0\x00\x00\x00"
+        and shared.uint(shared.blob(shared.base+0x34fc9c0+51*16,4),0)==12
+        and shared.uint(shared.blob(shared.base+0x34fc9c0+52*16,4),0)==11
     shared.possession_supported=shared.blob(shared.base+0xa627e8,10)=="\x48\x8b\x41\x18\x8b\x80\x1c\x60\x02\x00"
         and shared.blob(shared.base+0x4589ec,4)=="\x48\x83\xc1\x08"
     shared.match_names_supported=shared.blob(shared.base+0x14b6a60,8)=="\x48\x8b\x05\xa9\xf3\x24\x02\xc3"
@@ -210,6 +239,10 @@ function shared.m.init(ctx)
         and shared.blob(shared.base+0x14c10c3,17)=="\x48\x69\xc8\x90\x06\x00\x00\x49\x8d\x80\x38\x01\x00\x00\x48\x03\xc1"
         and shared.blob(shared.base+0xa73e20,5)=="\x48\x8d\x41\x04\xc3"
     shared.shirt_number_supported=shared.blob(shared.base+0x20d946d,24)=="\x0f\xb7\x88\x26\x04\x00\x00\x83\xe1\x7f\x44\x3b\xf1\x73\x0b\x46\x0f\xb7\xbc\x70\x9a\x02\x00\x00"
+    shared.card_layout_supported=shared.blob(shared.base+0xa3e8a0,8)=="\x48\x8d\x81\xd0\x50\x07\x00\xc3"
+        and shared.blob(shared.base+0x8c6e60,11)=="\x0f\xb6\x81\xf0\xb2\x10\x00\x3c\x27\x73\x3f"
+        and shared.blob(shared.base+0x4ec19f,8)=="\x41\x80\x78\x18\x00\x41\xb0\x01"
+        and shared.blob(shared.base+0x4ec1cd,16)=="\x8b\x47\x14\x89\x44\x24\x20\x48\x8d\x57\x04\x4c\x8d\x44\x24\x20"
     ctx.register("display_frame",shared.m.display_frame);ctx.register("context_reset",shared.m.context_reset)
     shared.report("version=" .. shared.m.version .. "; native discovery; single local player; no user controls")
 end

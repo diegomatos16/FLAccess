@@ -32,6 +32,7 @@ return function(block,qword,image,targets)
     local names={"BALL","CAMERA","CURSOR","FIELD"}
     if targets.MATCH then names[#names+1]="MATCH" end
     if targets.ANALYZE then names[#names+1]="ANALYZE" end
+    if targets.RECORD then names[#names+1]="RECORD" end
     for _,name in ipairs(names) do
         local group,group_data=directory()
         local entry,entry_data=allocate(24);qword(entry_data,16,targets[name])

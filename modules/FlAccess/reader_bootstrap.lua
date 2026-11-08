@@ -7,7 +7,7 @@ function component.install(ctx)
 shared.core_context=ctx.flaccess
 shared.m = {name = "FLAccess"}
 
-shared.VERSION = "0.2.1"
+shared.VERSION = "0.2.2"
 shared.DEBUG_TRACE = false
 shared.RESOLVED_TEXT_RVA = 0x1496a3c
 shared.SLIDER_INIT_RVA = 0xe59f80
@@ -20,17 +20,20 @@ shared.GAME_TEXT_LANGUAGE_SET_RVA = 0xb22a50
 shared.COMMENTARY_LANGUAGE_SET_RVA = 0xb229f0
 shared.GAME_TEXT_LANGUAGE_NAV_RVA = 0xb22871
 shared.a11y = {
-    build = 87,
+    build = 98,
     selection_diagnostic = false,
     runtime_version = shared.VERSION,
     keyboard_echo_insertions = false,
     player_secondary_partial = true,
     player_secondary_verified = false,
-    previous_option_key = 0x36, -- 6
-    next_option_key = 0x37, -- 7
-    restore_key = 0x38, -- 8
-    previous_value_key = 0x39, -- 9
-    next_value_key = 0x30, -- 0
+    previous_category_key = 0x24, -- Home
+    next_category_key = 0x23, -- End
+    previous_option_key = 0x21, -- Page Up
+    next_option_key = 0x22, -- Page Down
+    restore_key = 0x74, -- F5
+    previous_value_key = 0xbd, -- Hyphen
+    next_value_key = 0xbb, -- Equals
+    sider_help_mode = "module",
     read_tooltips = true,
     use_text_assets = true,
     text_asset_roles = {pt = {}, en = {}},

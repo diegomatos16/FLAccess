@@ -4,16 +4,36 @@ function m.init(ctx)
     assert(not ctx.flaccess, "FLAccess is already initialized; remove duplicate/legacy module entries")
     local root = ctx.sider_dir .. "modules\\FlAccess\\"
     ctx.flaccess = {
-        version = "0.2.1", root = root,
+        version = "0.2.2", root = root,
         content = ctx.sider_dir .. "content\\FlAccess\\",
         reader = {stage = 0}, gameplay = {stage = 0},
     }
     local reader = ctx.flaccess.reader
     local gameplay=ctx.flaccess.gameplay
+    gameplay.radar_groups={"marked","free","opponent"}
+    gameplay.radar_defaults={enabled=0,mode=0,radius=20,pressure_enabled=1,pressure_radius=3,pressure_volume=50}
+    for index,group in ipairs(gameplay.radar_groups) do
+        local defaults=gameplay.radar_defaults
+        defaults[group.."_enabled"]=1
+        defaults[group.."_volume"]=40
+        defaults[group.."_count"]=({3,1,2})[index]
+    end
+    gameplay.radar={}
+    for key,value in pairs(gameplay.radar_defaults) do gameplay.radar[key]=value end
+    function gameplay.radar_bounds(key)
+        local suffix=key:match("_(%a+)$")
+        if key=="radius" then return 1,60,1 end
+        if key=="pressure_radius" then return 1,12,1 end
+        if suffix=="count" then return 0,11,1 end
+        if suffix=="volume" then return 0,gameplay.sound_level_max,5 end
+        return 0,1
+    end
     gameplay.sound_level_max=300
     gameplay.ball_speed=100
     gameplay.sound_levels={ball=100,sidelines=100,endline=100,own_goal=100,opponent_goal=100,
-        gotBall=100,LostBall=100,teamStillWithBall=100}
+        gotBall=100,LostBall=100,teamStillWithBall=100,controlled=100}
+    gameplay.sound_speeds={sidelines=100,endline=100,own_goal=100,opponent_goal=100,gotBall=100,
+        LostBall=100,teamStillWithBall=100,controlled=100,tackle=100,marked=100,free=100,opponent=100,pressure=100}
     gameplay.sound_enabled={}
     function gameplay.sound_gain(key)
         return gameplay.sound_enabled[key]==false and 0 or gameplay.sound_levels[key]/100

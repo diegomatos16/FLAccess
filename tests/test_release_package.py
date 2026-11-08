@@ -21,11 +21,11 @@ class ReleasePackageTests(unittest.TestCase):
             with zipfile.ZipFile(archive) as z:
                 self.assertEqual(json.loads(z.read('sider/BUILD.json')), manifest)
                 self.assertEqual({p.split('/')[0] for p in z.namelist()}, {'content', 'modules', 'sider'})
-                self.assertEqual(manifest['version'], '0.2.1')
+                self.assertEqual(manifest['version'], '0.2.2')
                 self.assertEqual(len(manifest['components']['modules']), 31)
                 for language in ('pt-BR', 'en'):
                     self.assertEqual(z.read(f'sider/RELEASE.{language}.md'),
-                                     (ROOT/f'docs/RELEASE-0.2.1.{language}.md').read_bytes())
+                                     (ROOT/f'docs/RELEASE-0.2.2.{language}.md').read_bytes())
                 for entry in manifest['components']['modules']:
                     name = 'modules/' + entry
                     self.assertEqual(z.read(name), (ROOT/name).read_bytes())

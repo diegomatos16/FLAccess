@@ -26,7 +26,8 @@ dword(controls,0x20,2);qword(world,0x180,0x210000)
 qword(block(base+0x36f3dc8,8),0,0x200000)
 local player=block(0x220000,0x630);qword(player,0,base+0x26329a8);dword(player,0x18,2)
 float(player,0x61c,0);float(player,0x624,10);float(player,0x628,0);float(player,0x62c,5)
-qword(block(base+0x36f3fc0+2*8,8),0,0x220000)
+local players=block(base+0x36f3fc0,22*8)
+qword(players,2*8,0x220000)
 local ball=block(0x230000,120);float(ball,0x10,15);float(ball,0x14,0.1);float(ball,0x18,8)
 local camera=block(0x240000,120);float(camera,0x0c,1);float(camera,0x24,1);float(camera,0x30,-1);float(camera,0x48,1)
 local field=block(0x250000,120);float(field,4,52.56);float(field,8,34.06)
@@ -55,9 +56,25 @@ local match_info=block(0x320000,8+0x2378)
 -- Reproduce the old bug: an out-of-bounds MATCH read lands on unrelated zero.
 local unrelated_zero=block(0x320000+8+0x2601c,4)
 local analyze_info=block(0x730000,8+0x26038);dword(analyze_info,8+0x2601c,255)
+local record_raw=0xa00000
+local flow=block(0x9a0000,0xf4)
+qword(block(base+0x3704e38,8),0,0x9a0000)
+dword(block(base+0x34fc9c0+51*16,4),0,12)
+dword(block(base+0x34fc9c0+52*16,4),0,11)
+block(record_raw,8)
+local card_count=block(record_raw+8+0x1803c0,1)
+local cards=block(record_raw+8+0x17fd80,80)
+for _,signature in ipairs({
+    {0xa3e8a0,"\x48\x8d\x81\xd0\x50\x07\x00\xc3"},
+    {0x8c6e60,"\x0f\xb6\x81\xf0\xb2\x10\x00\x3c\x27\x73\x3f"},
+    {0x4ec19f,"\x41\x80\x78\x18\x00\x41\xb0\x01"},
+    {0x4ec1cd,"\x8b\x47\x14\x89\x44\x24\x20\x48\x8d\x57\x04\x4c\x8d\x44\x24\x20"},
+    {0x149a470,"\x48\x8b\x05\xc1\xa9\x26\x02\xc3"},
+    {0x149f4f0,"\x8b\x81\xf0\x00\x00\x00"},
+}) do ffi.copy(block(base+signature[1],#signature[2]),signature[2],#signature[2]) end
 qword(world,0x18,0x320008)
 local camera_env=block(0x790000,0x49);camera_env[0x48]=5
-local fixture=fixture_chunk()(block,qword,base,{BALL=0x230000,CAMERA=0x240000,FIELD=0x250000,CURSOR=0x260000,MATCH=0x320000,ANALYZE=0x730000,MATCH_ENV=0x790000})
+local fixture=fixture_chunk()(block,qword,base,{BALL=0x230000,CAMERA=0x240000,FIELD=0x250000,CURSOR=0x260000,MATCH=0x320000,ANALYZE=0x730000,RECORD=record_raw,MATCH_ENV=0x790000})
 qword(fixture.entries.CAMERA.data,16,0);qword(fixture.entries.FIELD.data,16,0)
 local teams={block(0x700000,0x258),block(0x710000,0x258)}
 for side=0,1 do
@@ -113,6 +130,7 @@ if render_mode then
         void alcRenderSamplesSOFT(void*,void*,int);
         void* alcCreateContext(void*,const int*);
         void alcDestroyContext(void*);char alcCloseDevice(void*);
+        void alGetBufferi(unsigned int,int,int*);
     ]]
     openal=real_load(arg[6] or ".\\SiderAddons\\modules\\FlAccessGameplay\\bin\\soft_oal.dll")
 end
@@ -197,7 +215,8 @@ local env={assert=assert,ffi=ffi,bit=bit,math=math,table=table,string=string,pai
                 if missing_goals and path:match("Goalkeeper%.wav$") then return nil end
                 if missing_cues and (path:match("gotBall%.wav$") or path:match("LostBall%.wav$")) then return nil end
                 assert(path:find(modular and "content\\FlAccess\\sounds\\" or "livecpk\\FlAccessGameplay\\sounds\\",1,true),"WAV outside Gameplay assets")
-                return io.open((arg[5] or "FLAccess/livecpk/FlAccessGameplay/sounds/") .. assert(path:match("([^\\]+%.wav)$")),mode)
+                local name=assert(path:match("([^\\]+%.wav)$"))
+                return io.open((arg[5] or "FLAccess/livecpk/FlAccessGameplay/sounds/") .. name,mode)
             end
             local camera_file=path:match("(camera_%d%d%.ini)$")
             if camera_file then
@@ -299,15 +318,30 @@ if render_mode then
     float(player,0x61c,90)
     for i=1,70 do frame() end
     assert(math.abs(ball_point[1]+initial[1])<0.0001 and math.abs(ball_point[3]+initial[3])<0.0001,"stationary body turn changed screen radar")
-    -- Confirmed FL27 Player=8 uses the body, not visual camera rotation.
-    camera_env[0x48]=8;float(player,0x61c,0);frame()
-    assert(math.abs(ball_point[1]-5)<.0001 and math.abs(ball_point[3]+3)<.0001,"Player yaw zero has wrong bearings")
-    float(player,0x61c,90);frame()
-    assert(math.abs(ball_point[1]+3)<.0001 and math.abs(ball_point[3]+5)<.0001,"Player body turn ignored")
-    qword(fixture.entries.CAMERA.data,16,0);frame()
-    assert(math.abs(ball_point[1]+3)<.0001 and math.abs(ball_point[3]+5)<.0001,"Player still depends on view matrix")
+    qword(fixture.entries.CAMERA.data,16,0)
+    for _,id in ipairs({7,9}) do
+        camera_env[0x48]=id;float(player,0x61c,0);frame()
+        assert(math.abs(ball_point[1]+3)<.0001 and math.abs(ball_point[3]+5)<.0001,"vertical view must face the attack")
+        float(player,0x61c,90);frame()
+        assert(math.abs(ball_point[1]+3)<.0001 and math.abs(ball_point[3]+5)<.0001,"body turn rotated vertical audio")
+        teams[1][0x254],teams[2][0x254]=255,1;frame()
+        assert(math.abs(ball_point[1]-3)<.0001 and math.abs(ball_point[3]-5)<.0001,"vertical view ignored the side switch")
+        teams[1][0x254],teams[2][0x254]=1,255
+    end
+    teams[1][0x254]=0;frame()
+    local vertical_gain=ffi.new("float[1]")
+    openal.alGetSourcef(source_ids[1],0x100a,vertical_gain)
+    assert(vertical_gain[0]==0,"unknown attack direction kept directional audio")
+    teams[1][0x254]=1
     qword(fixture.entries.CAMERA.data,16,0x240000)
-    float(player,0x61c,0/0);frame();assert(peak<.00001,"invalid Player heading kept directional audio")
+    camera_env[0x48]=8;frame()
+    assert(math.abs(ball_point[1]+5)<.0001 and math.abs(ball_point[3]+3)<.0001,"Player ball radar ignored the camera's left side")
+    float(camera,0x0c,1);float(camera,0x30,-1);frame()
+    assert(math.abs(ball_point[1]-5)<.0001 and math.abs(ball_point[3]-3)<.0001,"Player ball radar ignored camera turn")
+    qword(fixture.entries.CAMERA.data,16,0);frame()
+    openal.alGetSourcef(source_ids[1],0x100a,vertical_gain)
+    assert(vertical_gain[0]==0,"missing Player view left directional ball audible")
+    qword(fixture.entries.CAMERA.data,16,0x240000)
     camera_env[0x48]=5
     float(player,0x61c,0);float(camera,0x0c,1);float(camera,0x30,-1)
     for i=1,70 do frame() end
@@ -395,7 +429,7 @@ if render_mode then
     local away_player=block(0x720000,0x630)
     ffi.copy(away_player,player,0x630);dword(away_player,0x18,11)
     float(away_player,0x61c,180)
-    qword(block(base+0x36f3fc0+11*8,8),0,0x720000)
+    qword(players,11*8,0x720000)
     dword(controls,0x20,11);dword(cursor,4+0x20,11)
     for i=1,40 do frame() end
     openal.alGetSourcef(source_ids[6],0x100a,gain)
@@ -408,7 +442,7 @@ if render_mode then
     -- Changing controlled player to the native holder must emit gotBall.
     local another_player=block(0x680000,0x630)
     ffi.copy(another_player,player,0x630);dword(another_player,0x18,7)
-    qword(block(base+0x36f3fc0+7*8,8),0,0x680000)
+    qword(players,7*8,0x680000)
     dword(analyze_info,8+0x2601c,7);frame() -- Current actor 2 remains without possession.
     before_got=cue_count(4);dword(controls,0x20,7);dword(cursor,4+0x20,7);frame()
     assert(cue_count(4)==before_got+expected,"switch to native holder did not emit gotBall")
@@ -444,7 +478,7 @@ if render_mode then
     -- Actor zero is valid. The fix changes the source, never excludes player 0.
     local player_zero=block(0x780000,0x630)
     ffi.copy(player_zero,player,0x630);dword(player_zero,0x18,0)
-    qword(block(base+0x36f3fc0,8),0,0x780000)
+    qword(players,0,0x780000)
     local before_team=cue_count(8)
     before_got=cue_count(4)
     local before_lost_pass=cue_count(5)
@@ -540,7 +574,7 @@ if modular then
     local tone=ffi.new("int16_t[4800]")
     for i=0,4799 do tone[i]=math.floor(12000*math.sin(2*math.pi*200*i/48000)) end
     for _,speed in ipairs({25,50,200}) do
-        local stretched,frames=m.stretch_ball(tone,4800,48000,speed)
+        local stretched,frames=m.stretch_sound(tone,4800,48000,speed)
         assert(frames==4800*100/speed)
         local cycles=0
         for i=1,frames-1 do
@@ -548,12 +582,27 @@ if modular then
         end
         assert(math.abs(cycles/(frames/48000)-200)<15,"tempo shifted tone frequency")
     end
+    local function check_speed(key,source_index,speed)
+        local sound=gameplay.sound_buffers[key]
+        local value=ffi.new("int[1]")
+        local source=source_ids[source_index+1]
+        openal.alGetSourcei(source,0x1009,value) -- AL_BUFFER
+        assert(value[0]==sound.buffer)
+        openal.alGetBufferi(sound.buffer,0x2004,value) -- AL_SIZE
+        assert(value[0]==2*math.floor(sound.frames*100/speed+0.5),"speed must change the buffer duration")
+        openal.alGetBufferi(sound.buffer,0x2001,value) -- AL_FREQUENCY
+        assert(value[0]==sound.rate,"tempo must preserve the sample rate")
+        local pitch=ffi.new("float[1]")
+        openal.alGetSourcef(source,0x1003,pitch)
+        assert(pitch[0]==1,"tempo must preserve pitch")
+    end
     if render_mode then
         reader.overlay_visible=true
         gameplay.ball_speed=25
         gameplay.sound_preview_request="ball"
         gameplay.process_sound_preview(ctx)
-        assert(gameplay.loaded_ball_speed==25 and source_plays[source_ids[10]]==1)
+        assert(source_plays[source_ids[10]]==1)
+        check_speed("ball",9,25)
         reader.overlay_visible=false
         gameplay.process_sound_preview(ctx)
         assert(not gameplay.preview_active)
@@ -598,7 +647,7 @@ if modular then
     dword(analyze_info,8+0x2601c,13)
     frame();assert(#queue==1)
     reader.a11y.possession_number=true
-    tick=tick+5000;frame();assert(queue[2].text=="Pedri, camisa 8")
+    tick=tick+5000;frame();assert(queue[2].text=="8 Pedri")
     tick=tick+5000;frame();assert(#queue==2)
     dword(analyze_info,8+0x2601c,255)
     tick=tick+5000;frame();assert(#queue==2)
@@ -661,6 +710,138 @@ if modular then
     assert(queue[11].text=="Barcelona. Sai Gavi. Entra Pedri.")
     sample_substitutions(true);assert(#queue==11,"unchanged lineup must not repeat")
     print("PASS match announcements: live lineup, interval, unchanged/loose ball, off, home-first scoreboard and team identity")
+    if render_mode then
+        local positions={[2]={10,0,5},[3]={14,0,5},[4]={10,0,12},[12]={16,0,5},[13]={0,0,5}}
+        local entries={}
+        for id,position in pairs(positions) do
+            local address=0x900000+id*0x1000
+            local entry=block(address,0x630)
+            qword(entry,0,base+0x26329a8);dword(entry,0x18,id)
+            for axis=1,3 do float(entry,0x624+(axis-1)*4,position[axis]) end
+            qword(players,id*8,address)
+            entries[id]=entry
+        end
+        for _,id in ipairs({0,7,11}) do qword(players,id*8,0) end
+        dword(controls,0x20,2);camera_env[0x48]=5
+        local radar=gameplay.radar
+        radar.enabled,radar.radius,radar.mode,radar.opponent_count=1,10,1,1
+        local state=assert(gameplay.pose())
+        local targets=gameplay.m.player_radar_targets(positions,2,state.player,radar,{})
+        assert(not targets[2] and targets[3].group=="marked" and targets[4].group=="free")
+        assert(targets[12].group=="opponent" and not targets[13],"count mode must keep the nearest opponent")
+        radar.mode=0
+        targets=gameplay.m.player_radar_targets(positions,2,state.player,radar,{})
+        assert(targets[12] and targets[13],"distance mode must ignore the count")
+        radar.radius,radar.marked_enabled=9,0
+        targets=gameplay.m.player_radar_targets(positions,2,state.player,radar,{})
+        assert(not targets[3] and not targets[13] and targets[4] and targets[12],"radius and group switch must apply")
+        radar.marked_enabled=1
+        state.keeper,state.possession_known,state.owns_ball=3,true,false
+        gameplay.sound_speeds.marked=50
+        assert(gameplay.play_pose(state,0.016,nil,tick+250))
+        assert(gameplay.radar_active and gameplay.radar_active.id==3 and source_plays[source_ids[13]]==1,
+            "nearest radar target must play its WAV through OpenAL")
+        check_speed("marked",12,50)
+        local pcm=ffi.new("float[8192]")
+        for _=1,5 do openal.alcRenderSamplesSOFT(loop_device,pcm,4096) end
+        assert(gameplay.play_pose(state,0.016,nil,tick+650))
+        assert(gameplay.radar_active and gameplay.radar_active.id==12,"interleaving must let another target play")
+        state.keeper,state.tackle_active=12,true
+        assert(gameplay.play_pose(state,0.016,nil,tick+660))
+        local playing=ffi.new("int[1]")
+        openal.alGetSourcei(source_ids[13],0x1010,playing)
+        assert(not gameplay.radar_active and playing[0]~=0x1012,"opponent possession must stop player radar immediately")
+        if not missing_tackle then
+            openal.alGetSourcei(source_ids[9],0x1010,playing)
+            assert(playing[0]==0x1012,"player radar suppression must preserve tackle audio")
+        end
+        openal.alGetSourcei(source_ids[1],0x1010,playing)
+        assert(playing[0]==0x1012,"player radar suppression must preserve ball audio")
+        state.keeper,state.tackle_active=255,false
+        assert(gameplay.play_pose(state,0.016,nil,tick+670) and not gameplay.radar_active)
+        state.keeper=3
+        assert(gameplay.play_pose(state,0.016,nil,tick+680) and gameplay.radar_active,
+            "player radar must resume when a teammate receives the ball")
+        state.possession_known=false
+        assert(gameplay.play_pose(state,0.016,nil,tick+690) and not gameplay.radar_active)
+        radar.enabled=0
+        float(entries[12],0x624,12.5)
+        state.owns_ball=true
+        assert(gameplay.play_pose(state,0.016,nil,tick+800))
+        assert(source_plays[source_ids[14]]==1 and source_points[source_ids[14]][1]>0,
+            "pressure cue must point toward the nearby opponent with the main radar off")
+        state.owns_ball=false
+        assert(gameplay.play_pose(state,0.016,nil,tick+810))
+        local pressure_state=ffi.new("int[1]")
+        openal.alGetSourcei(source_ids[14],0x1010,pressure_state)
+        assert(pressure_state[0]~=0x1012,"pressure cue must stop when possession is lost")
+        radar.enabled=1
+        gameplay.mute()
+        assert(not gameplay.radar_active and not gameplay.radar_sample,"mute must clear the radar")
+        reader.overlay_visible=true
+        gameplay.sound_speeds.free=150
+        radar.free_volume=300
+        gameplay.sound_preview_request="free"
+        gameplay.process_sound_preview(ctx)
+        assert(gameplay.preview_active,"fixed radar sound must be audible from the settings")
+        check_speed("free",9,150)
+        local preview_value=ffi.new("float[1]")
+        openal.alGetSourcef(source_ids[10],0x100a,preview_value)
+        assert(math.abs(preview_value[0]-.9)<.001,"radar preview must support 300 percent volume")
+        reader.overlay_visible=false
+        gameplay.process_sound_preview(ctx)
+        state.possession_known=true
+        gameplay.sound_speeds.sidelines=200
+        assert(gameplay.play_pose(state,0.016,nil,tick+850))
+        check_speed("sidelines",1,200)
+        check_speed("sidelines",2,200)
+        local real_get_error=gameplay.al.alGetError
+        local calls=0
+        gameplay.al.alGetError=function()
+            calls=calls+1
+            if calls==2 then return 0xa003 end
+            return real_get_error()
+        end
+        assert(gameplay.play_pose(state,0.016,nil,tick+700))
+        assert(not gameplay.radar_active and gameplay.sources and not gameplay.disabled,
+            "player radar errors must leave the other audio active")
+        gameplay.al.alGetError=function() return 0xa003 end
+        assert(not gameplay.play_pose(state,0.016,nil,tick+720))
+        assert(not gameplay.disabled and not gameplay.sources,"base audio must recover without disabling match data")
+        loop_context,loop_device=nil,nil
+        player_record(0,3,1013,"Ronaldinho")
+        dword(analyze_info,8+0x2601c,3)
+        frame()
+        assert(queue[12] and queue[12].text=="Ronaldinho","an audio reset must not stop announcements for new holders")
+        score[0x22]=0 -- Card ceremonies can stop the match clock.
+        dword(cards,0,1);dword(cards,4,0);dword(cards,0x14,3);card_count[0]=1
+        tick=tick+100;frame()
+        assert(queue[13] and queue[13].match_card and queue[13].text=="Cartão amarelo para Ronaldinho")
+        dword(cards,40,1);dword(cards,44,1);dword(cards,40+0x14,23);cards[40+0x18]=1;card_count[0]=2
+        tick=tick+100;frame()
+        assert(queue[14] and queue[14].text=="Cartão vermelho para Pedri")
+        tick=tick+100;frame();assert(#queue==14,"unchanged card history must not repeat")
+        gameplay.al.alGetError=real_get_error
+        env.match.stats=function() return nil end
+        dword(flow,0xf0,52)
+        local windows={}
+        reader.a11y.native_windows={windows=windows}
+        qword(fixture.entries.CURSOR.data,16,0)
+        tick=tick+1200;frame()
+        assert(ctx.flaccess.match_playing and gameplay.status=="training radar active",
+            "free training must render without Sider stats or CURSOR/INFO")
+        windows[1]={enabled=true,slot=0,vtable=base+0x25ad750}
+        frame();assert(not ctx.flaccess.match_playing and gameplay.audio_muted)
+        windows[1]=nil
+        frame();assert(ctx.flaccess.match_playing and not gameplay.audio_muted)
+        dword(flow,0xf0,51)
+        windows[1]={enabled=true,slot=0,vtable=base+0x267e750}
+        frame();assert(ctx.flaccess.match_playing,"skills instructions must not mute gameplay")
+        dword(flow,0xf0,7)
+        frame();assert(not ctx.flaccess.match_playing and gameplay.audio_muted)
+        print("PASS player radar: fixed WAVs, range, count, interleaving, mute, preview and audio fault isolation")
+        print("PASS pressure alert only on possession and card history speaks yellow and red once")
+    end
 end
 if loop_device then
     openal.alcMakeContextCurrent(nil)

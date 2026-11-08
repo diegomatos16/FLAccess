@@ -76,6 +76,26 @@ shared.a11y.cup_group_non_team_items = {
     ["botão A"] = true,
 }
 
+function shared.a11y.native_cup_group(address)
+    local snapshot=shared.a11y.native_windows
+    local base=tonumber(shared.process_base_u64)
+    address=tonumber(address)
+    if not base or not address or not snapshot or not snapshot.selected_members
+            or not snapshot.selected_members[address] then return end
+    local window=shared.a11y.primary_input_window()
+    local cursor=window and window.cursor_detail
+    if not cursor or not cursor.group_index or cursor.group_index>=8
+            or not cursor.item_index or cursor.item_index>=4 or not cursor.selected
+            or shared.a11y.menu_read(window.address,"u64")~=base+0x2722620
+            or not shared.a11y.record_contains({address=address},window,cursor.selected) then return end
+    -- CompeGroupings exposes eight team groups in A–H order. Its other
+    -- cursor groups, including the confirmation cell, are not team groups.
+    local identity=table.concat({window.address,window.root,cursor.group_index},":")
+    local label=(shared.a11y.ui_language=="pt" and "Grupo " or "Group ")
+        .. string.char(65+cursor.group_index)
+    return {identity=identity,selection=identity .. ":" .. cursor.item_index,label=label}
+end
+
 function shared.a11y.cup_group_team_speech(text, widget_key)
     if not shared.a11y.cup_group_table_active
             or shared.a11y.cup_group_non_team_items[text]
@@ -442,6 +462,32 @@ function shared.a11y.native_player_roster_context(node)
     return value
 end
 
+function shared.a11y.roster_card_speech(roster)
+    if not roster or (roster.side~=0 and roster.side~=1)
+            or not roster.record or roster.record<0 or roster.record>=40 or not roster.player_id then return "" end
+    local base=tonumber(shared.process_base_u64)
+    if not base then return "" end
+    local data=shared.a11y.menu_read(base+0x36f38a0,"u64")
+    if not data or shared.a11y.menu_read(data,"u64")~=base+0x2618830
+            or shared.a11y.menu_read(base+0x915253,"u32")~=0x7504f883
+            or shared.a11y.menu_read(base+0x91528d,"u32")~=0x7505f883 then return "" end
+    local slot=data+roster.side*0x340+0x560+roster.record*16
+    local object=shared.a11y.menu_read(slot+8,"u64")
+    if not object or object<0x10000 or shared.a11y.menu_read(object+0x30,"u32")~=roster.player_id then return "" end
+    local status=shared.a11y.menu_read(slot,"u32")
+    if status==4 then return shared.a11y.ui_language=="pt" and ", cartão amarelo" or ", yellow card" end
+    if status==5 then return shared.a11y.ui_language=="pt" and ", cartão vermelho" or ", red card" end
+    return ""
+end
+
+local function roster_limit(window,root,impl,side,data)
+    local limit=shared.a11y.live_roster_limit(data)
+    if limit then return limit end
+    local bound=shared.a11y.roster_limits and shared.a11y.roster_limits[window]
+    if bound and bound.root==root and bound.impl==impl and bound.side==side
+            and bound.limit>=11 and bound.limit<=40 then return bound.limit end
+end
+
 function shared.a11y.read_native_player_roster_context(node)
     if not node or node.name~="playerName" then return nil end
     local snapshot=shared.a11y.native_windows
@@ -463,6 +509,21 @@ function shared.a11y.read_native_player_roster_context(node)
     if not data or shared.a11y.menu_read(data,"u64")~=base+0x2618830 then return nil end
     local windows={}
     for _,window in ipairs(snapshot.windows or {}) do windows[window.address]=window end
+    local binding=snapshot.controlled_selections and snapshot.controlled_selections[tonumber(node.address)]
+    local controller=live and binding and windows[binding.window]
+    if controller and controller.cursor_detail then
+        local target=shared.a11y.cursor_player_target(controller,controller.cursor_detail,binding.side,snapshot,base)
+        if target and target.slot==live.slot and target.side==live.side and target.object==live.object then
+            local root,impl=shared.a11y.roster_presentation_root(target.window)
+            local limit=target.slot>=11 and roster_limit(target.window,root,impl,target.side,data) or nil
+            local section=target.slot<11 and "starter" or limit and (target.slot<limit and "reserve" or "unselected")
+            if section then
+                return {section=section,identity=live.identity .. ":" .. target.window .. ":" .. (limit or -1),
+                    window=target.window,slot=target.slot,player_id=target.id,side=target.side,
+                    record=target.record,root=root,limit=limit}
+            end
+        end
+    end
     local result
     for _,owned in ipairs(member.owners or {}) do
         local panel=windows[owned.address]
@@ -492,13 +553,8 @@ function shared.a11y.read_native_player_roster_context(node)
                                     if id==player.player_id then
                                         local section,limit="starter",nil
                                         if subs then
-                                            local bound=shared.a11y.roster_limits and shared.a11y.roster_limits[window.address]
-                                            limit=shared.a11y.live_roster_limit(data)
-                                            if limit then section=slot<limit and "reserve" or "unselected"
-                                            elseif bound and bound.root==root and bound.impl==impl and bound.side==side
-                                                    and bound.limit>=11 and bound.limit<=40 then
-                                                limit=bound.limit;section=slot<limit and "reserve" or "unselected"
-                                            else section=nil end
+                                            limit=roster_limit(window.address,root,impl,side,data)
+                                            section=limit and (slot<limit and "reserve" or "unselected")
                                         end
                                         local identity=table.concat({panel.address,window.address,root,side,slot,record,object,id,limit or -1},":")
                                         if result and result.identity~=identity then return nil end
@@ -761,6 +817,7 @@ function shared.a11y.game_plan_focus_speech(text, widget_key)
     else
         announcement = shared.ui_focus_speech(text)
     end
+    announcement=announcement .. shared.a11y.roster_card_speech(roster)
     local player = shared.a11y.player_for_text(text)
     local player_focus = (player or text:match("^%d+%s+%S"))
         and (shared.a11y.game_plan_edit_contexts[context]

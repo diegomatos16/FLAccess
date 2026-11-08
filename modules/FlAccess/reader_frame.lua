@@ -439,7 +439,10 @@ function shared.m.display_frame(ctx)
     if not modal_focus_blocked and shared.a11y.deferred_modal_announcement then
         shared.a11y.drain_deferred_speech()
     end
-    if not modal_focus_blocked and not dialog_active then shared.a11y.poll_ml_date() end
+    if not modal_focus_blocked and not dialog_active then
+        shared.a11y.poll_ml_date()
+        shared.a11y.poll_competition_fixture(now_ms)
+    end
     -- Hooks and focus scanning enqueue only. Flush again after processing so
     -- confirmed navigation reaches Prism in this render frame rather than the
     -- next one. Prism calls remain serialized on display_frame.

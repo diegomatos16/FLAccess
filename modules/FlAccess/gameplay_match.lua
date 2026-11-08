@@ -7,8 +7,8 @@ function component.install(ctx)
 function shared.reset_discovery()
     shared.references={};shared.cursor_slot=nil;shared.registry_reason=nil
 end
-function shared.discovery_step()
-    local current,why=shared.registry_api.snapshot(shared.blob,shared.base)
+function shared.discovery_step(training)
+    local current,why=shared.registry_api.snapshot(shared.blob,shared.base,training)
     shared.registry_reason=why
     if current then
         for name,entry in pairs(current) do
@@ -47,6 +47,30 @@ function shared.match_state(stats)
     local data=shared.blob(tonumber(ffi.cast("uintptr_t",stats.ptr)),0x40)
     return shared.m.playing_stage(data,shared.blob(shared.ptr(data,0x38),0xa4))
 end
+
+function shared.training_mode()
+    if not shared.training_mode_supported then return end
+    local flow=shared.ptr(shared.blob(shared.base+0x3704e38,8),0)
+    local index=flow and shared.uint(shared.blob(flow+0xf0,4),0)
+    -- The game's flow table names these STEPUP_TUTORIAL and FREE_TRAINING.
+    if index==51 or index==52 then return index end
+end
+
+function shared.training_state(mode)
+    local reader=shared.core_context.reader
+    local snapshot=reader.a11y and reader.a11y.native_windows
+    if not snapshot then return nil,"training-window-state-unavailable" end
+    for _,window in ipairs(snapshot.windows) do
+        if window.enabled and window.slot<7 then
+            local tutorial_hud=mode==51 and window.vtable==shared.base+0x267e750
+            if not tutorial_hud then return nil,"training-menu-active" end
+        end
+    end
+    if reader.overlay_visible or reader.sider_overlay_visible then return nil,"training-overlay-active" end
+    local world=shared.ptr(shared.blob(shared.base+shared.GAME_ROOT,8),0)
+    if not world or world<65536 then return nil,"training-world-unavailable" end
+    return world
+end
 function shared.possession(actor)
     if not shared.possession_supported then return false,"keeper-layout-unverified",false end
     local _,raw=shared.reference_data("analyze",8)
@@ -80,6 +104,51 @@ local function roster_player(data,side,slot)
     local flags=shared.uint(record,0x144)
     if not id or id==0 or not flags or flags>=0x80000000 then return end
     return native_name(record:sub(0x39,0x75)),id
+end
+
+function shared.poll_cards(ctx,now)
+    if not shared.card_layout_supported or not shared.match_names_supported
+            or not shared.announcement_session or now<(shared.next_card_poll or 0) then return end
+    shared.next_card_poll=now+100
+    local _,raw=shared.reference_data("record",8)
+    if not raw then return end
+    -- Timeline renderer 4ebb00 reads the card array through RecordInfo+750d0.
+    -- 8c6e60 appends 40-byte entries before advancing the count (maximum 39).
+    local count_bytes=shared.blob(raw+8+0x1803c0,1)
+    local count=count_bytes and count_bytes:byte(1)
+    if not count or count>39 then return end
+    local previous=shared.card_record==raw and shared.card_count
+    if not previous or count<previous then
+        shared.card_record,shared.card_count=raw,count
+        return
+    end
+    if previous==count then return end
+    local reader=ctx.flaccess.reader
+    if reader.overlay_visible or reader.sider_overlay_visible then
+        shared.card_count=count
+        return
+    end
+    local entries=shared.blob(raw+8+0x17fd80+previous*40,(count-previous)*40)
+    local roster=shared.match_roster_data()
+    if not entries or not roster then return end
+    local spoken={}
+    for offset=0,#entries-1,40 do
+        local side,slot=shared.uint(entries,offset+4),shared.uint(entries,offset+0x14)
+        if shared.uint(entries,offset)==1 and side<=1 and slot<40 then
+            local name=roster_player(roster,side,slot)
+            if not name then return end
+            local red=entries:byte(offset+0x19)~=0
+            local pt=reader.a11y.ui_language=="pt"
+            local label=red and (pt and "Cartão vermelho" or "Red card") or (pt and "Cartão amarelo" or "Yellow card")
+            spoken[#spoken+1]=label .. (pt and " para " or " for ") .. name
+        end
+    end
+    local _,current=shared.reference_data("record",8)
+    if current~=raw or shared.blob(raw+8+0x1803c0,1)~=count_bytes or shared.match_roster_data()~=roster then return end
+    shared.card_count=count
+    if #spoken>0 and shared.speak_match(ctx,table.concat(spoken,". "),true) then
+        reader.a11y.native_speech_queue[reader.a11y.native_speech_last].match_card=true
+    end
 end
 
 local function team_name(data,side,expected)
@@ -244,6 +313,33 @@ function shared.goal_direction(actor)
     if shared.blob(world+0x1910,0x50)~=refs or shared.ptr(shared.blob(shared.base+shared.GAME_ROOT,8),0)~=world then return nil,"goal-team-changed" end
     return signs[math.floor(actor/11)+1],"native-team-direction"
 end
+local function player_position(actor,pointer)
+    local data=shared.blob(pointer,0x630)
+    if not data or shared.ptr(data,0)~=shared.base+shared.PLAYER_VTABLE or shared.uint(data,0x18)~=actor then return end
+    local position=shared.vector(data,0x624)
+    if shared.valid_position(position) then return position,data end
+end
+
+function shared.radar_positions(state)
+    local address=shared.base+shared.PLAYERS
+    local pointers=shared.blob(address,22*8)
+    if not pointers then return end
+    local positions,count={},0
+    for actor=0,21 do
+        local position=player_position(actor,shared.ptr(pointers,actor*8))
+        if position and math.abs(position[1])<=state.length+4 and math.abs(position[3])<=state.width+4 then
+            positions[actor]=position
+            count=count+1
+        end
+    end
+    if shared.blob(address,22*8)~=pointers then return end
+    if not shared.radar_scan_reported then
+        shared.report("player radar: validated positions=" .. count .. "/22")
+        shared.radar_scan_reported=true
+    end
+    return positions
+end
+
 function shared.pose()
     local controls=shared.control_data()
     local actor,slot=shared.m.controlled_slot(controls)
@@ -256,9 +352,9 @@ function shared.pose()
         actor=shared.m.cursor_actor(cursor,shared.cursor_slot);slot=shared.cursor_slot
     end
     if actor==nil then return nil,type(slot)=="string" and slot or "controlled-player-unavailable" end
-    local player=shared.ptr(shared.blob(shared.base+shared.PLAYERS+actor*8,8),0);local data=shared.blob(player,0x630)
-    if not data or shared.ptr(data,0)~=shared.base+shared.PLAYER_VTABLE or shared.uint(data,0x18)~=actor then return nil,"player-identity-unavailable" end
-    local position=shared.vector(data,0x624);if not shared.valid_position(position) then return nil,"player-position-invalid" end
+    local player=shared.ptr(shared.blob(shared.base+shared.PLAYERS+actor*8,8),0)
+    local position,data=player_position(actor,player)
+    if not position then return nil,"player-pose-unavailable" end
     local ball=shared.reference_data("ball",0x20);local field=shared.reference_data("field",0x0c)
     if not ball or not field then return nil,"resolving-game-references" end
     local ball_position=shared.vector(ball,0x10)
@@ -267,30 +363,24 @@ function shared.pose()
     if not shared.valid_position(ball_position) then return nil,"ball-position-invalid" end
     local env=shared.reference_data("camera_env",0x49)
     local camera_id=env and env:byte(0x49)
-    local camera=shared.reference_data("camera",0x5c)
-    local camera_frame,camera_reason
+    local attack_sign,goal_reason=shared.goal_direction(actor)
+    local camera_frame,camera_reason,ball_camera
     if shared.camera_api and shared.camera_source_supported then
-        -- FL27 Player=8: native session capture plus the user's explicit
-        -- confirmation of the selected view. This is not eFootball's enum.
+        local camera=shared.reference_data("camera",0x5c)
+        camera_frame,camera_reason=shared.camera_api.field_frame(camera,position,camera_id,attack_sign)
         if camera_id==8 then
-            local body_right,body_up,body_forward=shared.m.body_basis(yaw)
-            if body_forward then
-                camera_frame,camera_reason=shared.camera_api.listener_frame(nil,position,camera_id,body_forward)
-            else camera_reason="body-heading-invalid" end
+            ball_camera=shared.camera_api.listener_frame(camera,position,camera_id)
         else
-            local general=camera_id==2 or camera_id==3 or camera_id==5 or camera_id==6
-            local make=general and shared.camera_api.listener_frame or shared.camera_api.frame
-            camera_frame,camera_reason=make(camera,position,camera_id)
+            ball_camera=camera_frame
         end
         local current_env=shared.reference_data("camera_env",0x49)
         if not current_env or current_env:byte(0x49)~=camera_id then
-            camera_frame=nil;camera_reason="camera-changed-during-read"
+            camera_frame=nil;ball_camera=nil;camera_reason="camera-changed-during-read"
         end
     else camera_reason="camera-source-unverified" end
     if not length or not width or length<40 or length>70 or width<20 or width>50 then return nil,"field-size-invalid" end
     local owns_ball,ownership,possession_known,keeper=shared.possession(actor)
-    local attack_sign,goal_reason=shared.goal_direction(actor)
-    return {camera=camera_frame,camera_id=camera_id,camera_reason=camera_reason,keeper=keeper,attack_sign=attack_sign,goal_reason=goal_reason,yaw=yaw,actor=actor,slot=slot,player=position,ball=ball_position,right=camera_frame and camera_frame.right,up=camera_frame and camera_frame.up,forward=camera_frame and camera_frame.forward,length=length,width=width,owns_ball=owns_ball,ownership=ownership,possession_known=possession_known}
+    return {camera=camera_frame,ball_camera=ball_camera,camera_id=camera_id,camera_reason=camera_reason,keeper=keeper,attack_sign=attack_sign,goal_reason=goal_reason,yaw=yaw,actor=actor,slot=slot,player=position,ball=ball_position,right=camera_frame and camera_frame.right,up=camera_frame and camera_frame.up,forward=camera_frame and camera_frame.forward,length=length,width=width,owns_ball=owns_ball,ownership=ownership,possession_known=possession_known}
 end
 
     shared.stage = 5

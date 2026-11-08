@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.2 — 2026-11-08
+
+- Áudio espacial alinhado à câmera, radares por distância ou quantidade e aviso de adversário próximo com posse.
+- Prévia, volume, velocidade com tom preservado e liga/desliga por efeito. F1 lê a ajuda do módulo Sider ativo.
+- Leitura de cartões, numeração de camisas, situação no elenco, grupos e próximo confronto. Posse de bola nas estatísticas pela exploração.
+- Veja as [notas da versão](docs/RELEASE-0.2.2.pt-BR.md) para os controles e o que ainda precisa de teste no jogo.
+
 ## 0.2.1 - 2026-11-06
 
 - Revisões até a 0.2.1.35, build 87.

@@ -21,7 +21,7 @@ function shared.a11y.update_speech_state(entry,outcome,now_ms,error_code,fragmen
     elseif entry.suppress_delivery_state then return end
     local status=outcome=="delivered" and "delivered" or "pending"
     if outcome=="failed" and error_code==13 then status=fragmented and "fragmenting" or "failed-content" end
-    for _,tag in ipairs({"selected_message","structured_record","ml_date"}) do
+    for _,tag in ipairs({"selected_message","structured_record","ml_date","fixture_notice"}) do
         local origin=entry[tag]
         if origin and origin.state then
             origin.state.status=status
@@ -59,6 +59,9 @@ function shared.a11y.update_speech_state(entry,outcome,now_ms,error_code,fragmen
             field.state.review_group=field.group_title and tostring(field.group_key) .. ":" .. field.group_title or nil
         end
         shared.a11y.remember_roster_navigation(entry.selection_result)
+        if entry.selection_result and entry.selection_result.cup_group then
+            shared.a11y.last_cup_group=entry.selection_result.cup_group.identity
+        end
         if entry.page_context then shared.a11y.last_page_delivery=entry.page_context.identity end
         if entry.assignment_change then
             local change=entry.assignment_change
@@ -83,7 +86,7 @@ function shared.a11y.speech_entry_allowed(entry)
         and not entry.superseded
         and (not entry.competition_fixture
             or (shared.a11y.competition_fixture() or {}).signature==entry.competition_fixture)
-        and (not entry.match_session or (shared.core_context and (shared.core_context.match_playing or entry.pause_header)
+        and (not entry.match_session or (shared.core_context and (shared.core_context.match_playing or entry.pause_header or entry.match_card)
             and shared.core_context.gameplay.announcement_session==entry.match_session
             and not shared.overlay_visible and not shared.sider_overlay_visible))
         and (not entry.controlled_actor or (shared.a11y.controlled_player

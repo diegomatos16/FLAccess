@@ -47,4 +47,12 @@ p=camera.project(turned,{7,0,3});close(p[1],0);close(p[3],-5)
 assert(not camera.listener_frame(nil,{2,0,3},8,{0,0,0}))
 local same=assert(camera.listener_frame('invalid-view-matrix',{2,0,3},8,{0,0,1}))
 p=camera.project(same,{7,0,3});close(p[1],5)
-print('CAMERA_ORIENTATION_OK checks='..checks..' yaw/zoom/player-offset/body/height/distance/invalid/recovery; no live hearing claim')
+for id=1,6 do
+    for _,yaw in ipairs({0,20,160,180}) do
+        local field=assert(camera.field_frame(matrix(yaw,1),{2,0,3},id))
+        local sign=yaw<90 and 1 or -1
+        local point=camera.project(field,{7,1,6})
+        close(point[1],sign*5);close(point[2],1);close(point[3],-sign*3)
+    end
+end
+print('CAMERA_ORIENTATION_OK checks='..checks..' including fixed lateral bearings')

@@ -439,8 +439,8 @@ function shared.a11y.cursor_player_target(window,detail,side,snapshot,base)
                             local id=object and object>=0x10000 and shared.a11y.menu_read(object+0x30,"u32")
                             local name=id and id>0 and shared.a11y.read_native_c_string(object+0x38,64)
                             if name and #name>=2 and not name:find("%c") then
-                                local current={data=data,slot=slot,side=side,record=record,object=object,id=id,name=name}
-                                if found and (found.slot~=slot or found.id~=id) then return nil end
+                                local current={data=data,slot=slot,side=side,record=record,object=object,id=id,name=name,window=roster.address}
+                                if found and (found.slot~=slot or found.id~=id or found.window~=current.window) then return nil end
                                 found=current
                             end
                         end
@@ -770,6 +770,7 @@ function shared.a11y.engine_focus_candidates()
         -- glyph/counter nodes and controller-icon captions are not menu choices.
         local value_member=row and node and row.value_widget_key==key and row.value==node.text
         local decoration=node and (node.name=="padIcon" or node.name=="abilityNumber"
+            or (node.text=="OK" and shared.a11y.ok_caption_only(node.address))
             or shared.a11y.is_media_caption(node) or shared.a11y.is_menu_description(node)
             or (node.name and node.name:match("_value") and not (row and row.is_control
                 and (row.native_field or row.structural or row.native_slider)))
@@ -1008,6 +1009,8 @@ function shared.a11y.engine_selection_identity(key,node)
     if music then identity=identity .. ":music=" .. music.signature end
     local assignment=shared.a11y.native_assignment_context(node.address)
     if assignment then identity=identity .. ":assignment=" .. assignment.identity end
+    local group=shared.a11y.native_cup_group(node.address)
+    if group then identity=identity .. ":cup-group=" .. group.selection end
     local member=shared.a11y.native_windows and shared.a11y.native_windows.members
         and shared.a11y.native_windows.members[tonumber(node.address)]
     if member and member.active then

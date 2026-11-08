@@ -64,7 +64,7 @@ local function group_info(read,image,registry,group,property)
     if not valid(target) then return nil,"registry-info-unavailable" end
     return {entry=entry,target=target}
 end
-function m.snapshot(read,image)
+function m.snapshot(read,image,training)
     local owner=pointer(read(image+0x37f0ac8,8),0)
     local owner_data=valid(owner) and read(owner,0x28)
     if pointer(owner_data,0)~=image+0x2ac6670 then return nil,"registry-service-unavailable" end
@@ -73,14 +73,15 @@ function m.snapshot(read,image)
     if pointer(registry_data,0)~=image+0x2acaa40 then return nil,"registry-root-invalid" end
     local root=pointer(registry_data,0x10)
     if not valid(root) then return nil,"registry-directory-unavailable" end
-    local groups,why=tree(read,image,registry,root,0x38,{BALL=true,CAMERA=true,FIELD=true,CURSOR=true,MATCH=true,ANALYZE=true})
+    local groups,why=tree(read,image,registry,root,0x38,{BALL=true,CAMERA=true,FIELD=true,CURSOR=true,MATCH=true,ANALYZE=true,RECORD=true})
     if not groups then return nil,why end
     local result={}
     for name,key in pairs({ball="BALL",field="FIELD",cursor="CURSOR"}) do
         local group=groups[key]
-        if not group then return nil,"registry-group-missing-" .. key end
-        result[name],why=group_info(read,image,registry,group)
-        if not result[name] then return nil,why .. "-" .. key end
+        if group then result[name],why=group_info(read,image,registry,group) end
+        if not result[name] and (not training or name~="cursor") then
+            return nil,group and why .. "-" .. key or "registry-group-missing-" .. key
+        end
     end
     if groups.CAMERA then result.camera=group_info(read,image,registry,groups.CAMERA) end
     -- Optional: possession must never disable the already working spatial radar.
@@ -89,6 +90,7 @@ function m.snapshot(read,image)
         result.camera_env=group_info(read,image,registry,groups.MATCH,"ENV")
     end
     if groups.ANALYZE then result.analyze=group_info(read,image,registry,groups.ANALYZE) end
+    if groups.RECORD then result.record=group_info(read,image,registry,groups.RECORD) end
     -- Reject a lookup crossing a root/session replacement.
     if pointer(read(image+0x37f0ac8,8),0)~=owner or pointer(read(owner+0x20,8),0)~=registry
         or pointer(read(registry+0x10,8),0)~=root then return nil,"registry-session-changed" end

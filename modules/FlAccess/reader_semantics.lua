@@ -786,6 +786,7 @@ end
 -- +0x38 is deliberately not used: its ownership semantics remain unproven.
 function shared.a11y.reset_read_context(reason)
     shared.a11y.last_roster_navigation=nil
+    shared.a11y.last_cup_group=nil
     if reason == "transition" then shared.a11y.answer_chain = nil end
     local old = shared.a11y.read_context
     shared.a11y.deferred_modal_announcement,shared.a11y.deferred_speech=nil,nil
@@ -984,8 +985,8 @@ function shared.a11y.selection_result(request)
     if not label or shared.a11y.empty_selection_caption(label) or shared.a11y.unresolved_format(label) then return nil end
     -- A confirmed carousel caption owns selection; its incidental OK node
     -- must not interrupt the current league/club. Dialog answers are separate.
-    if label=="OK" and request.source~="dialog-answer" and shared.a11y.native_list_has_focus()
-            and shared.a11y.native_list_selection.text~="OK" then return nil end
+    if label=="OK" and (shared.a11y.ok_caption_only(address) or (request.source~="dialog-answer"
+            and shared.a11y.native_list_has_focus() and shared.a11y.native_list_selection.text~="OK")) then return nil end
     local value=row and row.value
     local music=shared.a11y.native_music_packet(node)
     local text=music and music.text or (row and shared.control_speech(row) or shared.a11y.engine_focus_speech(label,node))
@@ -1005,6 +1006,7 @@ function shared.a11y.selection_result(request)
         origin=address and shared.a11y.capture_speech_origin(address),
         value_origin=row and row.value_widget and shared.a11y.capture_speech_origin(row.value_widget),
         missing={}}
+    if request.source=="engine-focus" then result.cup_group=shared.a11y.native_cup_group(address) end
     result.roster=shared.a11y.native_player_roster_context(node)
     result.player_section=node and node.name and node.name:lower():find("playername",1,true)
         and ((result.roster and result.roster.section) or shared.a11y.player_component_section(node)) or nil
@@ -1096,6 +1098,9 @@ function shared.a11y.deliver_selection_result(result,options)
     result.signature=shared.a11y.selection_result_signature(result)
     local before=shared.a11y.native_speech_last
     local spoken=options.value_only and result.value or result.spoken
+    if result.cup_group and result.cup_group.identity~=shared.a11y.last_cup_group then
+        spoken=result.cup_group.label .. ". " .. spoken
+    end
     if not result.page and options.interrupt~=false then
         for index=shared.a11y.native_speech_first,shared.a11y.native_speech_last do
             local pending=shared.a11y.native_speech_queue[index]
