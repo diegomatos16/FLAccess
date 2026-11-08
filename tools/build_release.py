@@ -1,4 +1,4 @@
-"""Build FlAccess.zip: content/modules/sider for0.2.0, legacy layout for older sources."""
+"""Build FlAccess.zip with the runtime files for SiderAddons."""
 from pathlib import Path
 import argparse
 import hashlib
@@ -99,38 +99,29 @@ def build(root, output=None):
 
 
 def build_modular(root, output=None):
-    """Package native Sider components. Do not rebuild or overwrite old releases."""
+    """Package only files loaded by Sider and the active FLAccess components."""
     root = Path(root)
-    for name in ('sider-core/sider.dll', 'modules/FlAccess/bin/prism.dll',
-                 'modules/FlAccess/bin/soft_oal.dll', 'modules/FlAccess/bin/flaccess_audio_master.dll',
-                 'modules/FlAccess/licenses/LICENSE', 'modules/FlAccess/licenses/NOTICE'):
-        if not (root / name).is_file(): raise ValueError('Missing required runtime: ' + name)
     components = json.loads((root / 'modules/FlAccess/components.json').read_text(encoding='utf-8'))
-    public_version = '.'.join(components['version'].split('.')[:3])
     entries = components['modules']
-    if len(entries) != len(set(entries)) or entries[0] != 'FlAccess/core.lua':
+    if not entries or len(entries) != len(set(entries)) or entries[0] != 'FlAccess/core.lua':
         raise ValueError('Invalid component order or duplicate module')
-    for name in entries:
-        if not (root / 'modules' / name).is_file(): raise ValueError('Missing component: ' + name)
-    files = {}
-    for directory in ('modules/FlAccess', 'content/FlAccess'):
-        for path in (root / directory).rglob('*'):
-            if path.is_file() and '__pycache__' not in path.parts and path.suffix not in ('.log', '.pyc'):
-                relative = path.relative_to(root).as_posix()
-                if '/state/' in relative and path.name != 'live-layout.txt': continue
-                files[relative] = path
-    files.update({'sider/sider.dll': root / 'sider-core/sider.dll',
-                  'sider/sider.ini.snippet': root / 'packaging/sider.ini.snippet',
-                  'sider/INSTALL.pt-BR.md': root / 'packaging/INSTALL.pt-BR.md',
-                  'sider/INSTALL.en.md': root / 'packaging/INSTALL.en.md',
-                  'sider/RELEASE.pt-BR.md': root / f'docs/RELEASE-{public_version}.pt-BR.md',
-                  'sider/RELEASE.en.md': root / f'docs/RELEASE-{public_version}.en.md',
-                  'sider/ARCHITECTURE.pt-BR.md': root / 'docs/ARQUITETURA-0.2.0.pt-BR.md',
-                  'sider/README.md': root / 'sider-core/README.md'})
-    for path in (root / 'sider-core/licenses').rglob('*'):
-        if path.is_file(): files['sider/licenses/' + path.relative_to(root/'sider-core/licenses').as_posix()] = path
+    sounds = ('ball.wav', 'alertSidelines.wav', 'alertGoal line.wav',
+              'alertYourGoalkeeper.wav', 'alertOpponentGoalkeeper.wav',
+              'gotBall.wav', 'LostBall.wav', 'teamStillWithBall.wav', 'alertTacle.wav',
+              'playerControlled.wav', 'FreePlayer.wav', 'MarckedPlayer.wav',
+              'PlayerOpponent.wav', 'PlayerNextOpponent.wav')
+    paths = [f'modules/{name}' for name in entries]
+    paths += ['modules/FlAccess/FlAccess.ini', 'modules/FlAccess/state/live-layout.txt',
+              'modules/FlAccess/bin/prism.dll', 'modules/FlAccess/bin/soft_oal.dll',
+              'modules/FlAccess/bin/flaccess_audio_master.dll']
+    paths += [f'content/FlAccess/sounds/{name}' for name in sounds]
+    paths += [f'content/FlAccess/cameras/camera_{number:02d}.ini' for number in range(10)]
+    paths += [f'content/FlAccess/text/{name}.tsv' for name in ('pt', 'en', 'styles-pt', 'styles-en')]
+    files = {name: root / name for name in paths}
+    files['sider.dll'] = root / 'sider-core/sider.dll'
     payload = {}
     for name, path in sorted(files.items()):
+        if not path.is_file(): raise ValueError('Missing required runtime: ' + name)
         data = path.read_bytes()
         if not data: raise ValueError('Empty payload: ' + name)
         if name.endswith('.dll') and data[:2] != b'MZ': raise ValueError('Invalid DLL: ' + name)
@@ -142,9 +133,8 @@ def build_modular(root, output=None):
     bootstrap = (root / 'modules/FlAccess/reader_bootstrap.lua').read_text(encoding='utf-8')
     build_number = int(re.search(r'\bbuild\s*=\s*(\d+)', bootstrap).group(1))
     manifest = {'version': components['version'], 'build': build_number, 'source_commit': commit,
-                'components': components, 'prism': json.loads((root/'modules/FlAccess/PRISM-SOURCE.json').read_text()),
+                'components': components,
                 'sha256': {n:hashlib.sha256(d).hexdigest() for n,d in payload.items()}}
-    payload['sider/BUILD.json'] = (json.dumps(manifest,indent=2)+'\n').encode('utf-8')
     output = Path(output) if output else root / 'release' / components['version']
     output.mkdir(parents=True,exist_ok=True)
     archive = output/'FlAccess.zip'
@@ -156,8 +146,6 @@ def build_modular(root, output=None):
         if z.testzip() is not None: raise ValueError('Corrupt installer archive')
         for name,data in payload.items():
             if z.read(name)!=data: raise ValueError('Installer differs: '+name)
-    digest=hashlib.sha256(archive.read_bytes()).hexdigest()
-    (output/'SHA256SUMS.txt').write_text(digest+'  FlAccess.zip\n',encoding='ascii')
     return archive,manifest
 
 

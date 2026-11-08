@@ -1,3 +1,8 @@
+## Pacotes de distribuição
+
+- Gere o ZIP com uma lista explícita dos arquivos necessários em execução, nos caminhos de destino. Inclua só os módulos carregados, os binários, a configuração de execução e os recursos usados pelo mod.
+- Mantenha documentação, instruções de instalação, licenças, arquivos de desenvolvimento, diagnósticos, metadados de build e variantes de sons fora do ZIP. Preserve esses arquivos no repositório.
+
 ## Leitura de menus e diálogos
 
 - Antes de implementar ou corrigir uma leitura, procure outros menus, modos e torneios que usam o mesmo componente, evento ou estrutura. Confira o código, as capturas e os logs disponíveis.

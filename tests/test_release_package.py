@@ -2,7 +2,6 @@
 from pathlib import Path
 import hashlib
 import importlib.util
-import json
 import shutil
 import tempfile
 import unittest
@@ -15,25 +14,30 @@ SPEC.loader.exec_module(release)
 
 
 class ReleasePackageTests(unittest.TestCase):
-    def test_installer_contains_both_exact_dlls_and_complete_manifest(self):
+    def test_installer_contains_only_runtime_files_at_destination_paths(self):
         with tempfile.TemporaryDirectory() as directory:
             archive, manifest = release.build(ROOT, directory)
             with zipfile.ZipFile(archive) as z:
-                self.assertEqual(json.loads(z.read('sider/BUILD.json')), manifest)
-                self.assertEqual({p.split('/')[0] for p in z.namelist()}, {'content', 'modules', 'sider'})
+                self.assertEqual(set(z.namelist()), set(manifest['sha256']))
+                self.assertEqual({p.split('/')[0] for p in z.namelist()}, {'content', 'modules', 'sider.dll'})
                 self.assertEqual(manifest['version'], '0.2.2')
                 self.assertEqual(len(manifest['components']['modules']), 31)
-                for language in ('pt-BR', 'en'):
-                    self.assertEqual(z.read(f'sider/RELEASE.{language}.md'),
-                                     (ROOT/f'docs/RELEASE-0.2.2.{language}.md').read_bytes())
+                self.assertEqual(len(z.namelist()), 65)
                 for entry in manifest['components']['modules']:
                     name = 'modules/' + entry
                     self.assertEqual(z.read(name), (ROOT/name).read_bytes())
-                self.assertEqual(z.read('sider/sider.dll'), (ROOT/'sider-core/sider.dll').read_bytes())
+                self.assertEqual(z.read('sider.dll'), (ROOT/'sider-core/sider.dll').read_bytes())
                 for name, digest in manifest['sha256'].items():
                     self.assertEqual(hashlib.sha256(z.read(name)).hexdigest(), digest)
-                self.assertFalse(any(name.endswith(('.log', '.exe')) or 'probe' in name.lower() for name in z.namelist()))
+                self.assertFalse(any(name.endswith(('.log', '.exe', '.md', '.json', '.h', '.snippet'))
+                                     or 'license' in name.lower() for name in z.namelist()))
                 self.assertFalse(any('FlAccessReader/' in p or 'FlAccessGameplay/' in p for p in z.namelist()))
+                self.assertNotIn('sider.ini', z.namelist())
+                sounds = {Path(name).name for name in z.namelist() if name.endswith('.wav')}
+                self.assertEqual(sounds, {'ball.wav', 'alertSidelines.wav', 'alertGoal line.wav',
+                    'alertYourGoalkeeper.wav', 'alertOpponentGoalkeeper.wav', 'gotBall.wav',
+                    'LostBall.wav', 'teamStillWithBall.wav', 'alertTacle.wav', 'playerControlled.wav',
+                    'FreePlayer.wav', 'MarckedPlayer.wav', 'PlayerOpponent.wav', 'PlayerNextOpponent.wav'})
                 for camera in range(10):
                     self.assertIn(f'content/FlAccess/cameras/camera_{camera:02d}.ini', z.namelist())
                 for dll in ('prism.dll','soft_oal.dll','flaccess_audio_master.dll'):
@@ -42,7 +46,7 @@ class ReleasePackageTests(unittest.TestCase):
             first=archive.read_bytes()
             release.build(ROOT,directory)
             self.assertEqual(archive.read_bytes(),first)
-            self.assertEqual((Path(directory)/'SHA256SUMS.txt').read_text().split()[0],hashlib.sha256(first).hexdigest())
+            self.assertEqual(list(Path(directory).iterdir()), [archive])
 
     def test_packaging_stops_if_either_runtime_dll_is_missing(self):
         with tempfile.TemporaryDirectory() as directory:
