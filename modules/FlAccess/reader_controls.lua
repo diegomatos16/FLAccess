@@ -422,6 +422,10 @@ end
 -- its own scalar cache; never retain register pointers or memory across calls.
 local observe_text_set=shared.m.on_ui_text_set
 function shared.m.on_ui_text_set(ctx,event_id,registers)
+    if shared.a11y.standings_repaint(tonumber(shared.read_u64(registers.rcx))) then
+        shared.a11y.standings_text_skipped=(shared.a11y.standings_text_skipped or 0)+1
+        return
+    end
     local previous_work=shared.a11y.render_read_work
     local previous_metric=shared.a11y.render_metric
     local started=tonumber(ffi.C.GetTickCount64())

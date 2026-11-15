@@ -14,7 +14,7 @@ installer=importlib.util.module_from_spec(SPEC);SPEC.loader.exec_module(installe
 
 class MigrationTests(unittest.TestCase):
     def test_ini_changes_only_flaccess_and_keeps_order_and_other_mods(self):
-        before='[sider]\r\ncpk.root = ".\\livecpk\\other"\r\ncpk.root = ".\\livecpk\\FlAccessReader"\r\nlua.module = "FlAccessReader\\FlAccessReader.lua"\r\nlua.module = "FlAccessGameplay\\FlAccessGameplay.lua"\r\nlua.module = "camera.lua"\r\n'
+        before='[sider]\r\ncpk.root = ".\\livecpk\\other"\r\ncpk.root = ".\\livecpk\\FlAccessReader"\r\nlua.module = "FlAccessReader\\FlAccessReader.lua"\r\nlua.module = "FlAccessGameplay\\FlAccessGameplay.lua"\r\nlua.module = "FlAccessOpeningTrace.lua"\r\nlua.module = "camera.lua"\r\n'
         entries=['FlAccess/core.lua','FlAccess/reader_lifecycle.lua']
         result=installer.migrate_ini(before,entries)
         self.assertIn('cpk.root = ".\\livecpk\\other"\r\n',result)
@@ -44,9 +44,13 @@ class MigrationTests(unittest.TestCase):
                 p=sider/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(data)
             # Backups are inside fixture, never a user directory.
             fixture=Path(directory)/'source';shutil.copytree(ROOT/'modules/FlAccess',fixture/'modules/FlAccess')
+            shutil.copy2(ROOT/'modules/FlAccessOpeningTrace.lua',fixture/'modules/FlAccessOpeningTrace.lua')
             shutil.copytree(ROOT/'content/FlAccess',fixture/'content/FlAccess')
             report=installer.install(fixture,sider)
-            self.assertEqual(len(report['modules']),31)
+            self.assertEqual(len(report['modules']),32)
+            self.assertEqual((sider/'modules/FlAccessOpeningTrace.lua').read_bytes(),
+                             (ROOT/'modules/FlAccessOpeningTrace.lua').read_bytes())
+            self.assertEqual((sider/'sider.ini').read_text().count('FlAccessOpeningTrace.lua'),1)
             self.assertEqual((sider/'sider.dll').read_bytes(),b'MZ-original-core')
             self.assertEqual((sider/'content/FlAccess/sounds/ball.wav').read_bytes(),b'custom-WAV')
             self.assertIn('pan_sign=-1',(sider/'content/FlAccess/cameras/camera_02.ini').read_text())

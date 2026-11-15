@@ -1,32 +1,17 @@
-# Instalação — FLAccess 0.2.2 — experimental
+# Instalação — FLAccess 0.2.3 — experimental
 
-Use uma instalação do Football Life 27 no Windows com a pasta SiderAddons.
-Extraia FlAccess.zip em uma pasta temporária. O pacote traz os módulos, sons,
-perfis de câmera, DLLs do mod e a configuração de exemplo.
+Para Football Life 27 no Windows, com SiderAddons e Sider 7.3.3 compatível.
+O FlAccess.zip contém apenas content, modules e sider.dll.
 
-1. Feche o jogo e o Sider. Faça backup de sider.ini, sider.dll, INIs, WAVs
-   e perfis de câmera personalizados.
-2. Mescle content e modules no SiderAddons, preservando demais mods.
-3. Em instalações compatíveis com Sider 7.3.3, copie sider/sider.dll do ZIP
-   para SiderAddons/sider.dll. Essa atualização habilita F1 nos outros módulos.
-4. Abra SiderAddons/sider.ini. Na seção [sider], confira que lua.enabled,
-   luajit.ext.enabled e match-stats.enabled estão com valor 1. Adicione as 31
-   linhas lua.module de sider/sider.ini.snippet na ordem fornecida. Em uma
-   atualização, substitua as linhas do FLAccess anterior por esse bloco.
-5. Remova somente cpk.root antigos de FlAccessReader e FlAccessGameplay.
-   Recursos próprios são lidos diretamente de content/FlAccess.
-6. Preserve valores read_tooltips, use_text_assets e tackle_* anteriores em
-   modules/FlAccess/FlAccess.ini. Não sobrescreva preferências com padrões do ZIP.
-7. Copie WAVs personalizados para content/FlAccess/sounds; perfis camera_00.ini
-   até 09 para content/FlAccess/cameras. Catálogos ficam em content/FlAccess/text.
-8. Inicie o Football Life pelo atalho normal com Sider. No painel FLAccess,
-   F1 lê a ajuda e F4 toca a prévia do efeito selecionado.
+1. Feche jogo e Sider. Faça backup de sider.ini, sider.dll e dos INIs, WAVs e perfis de câmera personalizados.
+2. Mescle content e modules em SiderAddons, preservando os demais mods. Em atualizações, preserve modules/FlAccess/FlAccess.ini e seus recursos personalizados.
+3. Copie sider.dll da raiz do ZIP para SiderAddons/sider.dll.
+4. Na seção [sider] de SiderAddons/sider.ini, confira lua.enabled = 1, luajit.ext.enabled = 1 e match-stats.enabled = 1. Substitua as entradas anteriores do FLAccess pelas 32 linhas lua.module de [sider.ini.snippet](sider.ini.snippet), na ordem fornecida. Remova também uma entrada antiga de FlAccessOpeningTrace.lua antes de adicionar o bloco, evitando duplicatas. Não remova entradas dos outros mods.
+5. Remova somente cpk.root antigos de FlAccessReader e FlAccessGameplay. Os recursos atuais ficam em content/FlAccess.
+6. Inicie pelo atalho normal com Sider e leitor de tela. F1 lê a ajuda do módulo ativo; I/K ou analógico direito exploram campos. No painel FLAccess, Audiodescrição controla cenas de abertura e escalações. Uniformes são lidos pela navegação; replays estão desativados.
 
-No checkout: python tools/install_flaccess.py --sider <caminho-SiderAddons>.
-Script registra backup e migra configurações/recursos; Python não é necessário
-para jogar. Diretórios antigos ficam como backup, com entradas desativadas.
-Para atualizar o núcleo, siga o passo 3 usando sider-core/sider.dll do checkout.
+A última linha, lua.module = "FlAccessOpeningTrace.lua", é necessária para a audiodescrição. O nome histórico do arquivo não significa que seja apenas diagnóstico.
 
-DLLs em modules/FlAccess/bin; licenças em licenses e COPYING.OpenAL.
-Prism compilado do repositório oficial; commit/hash em PRISM-SOURCE.json.
-Compatibilidade experimental com Football Life 27. Consulte as notas em RELEASE.pt-BR.md.
+Para instalar a partir do checkout: python tools/install_flaccess.py --sider <caminho-SiderAddons>. O script faz backup e preserva configurações e recursos. Para atualizar o núcleo, copie sider-core/sider.dll conforme o passo 3. Python não é necessário para jogar.
+
+DLLs em modules/FlAccess/bin. Código-fonte e licenças no repositório, incluindo modules/FlAccess/licenses, COPYING.OpenAL e PRISM-SOURCE.json. Consulte as [notas da versão](../docs/RELEASE-0.2.3.pt-BR.md).

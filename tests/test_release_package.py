@@ -20,9 +20,11 @@ class ReleasePackageTests(unittest.TestCase):
             with zipfile.ZipFile(archive) as z:
                 self.assertEqual(set(z.namelist()), set(manifest['sha256']))
                 self.assertEqual({p.split('/')[0] for p in z.namelist()}, {'content', 'modules', 'sider.dll'})
-                self.assertEqual(manifest['version'], '0.2.2')
-                self.assertEqual(len(manifest['components']['modules']), 31)
-                self.assertEqual(len(z.namelist()), 65)
+                self.assertEqual(manifest['version'], '0.2.3')
+                self.assertEqual(len(manifest['components']['modules']), 32)
+                self.assertEqual(len(z.namelist()), 66)
+                self.assertIn('modules/FlAccessOpeningTrace.lua', z.namelist())
+                self.assertNotIn('ad_replays', z.read('modules/FlAccess/FlAccess.ini').decode())
                 for entry in manifest['components']['modules']:
                     name = 'modules/' + entry
                     self.assertEqual(z.read(name), (ROOT/name).read_bytes())

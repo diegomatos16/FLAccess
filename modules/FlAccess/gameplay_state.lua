@@ -5,7 +5,7 @@ function component.install(ctx)
     local shared = ctx.flaccess.gameplay
     assert(shared.stage == 0, "FLAccess gameplay: missing or reordered component state")
 -- Local gameplay experiment 1. All positions come from the running game.
-shared.m={version="0.2.0 experimental19 audio recovery"}
+shared.m={version="0.2.3"}
 shared.shared_audio,shared.registry_api,shared.registry_reason,shared.camera_api = nil,nil,nil,nil
 shared.camera_source_supported=false
 shared.possession_supported=false

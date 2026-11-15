@@ -16,9 +16,11 @@ local categories={
         5,6,"speed_tackle",36,16,"speed_gotBall",38,18,"speed_teamStillWithBall",
         37,17,"speed_LostBall",42,22,"speed_controlled"}},
     {label="radar_category",radar=true},
+    {label="ad_category",options={60,61,62}},
     {label="diagnostics_category",options={2}},
 }
 local tts_options={[8]="voice",[9]="rate",[10]="pitch",[11]="volume"}
+local ad_options={[60]="enabled",[61]="opening",[62]="lineups"}
 local sound_options={[12]="ball",[13]="sidelines",[14]="own_goal",[15]="opponent_goal",
     [16]="gotBall",[17]="LostBall",[18]="teamStillWithBall",[20]="endline",[22]="controlled"}
 local category_index,category_open=1,false
@@ -88,6 +90,11 @@ end
 function shared.a11y.selected_option_text(option)
     local s = shared.a11y.strings()
     option=option or shared.a11y.selected_option
+    local ad_key=ad_options[option]
+    if ad_key then
+        return string.format(s.sound_toggle,s["ad_" .. ad_key],
+            shared.a11y["ad_" .. ad_key] and s.sound_on or s.sound_off)
+    end
     local speed_key=type(option)=="string" and option:match("^speed_(.+)$")
     if speed_key then
         local gameplay=shared.core_context.gameplay
@@ -289,6 +296,14 @@ function shared.m.key_down(ctx, vkey)
         gameplay.radar[key]=value
         shared.save_config_values(shared.a11y,option,tostring(value))
         shared.speak(shared.a11y.selected_option_text())
+        return
+    end
+    local ad_key=ad_options[option]
+    if ad_key then
+        local a11y=shared.a11y
+        a11y["ad_" .. ad_key]=reset or not a11y["ad_" .. ad_key]
+        shared.save_config_values(a11y,"ad_" .. ad_key,tostring(a11y["ad_" .. ad_key]))
+        shared.speak(a11y.selected_option_text())
         return
     end
     local tts=tts_options[option]

@@ -603,6 +603,10 @@ end
 -- reads for this callback only, just as text setters do; Sider has no pcall.
 local observe_focus_event=shared.m.on_ui_focus_event
 function shared.m.on_ui_focus_event(ctx,event_id,registers)
+    if shared.a11y.standings_repaint(tonumber(shared.read_u64(registers.rcx))) then
+        shared.a11y.standings_focus_skipped=(shared.a11y.standings_focus_skipped or 0)+1
+        return
+    end
     local work,metric=shared.a11y.render_read_work,shared.a11y.render_metric
     local started=tonumber(ffi.C.GetTickCount64())
     if not work then shared.a11y.render_read_work={} end

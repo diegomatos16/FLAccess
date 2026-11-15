@@ -388,6 +388,9 @@ function shared.a11y.dispatch_native_selection(modal_blocked,dialog_active)
         -- The bound text_item/text_value pair owns this selection. A second
         -- compatibility focus announcement would interrupt its own tooltip.
         route,handled="main-menu-choice",true
+    elseif not dialog_active and shared.a11y.active_key_config() then
+        shared.a11y.poll_structured_record(modal_blocked)
+        route,handled="key-config",true
     elseif not dialog_active and not shared.a11y.native_information_context()
             and shared.a11y.active_native_standings() then
         -- The mapped table owns club selection even while generic list

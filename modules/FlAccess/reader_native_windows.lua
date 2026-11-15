@@ -420,9 +420,13 @@ function shared.a11y.observe_control_font(data,offset,total)
             ["55036:38782804"]="playstation",["760560:3728391537"]="playstation",
             ["47727:2475288431"]="xbox",["757104:3636751182"]="xbox",
             ["108565:763610868"]="xbox",["3021552:1135989911"]="xbox",
+            -- SMK_Addcontrol WESYS stream; its decoded payload is the
+            -- already verified 757104:3636751182 Xbox font above.
+            ["45085:2099799071"]="xbox",
         }
         shared.a11y.control_font_family=known[tostring(total)..":"..tostring(b*65536+a)]
-        log("[FLAccess] control-font=" .. tostring(shared.a11y.control_font_family or "unrecognized"))
+        log("[FLAccess] control-font=" .. tostring(shared.a11y.control_font_family or "unrecognized")
+            .. " size=" .. total .. " adler32=" .. (b*65536+a))
         shared.a11y.control_font_scan=nil
     end
 end

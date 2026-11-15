@@ -4,7 +4,7 @@ function m.init(ctx)
     assert(not ctx.flaccess, "FLAccess is already initialized; remove duplicate/legacy module entries")
     local root = ctx.sider_dir .. "modules\\FlAccess\\"
     ctx.flaccess = {
-        version = "0.2.2", root = root,
+        version = "0.2.3", root = root,
         content = ctx.sider_dir .. "content\\FlAccess\\",
         reader = {stage = 0}, gameplay = {stage = 0},
     }
@@ -44,7 +44,11 @@ function m.init(ctx)
         local values = {read_tooltips = tostring(a11y.read_tooltips), use_text_assets = tostring(a11y.use_text_assets)}
         values.possession_interval=tostring(a11y.possession_interval)
         values.possession_number=tostring(a11y.possession_number)
+        for _,key in ipairs({"enabled","opening","lineups"}) do
+            values["ad_" .. key]=tostring(a11y["ad_" .. key]~=false)
+        end
         local keys={"read_tooltips", "use_text_assets", "possession_interval", "possession_number"}
+        for _,key in ipairs({"enabled","opening","lineups"}) do keys[#keys+1]="ad_" .. key end
         if extra_key then
             values[extra_key]=extra_value
             keys[#keys+1]=extra_key
@@ -62,7 +66,7 @@ function m.init(ctx)
             old:close()
         end
         for _,key in ipairs(keys) do
-            if not seen[key] then lines[#lines+1] = key .. " = " .. values[key] end
+            if not seen[key] then lines[#lines+1] = key .. " = " .. values[key];seen[key]=true end
         end
         local file = io.open(a11y.config_path, "wt")
         if not file then log("[FLAccess] config-write-failed " .. a11y.config_path); return end

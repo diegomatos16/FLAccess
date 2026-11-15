@@ -165,6 +165,11 @@ function shared.a11y.finish_render_work()
             log(string.format("[FLAccess] focus-hook calls=%d total-ms=%d max-ms=%d memory-copies=%d",focus_hooks.calls,focus_hooks.ms,focus_hooks.max_ms,focus_hooks.reads))
             shared.a11y.focus_hook_stats=nil
         end
+        local text_skips,focus_skips=shared.a11y.standings_text_skipped or 0,shared.a11y.standings_focus_skipped or 0
+        if text_skips+focus_skips>0 then
+            log("[FLAccess] standings-repaints text-skipped=" .. text_skips .. " focus-skipped=" .. focus_skips)
+            shared.a11y.standings_text_skipped,shared.a11y.standings_focus_skipped=0,0
+        end
         log("[FLAccess] speech-queue superseded-navigation=" .. tostring(stats.queue_replaced))
         log("[FLAccess] text-observations passive=" .. tostring(shared.a11y.passive_text_observations or 0)
             .. " active=" .. tostring(shared.a11y.active_text_observations or 0))
@@ -232,6 +237,7 @@ function shared.m.display_frame(ctx)
     shared.a11y.render_speech_allowed=false
     shared.a11y.render_metric={started=tonumber(ffi.C.GetTickCount64()),reads=0}
     shared.frame = shared.frame + 1
+    shared.a11y.standings_render_owner=nil
     shared.a11y.current_frame = shared.frame
     shared.a11y.poll_direct_message_update()
     if not shared.prism_started and shared.frame >= 120 then
@@ -263,6 +269,33 @@ function shared.m.display_frame(ctx)
         return
     end
     shared.a11y.poll_native_confirmation()
+    local context=shared.a11y.read_context_state()
+    local standings=not shared.overlay_visible and not shared.sider_overlay_visible
+        and not shared.a11y.keyboard_window and context.kind~="dialog"
+        and not context.structural_question and not context.structural_event and shared.a11y.active_native_standings()
+    if standings then
+        -- This table has a native selected-row adapter. Do not rediscover
+        -- unrelated menus or process every repainted label on every frame.
+        shared.a11y.standings_render_owner={address=standings.address,root=standings.root,
+            snapshot=snapshot,frame=shared.frame}
+        local identity=standings.address .. ":" .. standings.root
+        if identity~=shared.a11y.standings_fast_identity then
+            shared.a11y.standings_fast_identity=identity
+            log("[FLAccess] standings-lightweight enter owner=" .. identity)
+        end
+        shared.game_was_foreground=true
+        local now=tonumber(ffi.C.GetTickCount64())
+        shared.a11y.poll_attribute_input(now)
+        shared.a11y.poll_structured_record(shared.process_startup_speech(now))
+        shared.a11y.render_metric.focus_ms=tonumber(ffi.C.GetTickCount64())-now
+        shared.a11y.finish_render_work()
+        return
+    end
+    if shared.a11y.standings_fast_identity then
+        log("[FLAccess] standings-lightweight exit text-skipped=" .. (shared.a11y.standings_text_skipped or 0)
+            .. " focus-skipped=" .. (shared.a11y.standings_focus_skipped or 0))
+        shared.a11y.standings_fast_identity=nil
+    end
     shared.a11y.profile_reader_phase("texts_ms",shared.a11y.poll_native_texts)
     if shared.a11y.poll_player_search_loading() then shared.a11y.finish_render_work();return end
     shared.a11y.poll_native_country_selection()

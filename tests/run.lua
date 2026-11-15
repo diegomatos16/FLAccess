@@ -2570,7 +2570,7 @@ check("production localization callback cannot announce an unbound future paragr
 end)
 
 check("base release version and local development build remain separate",function()
-    local version, build = modular_state and "0.2.2" or "0.1.9", modular_state and 98 or 42
+    local version, build = modular_state and "0.2.3" or "0.1.9", modular_state and 99 or 42
     assert(upvalue(a11y.start_diagnostic,"VERSION")==version)
     assert(a11y.build==build and a11y.runtime_version==version)
     assert(a11y.overlay_text():find(version,1,true))
@@ -5475,6 +5475,15 @@ check("separate information panel resolves the native player's actual pitch slot
             assert(a11y.engine_focus_speech(node.text,node):find("cartão vermelho",1,true))
             memory[data+0x560+3*16]=0
             assert(not a11y.engine_focus_speech(node.text,node):find("cartão",1,true))
+            memory[base+0x9151e0]=0x7501f883
+            memory[data+0x560+3*16]=1
+            assert(a11y.engine_focus_speech(node.text,node):find("lesionado",1,true))
+            memory[base+0x8e207a],memory[base+0x8e207e]=0x4680b70f,0x83000001
+            memory[0xf00146]=128+63
+            assert(not a11y.engine_focus_speech(node.text,node):find("energia:",1,true))
+            assert(a11y.player_energy_text({object=0xf00000,player_id=1234})=="Energia: 63%")
+            memory[0xf00146]=127
+            assert(not a11y.engine_focus_speech(node.text,node):find("energia:",1,true))
         end
         memory[pitch]=base+0x261f788;memory[data+0x1f8+11]=3
         a11y.roster_limits={[pitch]={root=root,impl=0xc00000,side=0,limit=18}}
@@ -5715,6 +5724,34 @@ check("native player review separates playing style from pitch role and hides un
         memory[data+0xba4]=11;memory[data+0x1f8+11]=3;refresh()
         packet=a11y.player_detail_packet()
         assert(packet.fields[3].text=="Não está no campo.")
+    end)
+end)
+
+check("player exploration places overall before style and energy after pitch position",function()
+    with_native_player_details(function(memory,values,snapshot,refresh,base,data,object)
+        if not modular_state then return end
+        local details=a11y.player_row_details
+        a11y.player_row_details=function(node,explicit)
+            assert(explicit)
+            return {{name="allOver",address=0x120000}}
+        end
+        values[0x120000]="75"
+        memory[base+0x8e207a],memory[base+0x8e207e]=0x4680b70f,0x83000001
+        memory[object+0x146]=63
+        local packet=assert(a11y.player_detail_packet())
+        local order={"name","overall","style","field","energy"}
+        assert(#packet.fields==#order)
+        for i,key in ipairs(order) do assert(packet.fields[i].key==key,"wrong exploration order") end
+        assert(packet.fields[2].text=="Força geral: 75" and packet.fields[5].text=="Energia: 63%")
+        local origin={identity=packet.identity,generation=packet.generation,key="energy",text=packet.fields[5].text}
+        assert(a11y.player_details_allowed(origin))
+        memory[object+0x146]=40
+        assert(not a11y.player_details_allowed(origin),"queued energy cannot survive a changed value")
+        values[0x120000]="--";memory[object+0x146]=127
+        packet=a11y.player_detail_packet()
+        assert(#packet.fields==3 and packet.fields[2].key=="style" and packet.fields[3].key=="field",
+            "unavailable overall and energy are omitted")
+        a11y.player_row_details=details
     end)
 end)
 
@@ -8388,6 +8425,22 @@ check("native standings selection reaches every club while outer cursor remains 
             set_upvalue(module.display_frame,"frame",5202);a11y.poll_structured_record(false);a11y.flush_native_speech(100202)
             assert(#output==21 and output[21][1]:find("Pontos: 8",1,true))
             if modular_state then
+                mem[base+0xe3d127]=0x00d8808b
+                window.cursor_detail={cursor_type=base+0x27c1ac0,item_index=0,selected=0x300000,group=0x210000}
+                mem[0xf000b4],mem[0xf000b8],mem[0xf000bc],mem[0xf000c0]=20,16,0,0
+                for i=0,15 do
+                    mem[0xd000d8]=i
+                    local selected=assert(a11y.standings_row_selection(window,base))
+                    assert(selected.index==i and selected.row==0x300000+i*0x1000
+                        and selected.source=="standings-window-row","window row must win over stationary presentation cursor")
+                end
+                mem[0xf000bc],mem[0xf000c0],mem[0xd000d8]=16,1,15
+                assert(a11y.standings_row_selection(window,base).index==16,"scrolling keeps absolute selection")
+                mem[0xf000bc],mem[0xf000c0],mem[0xd000d8]=0,0,0
+                for _=1,20 do assert(a11y.standings_row_selection(window,base).index==0,"redraw cannot walk through clubs") end
+                mem[base+0xe3d127]=nil;mem[0xd000d8]=nil
+                window.cursor_detail={selected=0x300000,group=0x210000}
+                mem[0xf000b4],mem[0xf000b8]=nil,nil
                 mem[0x210178]=0xe10020 -- Only four rows are physically present.
                 mem[0xf000bc],mem[0xf000c0]=14,11
                 local scrolled=assert(a11y.standings_row_selection(window,base))
@@ -8429,9 +8482,19 @@ check("native standings selection reaches every club while outer cursor remains 
                 assert(current.authoritative_standings and current.entries[1]=="Time: Clube do meio")
                 assert(current.entries[2]=="Posição: 10" and current.entries[3]=="Pontos: 7")
                 assert(current.entries[4]=="Saldo de gols: 2" and current.entries[6]=="Empates: 1")
+                mem[0xd000a0],mem[0xd000d8],mem[base+0xe3d127]=0,0,0x00d8808b
+                local before=#output
                 set_upvalue(module.display_frame,"frame",5300)
                 assert(a11y.poll_structured_record(false));a11y.flush_native_speech(100300)
+                assert(#output==before,"unsettled window row must not interrupt with another club")
+                set_upvalue(module.display_frame,"frame",5301)
+                assert(a11y.poll_structured_record(false));a11y.flush_native_speech(100301)
                 assert(output[#output][1]:find("Clube do meio. Posição: 10",1,true)==1)
+                for i=5302,5310 do
+                    set_upvalue(module.display_frame,"frame",i)
+                    a11y.poll_structured_record(false);a11y.flush_native_speech(100300+i)
+                end
+                assert(#output==before+1,"unchanged standings cannot read clubs on redraw")
                 a11y.read_native_c_string=read_name
             end
         end)
@@ -8597,6 +8660,34 @@ check("stable list refresh avoids full discovery and follows cursor in the same 
         assert(not a11y.native_windows.light and full==1,"unproven cursor retains periodic discovery")
         a11y.read_native_windows_snapshot=discover
         print("LIST_REFRESH stable-full-scans=0 cursor-change-full-scans=0 periodic-full-scans=" .. full)
+    end)
+end)
+
+check("native standings retain lightweight window validation without periodic rediscovery",function()
+    with_fast_list(function(values,base,manager,frame)
+        local old_base=modular_state.process_base_u64
+        modular_state.process_base_u64=ffi.cast("uint64_t",base)
+        local window=a11y.primary_input_window()
+        assert(window)
+        values[window.address]=base+0x2684408
+        values[base+0x2684408+0x18],values[base+0x2684408+0x130]=base+0xaed5d0,base+0xaedf80
+        frame(2001);a11y.native_windows=assert(a11y.read_native_windows(base))
+        local discover,proven,list=a11y.read_native_windows_snapshot,a11y.proven_snapshot_cursor,a11y.native_list_has_focus
+        local full=0
+        a11y.read_native_windows_snapshot=function(...) full=full+1;return discover(...) end
+        a11y.proven_snapshot_cursor=function() return false end
+        a11y.native_list_has_focus=function() return false end
+        for tick=2002,2121 do
+            frame(tick);a11y.native_windows=assert(a11y.read_native_windows(base))
+            assert(a11y.native_windows.light and a11y.native_windows.selection_only)
+        end
+        assert(full==0,"standings repaint must not trigger periodic discovery")
+        values[window.impl+9]=0
+        frame(2122);a11y.read_native_windows(base)
+        assert(full==1,"loss of input ownership still requires rediscovery")
+        a11y.read_native_windows_snapshot,a11y.proven_snapshot_cursor,a11y.native_list_has_focus=discover,proven,list
+        modular_state.process_base_u64=old_base
+        print("STANDINGS_WINDOWS frames=120 full-discoveries=0 ownership-loss=detected")
     end)
 end)
 
@@ -9541,6 +9632,254 @@ check("player radar menu shows counts only in count mode and preserves them",fun
     assert(gameplay.sound_preview_request=="marked")
     a11y.config_path=path
 end)
+end
+
+if modular_state then
+check("standings render reads selection and input without unrelated polling or repaint work",function()
+    local saved={}
+    local function replace(target,key,value)
+        saved[#saved+1]={target=target,key=key,value=target[key]};target[key]=value
+    end
+    local function unexpected() error("standings must not perform general UI work") end
+    local window={address=0x330000,root=0x440000}
+    local snapshot={members={[0x110000]={active=true,owners={{address=window.address,root=window.root,enabled=true}}}}}
+    local input,records,flushes=0,0,0
+    replace(modular_state,"user32",{GetAsyncKeyState=function() return 0 end})
+    replace(modular_state,"game_is_foreground",function() return true end)
+    replace(modular_state,"prism_started",true)
+    replace(modular_state,"overlay_visible",false);replace(modular_state,"sider_overlay_visible",false)
+    replace(modular_state,"process_startup_speech",function() return false end)
+    replace(modular_state,"frame",100)
+    replace(modular_state,"read_u64",function(value) return value end)
+    replace(modular_state,"game_was_foreground",true)
+    replace(a11y,"native_windows",snapshot)
+    replace(a11y,"keyboard_window",nil)
+    replace(a11y,"diagnostic_mode",false)
+    replace(a11y,"render_stats",nil)
+    replace(a11y,"standings_text_skipped",0);replace(a11y,"standings_focus_skipped",0)
+    replace(a11y,"standings_render_owner",nil)
+    replace(a11y,"standings_fast_identity",nil)
+    replace(a11y,"poll_direct_message_update",function() end)
+    replace(a11y,"poll_loading",function() end)
+    replace(a11y,"poll_native_windows",function() end)
+    replace(a11y,"active_native_standings",function() return window end)
+    replace(a11y,"read_context_state",function() return {kind="list"} end)
+    replace(a11y,"poll_attribute_input",function() input=input+1 end)
+    replace(a11y,"poll_structured_record",function() records=records+1;return true end)
+    replace(a11y,"flush_native_speech",function() flushes=flushes+1 end)
+    replace(a11y,"stop_nvda_if_requested",function() end)
+    replace(a11y,"poll_native_texts",unexpected)
+    replace(a11y,"menu_read",unexpected)
+    replace(a11y,"read_msvc_string",unexpected)
+    replace(a11y,"safe_memory_read",unexpected)
+    local registers={rcx=0x110000}
+    for frame=1,100 do
+        module.display_frame({})
+        for i=1,50 do
+            module.on_ui_text_set({},0,registers)
+            module.on_ui_focus_event({},0,registers)
+        end
+    end
+    assert(input==100 and records==100 and flushes==100,"input and selection still update every frame")
+    assert(a11y.standings_text_skipped==5000 and a11y.standings_focus_skipped==5000)
+    assert(not a11y.standings_repaint(0x990000),"another window's events must remain enabled")
+    modular_state.sider_overlay_visible=true
+    assert(not a11y.standings_repaint(0x110000),"overlay keeps normal event handling")
+    modular_state.sider_overlay_visible=false
+    a11y.native_windows={members=snapshot.members}
+    assert(not a11y.standings_repaint(0x110000),"replaced ownership cannot use old repaint scope")
+    for i=#saved,1,-1 do local entry=saved[i];entry.target[entry.key]=entry.value end
+    print("STANDINGS_RENDER frames=100 repaint-callbacks=10000 native-copies-in-callbacks=0 general-text-polls=0")
+end)
+
+check("audio description category switches independently and persists without duplicate keys",function()
+    local path=a11y.config_path
+    a11y.config_path=source_dir .. "/.test-temp/ad-settings-test.ini"
+    local file=assert(io.open(a11y.config_path,"wt"));file:write("custom_setting = keep\nad_replays = true\n");file:close()
+    module.key_down({},0x08)
+    for _=1,8 do
+        if a11y.overlay_text():find("---> Audiodescrição",1,true) then break end
+        module.key_down({},a11y.next_category_key)
+    end
+    assert(a11y.overlay_text():find("---> Audiodescrição",1,true))
+    module.key_down({},0x30)
+    local keys={"enabled","opening","lineups"}
+    assert(not a11y.overlay_text():find("Replays",1,true),"replay research must not be exposed")
+    for i,key in ipairs(keys) do
+        a11y.selected_option=59+i
+        assert(a11y.selected_option_text():find("Ligado",1,true))
+        module.key_down({},a11y.next_value_key)
+        assert(a11y["ad_" .. key]==false and a11y.selected_option_text():find("Desligado",1,true))
+        for j,other in ipairs(keys) do
+            if j>i then assert(a11y["ad_" .. other]==true,"switches must remain independent") end
+        end
+    end
+    for _,key in ipairs(keys) do a11y["ad_" .. key]=true end
+    assert(a11y.load_config())
+    assert(a11y.ad_replays==nil,"obsolete replay INI value cannot enable the feature")
+    file=assert(io.open(a11y.config_path,"rt"));local saved=file:read("*a");file:close()
+    assert(saved:find("custom_setting = keep",1,true))
+    for i,key in ipairs(keys) do
+        assert(a11y["ad_" .. key]==false)
+        local _,count=saved:gsub("ad_" .. key .. " = false","");assert(count==1,"duplicate preference key")
+        a11y.selected_option=59+i
+        module.key_down({},a11y.restore_key)
+        assert(a11y["ad_" .. key]==true)
+    end
+    a11y.config_path=path
+end)
+check("key configuration follows presets and native custom assignments without changing controls",function()
+    local entries={
+        [0x110000]={name="item",text="Mover Jogadores",parent=0x210000},
+        [0x110100]={name="value",text="botão LS",parent=0x210000},
+        [0x120000]={name="item",text="Padrão",parent=0x220000},
+        [0x130000]={name="item",text="Alternativa",parent=0x230000},
+        [0x140000]={name="item",text="Personalizar",parent=0x240000},
+        [0x150000]={name="key",text="botão LT",parent=0x710000},
+        [0x150100]={name="operation",text="Controles manuais",parent=0x710000},
+        [0x160000]={name="key",text="botão X",parent=0x720000},
+        [0x160100]={name="operation",text="Chute",parent=0x720000},
+        [0x170000]={name="control_name_2",text="Controles manuais",parent=0x810000},
+        [0x180000]={name="control_name_0",text="Chute",parent=0x820000},
+        [0x180100]={name="control_name_1",text="Pressão de companheiros COMP.",parent=0x820000},
+    }
+    with_rendered_panel(entries,function(values,snapshot,parents,owner)
+        local base,impl,data=0x140000000,0x900000,0xb00000
+        local old_base=modular_state.process_base_u64
+        modular_state.process_base_u64=ffi.cast("uint64_t",base)
+        local window=snapshot.windows[1];window.impl=impl;window.primary=true
+        local read,name,marker=a11y.menu_read,a11y.widget_internal_name,a11y.native_control_marker
+        local font=a11y.control_font_family
+        local mem={
+            [owner.address]=base+0x2673ff8,[base+0x2673ff8+0x18]=base+0xac1940,
+            [base+0x2673ff8+0x1a8]=base+0xac2860,
+            [owner.address+0x88]=impl,[owner.address+0x90]=0,[owner.address+0x98]=0,
+            [owner.address+0x9c]=0,[owner.address+0xb1]=255,
+            [impl+9]=1,[impl+0x98]=owner.root,[impl+0xa0]=0,[impl+0xd8]=0,
+            [owner.root+0x170]=0xa00000,[owner.root+0x178]=0xa00010,
+            [0xa00000]=0x600000,[0xa00008]=0x610000,
+            [0x600170]=0xa10000,[0x600178]=0xa10020,
+            [0x610170]=0xa20000,[0x610178]=0xa20040,
+            [base+0x3705e10]=0xc00000,[0xc00050]=data,[data+0x33]=0,
+            [base+0x2674278]=5,[base+0x2674278+5*16]=3,
+            [base+0x2673b80]=5,[base+0x2673b84]=0x67000c,
+            [base+0x2673b88]=3,[base+0x2673b8c]=0x670005,
+        }
+        for i=0,3 do mem[0xa10000+i*8]=0x210000+i*0x10000;parents[0x210000+i*0x10000]=0x600000 end
+        for i=0,7 do mem[0xa20000+i*8]=0x710000+i*0x10000;parents[0x710000+i*0x10000]=0x610000 end
+        parents[0x600000],parents[0x610000]=owner.root,owner.root
+        parents[0x810000],parents[0x820000]=owner.root,owner.root
+        a11y.menu_read=function(at,kind) if mem[at]~=nil then return mem[at] end;return read(at,kind) end
+        a11y.widget_internal_name=function(at)
+            if at==0x810000 then return "buttonName_0" end
+            if at==0x820000 then return "buttonName_5" end
+            return name(at)
+        end
+        a11y.native_control_marker=function(kind,letter)
+            assert(kind=="j")
+            if letter=="j" then return "\238\128\135" end
+            if letter=="c" then return "\238\128\131" end
+        end
+        a11y.control_font_family="xbox"
+        assert(a11y.active_key_config()==window)
+        local packet=assert(a11y.key_config_packet())
+        assert(packet.entries[1]=="Mover Jogadores: botão LS")
+        mem[impl+0xd8]=1
+        packet=a11y.key_config_packet()
+        assert(packet.entries[1]=="Padrão, aplicado")
+        mem[impl+0xd8]=2
+        packet=a11y.key_config_packet()
+        assert(packet.entries[1]=="Alternativa, não aplicado")
+        mem[data+0x33]=1
+        assert(a11y.key_config_packet().entries[1]=="Alternativa, aplicado","native applied preset is read, not changed")
+        local detail=assert(a11y.key_config_packet(window,true))
+        assert(#detail.entries==3)
+        assert(detail.entries[2]=="botão LT. Controles manuais")
+        assert(detail.entries[3]=="botão X. Ataque: Chute. Defesa: Pressão de companheiros COMP.")
+        a11y.control_font_family="playstation"
+        detail=a11y.key_config_packet(window,true)
+        assert(detail.entries[2]:find("botão L2.",1,true)==1)
+        assert(detail.entries[3]:find("botão Quadrado.",1,true)==1)
+        a11y.control_font_family="xbox"
+        local caption=a11y.ui_model.nodes[host.memory.hex(0x180100)]
+        assert(a11y.key_config_caption(caption))
+        local prior=modular_state.recent_message_text
+        modular_state.remember_message_text(caption.text,caption.key)
+        assert(modular_state.recent_message_text==prior,"assignment caption must not become a notice")
+        mem[owner.address+0x98],mem[impl+0xa0],mem[impl+0xd8]=1,1,1
+        packet=a11y.key_config_packet()
+        assert(packet.entries[1]=="botão X. Ataque: Chute")
+        mem[owner.address+0x9c]=1;values[0x160100]="Pressão de companheiros COMP."
+        assert(a11y.key_config_packet().entries[1]=="botão X. Defesa: Pressão de companheiros COMP.")
+        mem[owner.address+0xb1],mem[0x710010],mem[impl+0xd8]=0,7,0xffffffff
+        assert(a11y.key_config_packet().entries[1]:find("Marcado para troca",1,true))
+        mem[impl+0xd8],mem[owner.address+0x9c],mem[0x710010],mem[owner.address+0xb1]=1,0,263,255
+        values[0x160100]="Chute"
+        window.cursor_detail={selected=0x720000,group=0x610000,status="resolved"}
+        local old_frame=modular_state.frame
+        with_render_harness(function(output)
+            modular_state.frame=6000
+            a11y.poll_structured_record(false);a11y.flush_native_speech(100000)
+            assert(#output==0,"wait for coherent assignment fields")
+            modular_state.frame=6001
+            a11y.poll_structured_record(false);a11y.flush_native_speech(100001)
+            assert(#output==1 and output[1][1]=="botão X. Ataque: Chute")
+            a11y.read_buffer("first")
+            values[0x160100]="Passe alto"
+            a11y.flush_native_speech(100002)
+            assert(#output==1,"obsolete assignment must not be spoken after a native change")
+        end)
+        modular_state.frame=old_frame
+        mem[owner.address]=base+0x1234
+        assert(not a11y.active_key_config() and not a11y.key_config_caption(caption),"other windows keep ordinary semantics")
+        modular_state.process_base_u64=old_base
+        a11y.menu_read,a11y.widget_internal_name,a11y.native_control_marker=read,name,marker
+        a11y.control_font_family=font
+    end)
+end)
+check("game plan automatic focus excludes overall while exploration can read it",function()
+    with_rendered_panel({[0x110000]={name="playerName",text="João Paulo",parent=0x210000},
+        [0x120000]={name="allOver",text="75",parent=0x210000}},function(values,snapshot)
+        local active=a11y.game_plan_active;a11y.game_plan_active=true
+        snapshot.selected_members={[0x110000]=true,[0x120000]=true};snapshot.cursor_members=snapshot.selected_members
+        local node=a11y.ui_model.nodes[host.memory.hex(0x110000)]
+        assert(not a11y.engine_focus_speech(node.text,node):find("Força geral:",1,true))
+        assert(a11y.player_overall_text(node)=="Força geral: 75")
+        assert(a11y.automatic_detail_deferred(a11y.ui_model.nodes[host.memory.hex(0x120000)]))
+        a11y.game_plan_active=active
+    end)
+end)
+if arg[5] then
+check("owned Football Life compressed control font identifies Xbox and decodes the skip button",function()
+    local file=assert(io.open(arg[5],"rb"));local bytes=file:read("*a");file:close()
+    local font=a11y.control_font_family
+    a11y.control_font_family=nil
+    for offset=0,#bytes-1,8192 do
+        a11y.observe_control_font(bytes:sub(offset+1,math.min(#bytes,offset+8192)),offset,#bytes)
+    end
+    assert(a11y.control_font_family=="xbox")
+    assert(clean_text("\238\128\136")=="botão Menu")
+    assert(clean_text("\238\128\131")=="botão X")
+    with_rendered_panel({
+        [0x110000]={name="text",text="Pular",parent=0x210000},
+        [0x120000]={name="padIcon",text=clean_text("\238\128\136"),parent=0x210000},
+    },function(values,snapshot)
+        local node=a11y.ui_model.nodes[host.memory.hex(0x110000)]
+        local old_hint,old_last=a11y.pending_skip_hint,a11y.skip_hint_last_frame
+        local foreground=a11y.game_is_foreground
+        a11y.game_is_foreground=function() return true end
+        a11y.skip_hint_last_frame=modular_state.frame-10000
+        with_render_harness(function(output)
+            assert(a11y.announce_skip_hint("Pular",node))
+            a11y.poll_skip_hint();a11y.flush_native_speech(100000)
+            assert(#output==1 and output[1][1]=="Pular, botão Menu")
+        end)
+        a11y.pending_skip_hint,a11y.skip_hint_last_frame=old_hint,old_last
+        a11y.game_is_foreground=foreground
+    end)
+    a11y.control_font_family=font
+end)
+end
 end
 
 print("FLACCESS_OFFLINE_TESTS_OK checks=" .. checks ..

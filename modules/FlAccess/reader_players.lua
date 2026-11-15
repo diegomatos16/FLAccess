@@ -363,6 +363,32 @@ function shared.a11y.player_style_text(record)
     return (texts and texts[id]) or (assets and assets[id])
 end
 
+function shared.a11y.player_energy_text(record)
+    local base=tonumber(shared.process_base_u64)
+    if not record or not base or not record.object or not record.player_id
+            or shared.a11y.menu_read(record.object+0x30,"u32")~=record.player_id
+            or shared.a11y.menu_read(base+0x8e207a,"u32")~=0x4680b70f
+            or shared.a11y.menu_read(base+0x8e207e,"u32")~=0x83000001 then return end
+    -- Native 8e2070 supplies remaining energy to setGauge with scale .01.
+    local packed=shared.a11y.menu_read(record.object+0x146,"u16")
+    local value=packed and packed%128
+    if value and value<=100 then
+        return (shared.a11y.ui_language=="pt" and "Energia: " or "Energy: ") .. value .. "%"
+    end
+end
+
+function shared.a11y.player_overall_text(node)
+    for _,detail in ipairs(shared.a11y.player_row_details(node,true)) do
+        if detail.name=="allOver" then
+            local text=shared.a11y.read_native_rendered_text(detail.address)
+            local value=text and tonumber(text)
+            if value and value>=0 and value<=109 and value%1==0 then
+                return (shared.a11y.ui_language=="pt" and "Força geral: " or "Overall rating: ") .. value
+            end
+        end
+    end
+end
+
 function shared.a11y.player_detail_packet()
     local node=shared.a11y.focused_player_node()
     if not node then return nil end
@@ -370,6 +396,8 @@ function shared.a11y.player_detail_packet()
     local pt=shared.a11y.ui_language=="pt"
     local names=shared.a11y.player_position_names[shared.a11y.ui_language] or shared.a11y.player_position_names.en
     local fields={{key="name",text=node.text}}
+    local overall=shared.a11y.player_overall_text(node)
+    if overall then fields[#fields+1]={key="overall",text=overall} end
     local style=shared.a11y.player_style_text(record)
     fields[#fields+1]={key="style",text=style and
         ((pt and "Estilo de jogo: " or "Playing style: ") .. style)
@@ -389,6 +417,8 @@ function shared.a11y.player_detail_packet()
         or record and record.field_position and ((pt and "Posição no campo: " or "Position on the pitch: ") .. names[record.field_position])
         or (pt and "Posição no campo indisponível." or "Position on the pitch unavailable.")
     fields[#fields+1]={key="field",text=field}
+    local energy=shared.a11y.player_energy_text(record)
+    if energy then fields[#fields+1]={key="energy",text=energy} end
     return {node=node,record=record,fields=fields,generation=shared.a11y.read_context_state().generation,
         identity=node.identity .. ":" .. node.text .. ":" .. (shared.a11y.native_caption_selection_identity(node.address) or "")
             .. ":" .. (record and record.identity or "unknown")}
@@ -475,9 +505,18 @@ function shared.a11y.roster_card_speech(roster)
     local object=shared.a11y.menu_read(slot+8,"u64")
     if not object or object<0x10000 or shared.a11y.menu_read(object+0x30,"u32")~=roster.player_id then return "" end
     local status=shared.a11y.menu_read(slot,"u32")
-    if status==4 then return shared.a11y.ui_language=="pt" and ", cartão amarelo" or ", yellow card" end
-    if status==5 then return shared.a11y.ui_language=="pt" and ", cartão vermelho" or ", red card" end
-    return ""
+    local pt=shared.a11y.ui_language=="pt"
+    local details=""
+    -- The native icon renderer selects injury_0 for state 1 (9151e0).
+    if status==1 and shared.a11y.menu_read(base+0x9151e0,"u32")==0x7501f883 then
+        return details .. (pt and ", lesionado" or ", injured")
+    end
+    if shared.a11y.menu_read(slot+4,"u8")==1 and shared.a11y.menu_read(base+0xa6e6b0,"u32")==0x0441b60f then
+        details=details .. (pt and ", lesionado" or ", injured")
+    end
+    if status==4 then return details .. (pt and ", cartão amarelo" or ", yellow card") end
+    if status==5 then return details .. (pt and ", cartão vermelho" or ", red card") end
+    return details
 end
 
 local function roster_limit(window,root,impl,side,data)

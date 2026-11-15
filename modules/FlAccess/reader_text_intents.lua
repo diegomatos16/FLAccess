@@ -51,6 +51,10 @@ shared.a11y.ui_strings = {
         title = "FLAccess %s",
         menu_category = "Fala e leitura",
         announcement_category = "Anúncios",
+        ad_category = "Audiodescrição",
+        ad_enabled = "Audiodescrição",
+        ad_opening = "Cenas de abertura",
+        ad_lineups = "Escalações",
         controlled_player = "Jogador controlado, %s",
         sounds_category = "Sons de acessibilidade",
         radar_category = "Radar de jogadores",
@@ -125,6 +129,10 @@ shared.a11y.ui_strings = {
         title = "FLAccess %s",
         menu_category = "Speech and reading",
         announcement_category = "Announcements",
+        ad_category = "Audio description",
+        ad_enabled = "Audio description",
+        ad_opening = "Opening scenes",
+        ad_lineups = "Lineups",
         controlled_player = "Controlled player, %s",
         sounds_category = "Accessibility sounds",
         radar_category = "Player radar",
@@ -339,6 +347,9 @@ function shared.a11y.load_config()
             shared.a11y.possession_number=value:lower()=="true"
         elseif name=="controlled_player" then
             shared.a11y.controlled_player=value:lower()=="true"
+        elseif name=="ad_enabled" or name=="ad_opening" or name=="ad_lineups" then
+            value=value:lower()
+            shared.a11y[name]=value~="false" and value~="no" and value~="0"
         end
     end
     file:close()
@@ -660,6 +671,9 @@ end
 
 function shared.remember_message_text(text, widget_key)
     local node=widget_key and shared.a11y.ui_model and shared.a11y.ui_model.nodes[widget_key]
+    -- Assignment captions such as "Pressão de companheiros COMP." are
+    -- fields in the typed key editor, not dialogue just because of a period.
+    if shared.a11y.key_config_caption(node) then return end
     if shared.a11y.is_menu_description(node) then return end
     if shared.a11y.is_match_ready_notice(text) and shared.a11y.native_pause_context() then return end
     if not shared.a11y.native_key_allowed(widget_key) then return end

@@ -132,7 +132,8 @@ function shared.a11y.refresh_list_snapshot(base,previous)
     if not previous or not previous.header_checks or not previous.full_frame then return nil,"initial" end
     local selection_only=not shared.a11y.keyboard_window
         and shared.a11y.read_context_state().kind~="dialog"
-        and (shared.a11y.proven_snapshot_cursor(previous,base) or shared.a11y.native_list_has_focus())
+        and (shared.a11y.active_native_standings()~=nil
+            or shared.a11y.proven_snapshot_cursor(previous,base) or shared.a11y.native_list_has_focus())
     if shared.a11y.window_graph_dirty then return nil,"layout" end
     local period=6
     -- MatchMenu can be registered while its root is still being built.

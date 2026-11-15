@@ -1,5 +1,5 @@
 {
-  "version": "0.2.2",
+  "version": "0.2.3",
   "modules": [
     "FlAccess/core.lua",
     "FlAccess/reader_bootstrap.lua",
@@ -31,7 +31,8 @@
     "FlAccess/gameplay_match.lua",
     "FlAccess/gameplay_diagnostics.lua",
     "FlAccess/gameplay_render.lua",
-    "FlAccess/gameplay_lifecycle.lua"
+    "FlAccess/gameplay_lifecycle.lua",
+    "FlAccessOpeningTrace.lua"
   ],
   "reader": [
     "FlAccess/reader_bootstrap.lua",

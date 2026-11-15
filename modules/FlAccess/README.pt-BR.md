@@ -1,8 +1,9 @@
-# FLAccess 0.2.0 — experimental
+# FLAccess 0.2.3 — experimental
 
 Leitor e gameplay pertencem ao mesmo mod. Todos os componentes em
-`components.json` devem carregar na ordem de `sider/sider.ini.snippet`.
-Leitor base obrigatório; nenhuma nova opção de desligamento foi acrescentada.
+`components.json` devem carregar na ordem de `packaging/sider.ini.snippet`.
+Leitor base obrigatório. A extensão experimental de audiodescrição tem opções
+próprias para abertura e escalações. Replays estão desativados internamente; ver `docs/AUDIODESCRICAO-0.2.3.pt-BR.md` na raiz.
 Somente reader_lifecycle registra eventos de leitura/painel; gameplay_lifecycle
 registra atualização e reset da partida. Os outros módulos fornecem serviços.
 

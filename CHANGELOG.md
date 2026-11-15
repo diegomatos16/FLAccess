@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.3 — 2026-11-15
+
+- Suporte inicial à audiodescrição da entrada dos times, cenas de abertura e escalações por setor. Escalações terminam mesmo após a mudança de quadro.
+- Descrição de uniformes ao navegar na seleção; categoria Audiodescrição com opções para abertura e escalações.
+- Audiodescrição de replays desativada internamente, sem opção no painel; código preservado para desenvolvimento futuro.
+- Correção da lentidão e dos saltos de seleção na classificação, confirmada pelo usuário.
+- Overall e energia na exploração do Plano de Jogo; leitura da tela de configuração de comandos e dos botões reconhecidos.
+- Pacote de instalação com apenas content, modules e sider.dll. Veja as [notas da versão](docs/RELEASE-0.2.3.pt-BR.md).
+
 ## 0.2.2 — 2026-11-08
 
 - Áudio espacial alinhado à câmera, radares por distância ou quantidade e aviso de adversário próximo com posse.

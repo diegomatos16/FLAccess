@@ -23,7 +23,7 @@ def merge_settings(base, override):
 
 def migrate_ini(text, entries):
     old_modules={'flaccessreader\\flaccessreader.lua','flaccessgameplay\\flaccessgameplay.lua',
-                 'flaccess.lua','flaccess_gameplay.lua'}
+                 'flaccess.lua','flaccess_gameplay.lua','flaccessopeningtrace.lua'}
     lines=text.splitlines(keepends=True);result=[];inserted=False
     newline='\r\n' if '\r\n' in text else '\n'
     block=''.join('lua.module = "'+p.replace('/','\\')+'"'+newline for p in entries)
@@ -58,6 +58,15 @@ def install(root, sider):
     if (sider/'modules/FlAccess').exists(): shutil.copytree(sider/'modules/FlAccess',backup/'modules/FlAccess')
     if (sider/'content/FlAccess').exists(): shutil.copytree(sider/'content/FlAccess',backup/'content/FlAccess')
     target=sider/'modules/FlAccess'
+    # Standalone runtime extensions also belong to the ordered manifest.
+    for entry in components['modules']:
+        if entry.startswith('FlAccess/'): continue
+        source=root/'modules'/entry;destination=sider/'modules'/entry
+        if destination.exists():
+            saved=backup/'modules'/entry;saved.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copy2(destination,saved)
+        destination.parent.mkdir(parents=True,exist_ok=True)
+        shutil.copy2(source,destination)
     first=not (target/'FlAccess.ini').exists()
     defaults=(root/'modules/FlAccess/FlAccess.ini').read_text(encoding='utf-8')
     if first:

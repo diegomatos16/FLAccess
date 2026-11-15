@@ -69,6 +69,20 @@ function component.install(ctx)
         if work then work.standings_snapshot,work.standings_window=snapshot,found or false end
         return found
     end
+    -- The selected-record adapter reads live table data itself. Repainting
+    -- its owned labels is not a new input event and needs no setter work.
+    function shared.a11y.standings_repaint(address)
+        local scope=shared.a11y.standings_render_owner
+        local snapshot=shared.a11y.native_windows
+        if not scope or scope.frame~=shared.frame or scope.snapshot~=snapshot
+                or shared.a11y.diagnostic_mode or shared.overlay_visible
+                or shared.sider_overlay_visible then return false end
+        local member=snapshot and snapshot.members and snapshot.members[address]
+        for _,owner in ipairs(member and member.owners or {}) do
+            if owner.enabled and owner.address==scope.address and owner.root==scope.root then return true end
+        end
+        return false
+    end
     function shared.a11y.record_contains(node,window,row)
         local address=node and tonumber(node.address)
         local member=address and shared.a11y.native_windows and shared.a11y.native_windows.members[address]
@@ -130,6 +144,171 @@ function component.install(ctx)
         if work and not filter then work.record_nodes=work.record_nodes or {};work.record_nodes[cache_key]=names end
         return names
     end
+    function shared.a11y.active_key_config()
+        local base=tonumber(shared.process_base_u64)
+        local window=base and shared.a11y.primary_input_window()
+        if not window or not window.root or window.root<0x10000
+                or shared.a11y.menu_read(window.address,"u64")~=base+0x2673ff8
+                or shared.a11y.menu_read(base+0x2673ff8+0x18,"u64")~=base+0xac1940
+                or shared.a11y.menu_read(base+0x2673ff8+0x1a8,"u64")~=base+0xac2860 then return end
+        return window
+    end
+
+    function shared.a11y.key_config_caption(node)
+        if not node or not node.name or not (node.name:match("^control_name_[012]$")
+                or node.name=="operation" or node.name=="key") then return false end
+        local window=shared.a11y.active_key_config()
+        return window and shared.a11y.record_contains(node,window,window.root) or false
+    end
+
+    function shared.a11y.key_config_button(slot)
+        local base=tonumber(shared.process_base_u64)
+        if not base or not slot or slot<0 or slot>=8 then return end
+        -- ac2990 uses this row table for the key label and its assignment
+        -- slot. Resolve the actual renderer marker, including keyboard/PS.
+        for row=0,7 do
+            local at=base+0x2673b80+row*8
+            if shared.a11y.menu_read(at,"u32")==slot then
+                local id=shared.a11y.menu_read(at+4,"u32")
+                if not id or id<0x670003 or id>0x67000c then return end
+                local text=shared.clean_text("\17j" .. string.char(0x61+id-0x670003))
+                if text and text~="" then return text end
+            end
+        end
+    end
+
+    function shared.a11y.key_config_diagram(window)
+        local base=tonumber(shared.process_base_u64)
+        local all=shared.a11y.collect_record_nodes(window,window.root,function(name) return name:match("^control_name_[012]$") end)
+        local groups={}
+        local snapshot=shared.a11y.native_windows
+        for name,nodes in pairs(all) do
+            for _,node in ipairs(nodes) do
+                local member=snapshot.members[node.address]
+                for _,owner in ipairs(member and member.owners or {}) do
+                    if owner.enabled and owner.address==window.address and owner.root==window.root then
+                        local at,seen=node.address,{}
+                        for _=1,24 do
+                            if not at or seen[at] then break end
+                            seen[at]=true
+                            local part=shared.a11y.widget_internal_name(at)
+                            local index=part and tonumber(part:match("^buttonName_([0-7])$"))
+                            if index then
+                                groups[index]=groups[index] or {}
+                                if groups[index][name] and groups[index][name]~=node.text then groups[index].ambiguous=true end
+                                groups[index][name]=node.text
+                                break
+                            end
+                            at=owner.parents and owner.parents[at]
+                        end
+                    end
+                end
+            end
+        end
+        local fields={}
+        local pt=shared.a11y.ui_language=="pt"
+        for index=0,7 do
+            local group=groups[index]
+            if group and not group.ambiguous then
+                local slot=shared.a11y.menu_read(base+0x2674278+index*16,"u32")
+                local button=shared.a11y.key_config_button(slot)
+                local single=group.control_name_2
+                local attack,defence=group.control_name_0,group.control_name_1
+                local text=single or attack and defence and ((pt and "Ataque: " or "Attack: ") .. attack
+                    .. ". " .. (pt and "Defesa: " or "Defence: ") .. defence)
+                if text then fields[#fields+1]=(button or (pt and "Botão indisponível" or "Button unavailable")) .. ". " .. text end
+            end
+        end
+        return fields
+    end
+
+    function shared.a11y.key_config_packet(window,detail)
+        window=window or shared.a11y.active_key_config()
+        if not window then return end
+        local read=shared.a11y.menu_read
+        local base=tonumber(shared.process_base_u64)
+        local impl=window.impl or read(window.address+0x88,"u64")
+        if not impl or read(window.address+0x88,"u64")~=impl
+                or read(impl+0x98,"u64")~=window.root or (read(impl+9,"u8") or 0)%2~=1 then return end
+        local mode,phase=read(window.address+0x98,"u32"),read(window.address+0x9c,"u8")
+        local group_index,index=read(impl+0xa0,"u32"),read(impl+0xd8,"u32")
+        if (mode~=0 and mode~=1) or group_index~=mode or index==nil then return end
+        local group=shared.a11y.menu_child(window.root,group_index)
+        if not group then return end
+        local marked
+        if mode==1 then
+            local first=read(window.address+0xb1,"u8")
+            local row=first and first<8 and shared.a11y.menu_child(group,first)
+            local flags=row and read(row+0x10,"u32")
+            -- ac2060/e4b900 find the disabled row while choosing its partner.
+            if flags and flags%8==7 and math.floor(flags/256)%2==0 then marked=first end
+        end
+        if index==0xffffffff and marked then index=marked end
+        local identity=table.concat({"key-config",window.address,window.root,mode,phase or -1,group_index,index,marked or -1},":")
+        local packet={entries={},nodes={},identity=identity,signature=identity,key_config=true,unresolved=true}
+        if index>=(mode==0 and 4 or 8) then return packet end
+        local row=shared.a11y.menu_child(group,index)
+        if not row then return packet end
+        local names=shared.a11y.collect_record_nodes(window,row)
+        local function one(name)
+            local nodes=names[name]
+            return nodes and #nodes==1 and nodes[1].text~="" and nodes[1] or nil
+        end
+        local pt=shared.a11y.ui_language=="pt"
+        local label,text
+        if mode==0 then
+            label=one("item")
+            if not label and index==0 then
+                local candidates={}
+                for _,nodes in pairs(names) do
+                    for _,node in ipairs(nodes) do
+                        if node.text~="" and not shared.a11y.spoken_control_icon(node.text)
+                                and node.text~="direcional" and node.text~="D-pad"
+                                and node.text~="analógico esquerdo" and node.text~="left stick" then
+                            candidates[#candidates+1]=node
+                        end
+                    end
+                end
+                if #candidates==1 then label=candidates[1] end
+            end
+            if not label then return packet end
+            text=label.text
+            if index==0 then
+                local values,seen={},{}
+                for name,nodes in pairs(names) do
+                    if name~="item" then
+                        for _,node in ipairs(nodes) do
+                            if node.text~="" and node.text~=label.text and not seen[node.text] then
+                                seen[node.text]=true;values[#values+1]=node.text
+                            end
+                        end
+                    end
+                end
+                if #values==1 then text=text .. ": " .. values[1] end
+            else
+                local slot=read(window.address+0x90,"u32")
+                local manager=read(base+0x3705e10,"u64")
+                local data=manager and read(manager+0x50,"u64")
+                local preset=data and slot and slot<8 and read(data+slot*0x980+0x33,"u8")
+                if preset and preset<=2 then text=text .. (preset==index-1
+                    and (pt and ", aplicado" or ", applied") or (pt and ", não aplicado" or ", not applied")) end
+            end
+        else
+            local key,operation=one("key"),one("operation")
+            if not key or not operation or (phase~=0 and phase~=1) then return packet end
+            label=key
+            text=key.text .. ". " .. (pt and (phase==0 and "Ataque: " or "Defesa: ")
+                or (phase==0 and "Attack: " or "Defence: ")) .. operation.text
+            if marked==index then text=text .. (pt and ". Marcado para troca" or ". Marked for swapping") end
+        end
+        packet.entries,packet.nodes,packet.unresolved={text},{label},false
+        if detail and mode==0 then
+            for _,field in ipairs(shared.a11y.key_config_diagram(window)) do packet.entries[#packet.entries+1]=field end
+        end
+        packet.signature=identity .. ":" .. table.concat(packet.entries,";")
+        return packet
+    end
+
     function shared.a11y.record_anchor_count(names)
         local count=0
         for _,name in ipairs({"teamNameText","teamName","leagueRank_teamName","date","itemName"}) do
@@ -219,11 +398,23 @@ function component.install(ctx)
         -- e41512..e41532 converts the absolute selection to a visible row.
         local scroll=selector and shared.a11y.menu_read(selector+0xc0,"u32")
         if not scroll or scroll>index then return nil,"scroll" end
+        local data_index=index
+        -- The presentation NodeCursor stays on row zero in the live standings.
+        -- Window::get_select_item (e3d120) owns the actual visible selection;
+        -- e41512 stores absolute selector index minus scroll in Impl+d8.
+        local focus_row=impl and shared.a11y.menu_read(impl+0xd8,"u32")
+        if source=="standings-data-selector" and visible and impl
+                and shared.a11y.menu_read(impl+0xa0,"u32")==0
+                and shared.a11y.menu_read(base+0xe3d127,"u32")==0x00d8808b
+                and focus_row and focus_row<visible and scroll+focus_row<count then
+            index=scroll+focus_row
+            source="standings-window-row"
+        end
         local row=shared.a11y.menu_child(group,index-scroll)
         if row and row<0x10000 then row=nil end
         if not row and source~="standings-data-selector" then return nil,"row" end
         return {row=row or group,rendered_row=row,index=index,count=count,group=group,source=source,first=first,
-            scroll=scroll,selector=selector,total=total,visible=visible,
+            scroll=scroll,selector=selector,total=total,visible=visible,data_index=data_index,focus_row=focus_row,
             identity=window.address .. ":" .. window.root .. ":" .. group .. ":" .. index .. ":" .. (row or group)}
     end
     local function standings_table(window,base,selection)
@@ -347,7 +538,8 @@ function component.install(ctx)
             local selection,reason=shared.a11y.standings_row_selection(window,base)
             local trace=selection and (selection.identity .. ":" .. selection.source
                 .. ":scroll=" .. selection.scroll .. ":visible=" .. tostring(selection.visible)
-                .. ":total=" .. tostring(selection.total)) or tostring(window.address) .. ":" .. tostring(reason)
+                .. ":total=" .. tostring(selection.total) .. ":data-index=" .. tostring(selection.data_index)
+                .. ":focus-row=" .. tostring(selection.focus_row)) or tostring(window.address) .. ":" .. tostring(reason)
             if trace~=shared.a11y.standings_scope_trace and (shared.a11y.standings_scope_trace_count or 0)<96 then
                 shared.a11y.standings_scope_trace=trace
                 shared.a11y.standings_scope_trace_count=(shared.a11y.standings_scope_trace_count or 0)+1
@@ -393,6 +585,9 @@ function component.install(ctx)
         end
         local base=tonumber(shared.process_base_u64)
         local vt=shared.a11y.menu_read(window.address,"u64")
+        local native_standings=base and vt==base+0x2684408
+            and shared.a11y.menu_read(vt+0x18,"u64")==base+0xaed5d0
+            and shared.a11y.menu_read(vt+0x130,"u64")==base+0xaedf80
         local caption=unique("itemName")
         if base and vt==base+0x25b84a8 and caption
                 and (caption.text=="Posse de bola" or caption.text=="Possession" or caption.text=="Ball Possession" or caption.text=="Ball possession") then
@@ -436,7 +631,7 @@ function component.install(ctx)
         local pair_count=0
         local group_fields={}
         local paired={}
-        for _,field in ipairs(not ambiguous and shared.a11y.group_record_fields(names,window) or {}) do
+        for _,field in ipairs(not ambiguous and not native_standings and shared.a11y.group_record_fields(names,window) or {}) do
             local label=field.label.text
             if field.name=="budget_difference" then label=label .. (pt and " — diferença" or " — difference") end
             local pair_key=tostring(field.scope) .. ":" .. tostring(field.parent) .. ":" .. label
@@ -458,9 +653,6 @@ function component.install(ctx)
         local save=base and vt==base+0x2948538
             and shared.a11y.menu_read(vt+0x18,"u64")==base+0x14217c0
             and shared.a11y.menu_read(vt+0x100,"u64")==base+0xca1a50
-        local native_standings=base and vt==base+0x2684408
-            and shared.a11y.menu_read(vt+0x18,"u64")==base+0xaed5d0
-            and shared.a11y.menu_read(vt+0x130,"u64")==base+0xaedf80
         if save then
             local number,caption=unique("thumbailNumber"),unique("text_0")
             fields,nodes={},{}
@@ -517,6 +709,12 @@ function component.install(ctx)
             end
             if work[cache_key]~=nil then return work[cache_key] or nil end
         end
+        local key_config=shared.a11y.active_key_config()
+        if key_config then
+            local packet=shared.a11y.key_config_packet(key_config,shared.a11y.detail_reads_allowed)
+            if work then work[cache_key]=packet or false end
+            return packet
+        end
         if shared.a11y.native_information_context and shared.a11y.native_information_context() then return nil end
         local standings_window=shared.a11y.active_native_standings()
         local list_focused=not standings_window and shared.a11y.native_list_has_focus and shared.a11y.native_list_has_focus()
@@ -540,6 +738,7 @@ function component.install(ctx)
                 if packet and selection then
                     packet.signature=selection.identity .. ":" .. packet.signature
                     packet.authoritative_standings=authoritative
+                    packet.selection_source=selection.source
                 end
                 if list_focused and packet and not packet.dashboard_card and not packet.native_standings then packet=nil end
                 -- Change-only evidence for unresolved components: never invent
@@ -575,14 +774,15 @@ function component.install(ctx)
         local packet=shared.a11y.structured_record_packet()
         if not packet then shared.a11y.structured_record_announced=nil;return false end
         if packet.navigation_only then shared.a11y.structured_record_announced=nil;return true end
-        if packet.native_standings and packet.unresolved then
+        if (packet.native_standings or packet.key_config) and packet.unresolved then
             shared.a11y.standings_observation=nil
             return true
         end
-        if packet.native_standings and not packet.authoritative_standings then
+        if packet.key_config or packet.native_standings and (not packet.authoritative_standings
+                or packet.selection_source=="standings-window-row") then
             -- The renderer updates columns individually. Observe the complete
-            -- packet in another frame before automatically publishing it; do
-            -- not turn each intermediate cell write into an interruption.
+            -- packet and controller selection in another frame before speech;
+            -- scrolling can update its offset and visible row separately.
             local observed=shared.a11y.standings_observation
             if not observed or observed.signature~=packet.signature then
                 shared.a11y.standings_observation={signature=packet.signature,frame=shared.frame}

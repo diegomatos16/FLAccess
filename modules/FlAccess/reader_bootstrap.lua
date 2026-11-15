@@ -7,7 +7,7 @@ function component.install(ctx)
 shared.core_context=ctx.flaccess
 shared.m = {name = "FLAccess"}
 
-shared.VERSION = "0.2.2"
+shared.VERSION = "0.2.3"
 shared.DEBUG_TRACE = false
 shared.RESOLVED_TEXT_RVA = 0x1496a3c
 shared.SLIDER_INIT_RVA = 0xe59f80
@@ -20,7 +20,7 @@ shared.GAME_TEXT_LANGUAGE_SET_RVA = 0xb22a50
 shared.COMMENTARY_LANGUAGE_SET_RVA = 0xb229f0
 shared.GAME_TEXT_LANGUAGE_NAV_RVA = 0xb22871
 shared.a11y = {
-    build = 98,
+    build = 99,
     selection_diagnostic = false,
     runtime_version = shared.VERSION,
     keyboard_echo_insertions = false,
@@ -42,6 +42,9 @@ shared.a11y = {
     diagnostic_mode = false,
     selected_option = 1,
     possession_interval = 5,
+    ad_enabled = true,
+    ad_opening = true,
+    ad_lineups = true,
     possession_number = false,
     controlled_player = false,
     tts_voice = "",

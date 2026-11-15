@@ -1,6 +1,7 @@
 """Read-only contracts against this installed executable, not simulated UI proof."""
 from pathlib import Path
 import os
+import re
 import struct
 import unittest
 
@@ -9,6 +10,34 @@ EXE = Path(os.environ.get("FLACCESS_TEST_EXE", str(Path(__file__).resolve().pare
 
 @unittest.skipUnless(EXE.exists(), "local executable unavailable")
 class NativeContracts(unittest.TestCase):
+    def test_key_configuration_uses_native_modes_rows_and_assignment_slots(self):
+        vt = 0x2673ff8
+        self.assertEqual(self.read_rva(vt + 0x18, 8), struct.pack("<Q", 0x140ac1940))
+        self.assertEqual(self.read_rva(vt + 0x1a8, 8), struct.pack("<Q", 0x140ac2860))
+        self.assertEqual(self.read_rva(0xac21ca, 6), bytes.fromhex("8887a2000000"))
+        self.assertEqual(self.read_rva(0xac2627, 5), bytes.fromhex("e834faffff"))
+        slots = []
+        for index in range(8):
+            slot, key = struct.unpack("<II", self.read_rva(0x2673b80 + index * 8, 8))
+            slots.append(slot)
+            self.assertGreaterEqual(key, 0x670003)
+            self.assertLessEqual(key, 0x67000c)
+        self.assertEqual(sorted(slots), list(range(8)))
+        for index in range(8):
+            pointer, slot = struct.unpack("<QI", self.read_rva(0x2674270 + index * 16, 12))
+            self.assertEqual(self.read_rva(pointer - 0x140000000, 13), ("buttonName_" + str(index)).encode() + b"\0")
+            self.assertIn(slot, slots)
+
+    def test_audio_description_signatures_match_the_executable(self):
+        source = (Path(__file__).resolve().parents[1] /
+                  "modules/FlAccessOpeningTrace.lua").read_bytes()
+        checks = re.findall(rb'\{(0x[0-9a-f]+), "((?:\\x[0-9a-f]{2})+)"\}', source)
+        self.assertTrue(checks, "audio description has no executable guards")
+        for address, literal in checks:
+            with self.subTest(rva=address.decode()):
+                expected = bytes.fromhex(literal.replace(b"\\x", b"").decode())
+                self.assertEqual(self.read_rva(int(address, 16), len(expected)), expected)
+
     @classmethod
     def setUpClass(cls):
         cls.file = EXE.open("rb")
@@ -63,6 +92,11 @@ class NativeContracts(unittest.TestCase):
         self.assertEqual(self.read_rva(0xaedfbd,7),bytes.fromhex('482b8390000000'))
         self.assertEqual(self.read_rva(0xe3d1c1,6),bytes.fromhex('8b80bc000000'))
         self.assertEqual(self.read_rva(0xe3d1a9,3),bytes.fromhex('4533c0'))
+
+    def test_standings_visible_selection_comes_from_window_controller(self):
+        self.assertEqual(self.read_rva(0xe3d120,14),bytes.fromhex('488b81880000008b80d8000000c3'))
+        self.assertEqual(self.read_rva(0xe41512,16),bytes.fromhex('448b87bc000000418bc02b87c0000000'))
+        self.assertEqual(self.read_rva(0xe41532,6),bytes.fromhex('8981d8000000'))
 
     def test_current_career_date_copies_the_native_year_month_day_value(self):
         self.assertEqual(self.read_rva(0x14b6a60,8),bytes.fromhex('488b05a9f32402c3'))

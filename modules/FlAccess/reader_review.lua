@@ -296,6 +296,12 @@ function shared.a11y.collect_buffer_entries()
     -- A review request reads the current rendered panel, including companion
     -- lists, rather than the previous entity's cached captions.
     shared.a11y.poll_native_texts(true)
+    local key_config=shared.a11y.read_context_state().kind~="dialog" and shared.a11y.active_key_config()
+    if key_config then
+        local packet=shared.a11y.key_config_packet(key_config,true)
+        if packet then return packet.entries,{identity=packet.identity,nodes={},record=packet.signature,content=true} end
+        return {},{identity="key-config-unresolved",nodes={},content=true}
+    end
     local primary,ambiguous=shared.a11y.current_review_window()
     if ambiguous and shared.a11y.player_search_context() and shared.a11y.read_context_state().kind~="dialog" then
         return {},{identity="ambiguous-player-panel",nodes={},content=true}
@@ -817,7 +823,7 @@ end
 function shared.a11y.read_buffer(action,quiet_empty)
     if action~="first" and action~="next" and action~="previous" then return false end
     if not shared.game_is_foreground() or shared.overlay_visible or shared.sider_overlay_visible or shared.a11y.keyboard_window then return false end
-    if shared.a11y.read_context_state().kind~="dialog" then
+    if shared.a11y.read_context_state().kind~="dialog" and not shared.a11y.active_key_config() then
         if shared.a11y.read_visualization(action) then return true end
         if shared.a11y.read_player_details(action) then return true end
     end
